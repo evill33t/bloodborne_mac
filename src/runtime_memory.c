@@ -62,7 +62,8 @@ static uint64_t pool_size_bytes(void) {
 #define MAP_NO_OVERWRITE 0x80
 enum { KIND_RESERVED=1, KIND_DIRECT, KIND_FLEXIBLE };
 typedef struct { uint64_t start, size; int type, used; } Block;
-typedef struct { uintptr_t start, end; int kind, prot, type; uint64_t phys; } Vma;
+typedef struct { uintptr_t start, end; int kind, prot, type; uint64_t phys, identity; } Vma;
+static uint64_t next_mapping_identity;
 typedef struct {
     uintptr_t start, end; uint64_t offset; int32_t protection, memory_type;
     uint32_t flags; char name[32];
@@ -490,7 +491,7 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) return NO_MEMORY;
     void *mapped=(void *)address;
     drop_range(address,address+size);
-    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys})) return NO_MEMORY;
+    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys,++next_mapping_identity})) return NO_MEMORY;
     if (kind==KIND_FLEXIBLE) flexible_bytes+=size;
     if (kind!=KIND_RESERVED) queue_hook(HOOK_MAP,address,size);
     *inout=mapped;
@@ -818,6 +819,34 @@ void *runtime_gpu_memory_backing(void) {
 uint64_t runtime_gpu_memory_generation(void) {
     return __atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
 }
+int runtime_gpu_label_capture(uintptr_t address,uint32_t bytes,BbGpuLabel *label) {
+    if (!label || (bytes!=4 && bytes!=8) || address%bytes || address>UINTPTR_MAX-bytes) return 0;
+    read_lock();
+    size_t i=vma_index(address);
+    int ok=i<vma_count && vmas[i].start<=address && bytes<=vmas[i].end-address &&
+        vmas[i].kind!=KIND_RESERVED && (vmas[i].prot & 0x33);
+    if (ok) *label=(BbGpuLabel){address,vmas[i].identity,bytes};
+    read_unlock();return ok;
+}
+static int gpu_label_access(const BbGpuLabel *label,uint64_t *value,int store) {
+    if (!label || !value || (label->bytes!=4 && label->bytes!=8) || label->address%label->bytes) return 0;
+    read_lock();
+    size_t i=vma_index(label->address);
+    int ok=i<vma_count && vmas[i].start<=label->address && label->bytes<=vmas[i].end-label->address &&
+        vmas[i].identity==label->identity && vmas[i].kind!=KIND_RESERVED &&
+        (vmas[i].prot & (store ? 0x22 : 0x33));
+    if (ok && backing_base) {
+        unsigned char *p=backing_base+vmas[i].phys+(label->address-vmas[i].start);
+        if (store) {
+            if (label->bytes==8) __atomic_store_n((uint64_t*)p,*value,__ATOMIC_RELEASE);
+            else __atomic_store_n((uint32_t*)p,(uint32_t)*value,__ATOMIC_RELEASE);
+        } else *value=label->bytes==8 ? __atomic_load_n((uint64_t*)p,__ATOMIC_ACQUIRE) :
+            __atomic_load_n((uint32_t*)p,__ATOMIC_ACQUIRE);
+    } else ok=0;
+    read_unlock();return ok;
+}
+int runtime_gpu_label_load(const BbGpuLabel *label,uint64_t *value) {return gpu_label_access(label,value,0);}
+int runtime_gpu_label_store(const BbGpuLabel *label,uint64_t value) {return gpu_label_access(label,&value,1);}
 size_t runtime_gpu_memory_mappings(BbDirectMapping *out,size_t capacity) {
     read_lock();
     size_t count=0;
@@ -921,7 +950,7 @@ int runtime_memory_checkpoint_restore(const BbCheckpointMemoryLayout *layout,
     for (;mapped<layout->vma_count;++mapped) {
         const BbCheckpointMemoryVma *v=&saved_vmas[mapped];
         if (host_map((uintptr_t)v->start,v->size,host_prot(v->protection),v->kind==KIND_RESERVED,v->physical)) break;
-        new_vmas[mapped]=(Vma){(uintptr_t)v->start,(uintptr_t)(v->start+v->size),(int)v->kind,v->protection,v->type,v->physical};
+        new_vmas[mapped]=(Vma){(uintptr_t)v->start,(uintptr_t)(v->start+v->size),(int)v->kind,v->protection,v->type,v->physical,++next_mapping_identity};
     }
     if (mapped!=layout->vma_count) {
         for (unsigned i=0;i<mapped;++i) (void)host_unmap(new_vmas[i].start,new_vmas[i].end-new_vmas[i].start);

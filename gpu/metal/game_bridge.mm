@@ -293,6 +293,10 @@ extern "C" uintptr_t bbgpu_resolve(const char* name) {
     return uintptr_t(Hle::Lookup({},std::string_view(name,end ? size_t(end-name) : strlen(name))));
 }
 extern "C" unsigned bbgpu_symbol_count(void) { return unsigned(symbols.size()); }
+extern "C" int bbmetal_wait_gpu_label(std::uint64_t address,std::uint64_t reference,unsigned compare,std::uint64_t budget) {
+    return Gpu::Liverpool::Instance().WaitLabel(address,reference,8,compare,~0ull,
+        std::chrono::steady_clock::now()+std::chrono::microseconds(std::min<std::uint64_t>(budget,250)));
+}
 extern "C" int bbgpu_handle_fault(void*,void*) { return 0; }
 extern "C" void bbgpu_dump_guest_writes(void*) {}
 extern "C" void bbnet_configure(const char*,const char*,const char*,const char*) { MacNetwork::Register(); }
@@ -388,6 +392,14 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
             input.Tick(MacSettings::CapturesInput.load() || MacAchievements::CapturesInput.load());
             if (MacFeatures::TakeSettings(settings)) apply_settings();
             if (ready.load(std::memory_order_acquire)) {
+                if(renderer->Execution()->Failed()) {
+                    const auto error=renderer->Execution()->Error();
+                    std::fprintf(stderr,"[Metal failure] %s\n",error.c_str());
+                    frame_handoff.Acknowledge();
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"Bloodborne graphics stopped",
+                        "Graphics processing could not continue. Close and relaunch Bloodborne. Details were written to the launch log.",window);
+                    _Exit(1);
+                }
                 if (!presenter) {
                     presenter=std::make_unique<Gpu::Metal::Presenter>(*device,SDL_Metal_GetLayer(view),Gpu::Metal::PresenterConfig{});
                     int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);

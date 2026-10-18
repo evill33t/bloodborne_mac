@@ -208,10 +208,12 @@ extern "C" int bbgpu_input_reload_requested() {
     std::scoped_lock lock(s.mutex);
     return std::exchange(s.reload,false);
 }
-extern "C" void bbgpu_mouse_camera_configure(int direct,float) {
+extern "C" void bbgpu_mouse_camera_configure(int direct,float,float,float,int) {
     // Preserve configured mouse-to-stick input when the optional Windows
     // direct-camera patch is requested; no unverified guest hooks on Darwin.
     static std::atomic<bool> reported{false};
     if (direct && !reported.exchange(true))
         std::fprintf(stderr,"Metal input: direct-camera mode uses the configured mouse-to-stick mapping.\n");
 }
+extern "C" int bbgpu_audio_muted(void) {return 0;}
+extern "C" void bbgpu_prompts_configure(const char *const*,int) {}

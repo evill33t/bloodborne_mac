@@ -25,6 +25,8 @@ int bbgpu_overlay_captures_input(void) { return 0; }
 void bbgpu_mouse_take(BbMouseInput *out) { memset(out,0,sizeof(*out)); }
 void bbgpu_input_configure(int a,int32_t b,int32_t c) { (void)a;(void)b;(void)c; }
 int bbgpu_input_reload_requested(void) { return 0; }
-void bbgpu_mouse_camera_configure(int a,float b) { (void)a;(void)b; }
+void bbgpu_mouse_camera_configure(int a,float b,float x,float y,int sync) { (void)a;(void)b;(void)x;(void)y;(void)sync; }
+int bbgpu_audio_muted(void) { return 0; }
+void bbgpu_prompts_configure(const char *const *inputs,int count) { (void)inputs;(void)count; }
 unsigned bbgpu_symbol_count(void) { return 0; }
 int vulkan_smoke(void) { return -1; }

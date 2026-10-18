@@ -27,6 +27,7 @@ void decomp_flag_store_add();
 namespace MacFeatures {
 void InstallGameMenu(ElfImage* image);
 void InstallGraphics(ElfImage* image);
+void InstallGpuFenceWaits(ElfImage* image);
 namespace { ElfImage game_image; std::atomic<bool> debug_toggle{false}; }
 void RequestDebugToggle() { debug_toggle=true; }
 bool TakeDebugToggle() { return debug_toggle.exchange(false); }
@@ -55,6 +56,7 @@ void Install() {
     // Debug text redirects LEA instructions inside the camera patch sites.
     // Validate/install timing first, as upstream's graphics pass does.
     frame_rate_install(&game_image);
+    InstallGpuFenceWaits(&game_image);
     plugins_image(&game_image);
     patch_manifests_apply(&game_image);
     debug_menu_install(&game_image);

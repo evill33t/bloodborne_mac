@@ -9,6 +9,12 @@ typedef struct { uintptr_t start; uint64_t size,physical; } BbDirectMapping;
 uint64_t runtime_gpu_memory_size(void);
 void *runtime_gpu_memory_backing(void);
 uint64_t runtime_gpu_memory_generation(void);
+/* Aligned 32/64-bit GPU labels. Identity survives splits/protection changes,
+ * but not unmap/reuse. Access holds the map lock and uses the backing alias. */
+typedef struct { uintptr_t address; uint64_t identity; uint32_t bytes; } BbGpuLabel;
+int runtime_gpu_label_capture(uintptr_t address,uint32_t bytes,BbGpuLabel *label);
+int runtime_gpu_label_load(const BbGpuLabel *label,uint64_t *value);
+int runtime_gpu_label_store(const BbGpuLabel *label,uint64_t value);
 size_t runtime_gpu_memory_mappings(BbDirectMapping *out,size_t capacity);
 int runtime_gpu_memory_allocate(uint64_t start,uint64_t end,uint64_t size,uint64_t alignment,int type,uint64_t *physical);
 int runtime_gpu_memory_map(uintptr_t *address,uint64_t size,int prot,int flags,uint64_t physical,uint64_t alignment);

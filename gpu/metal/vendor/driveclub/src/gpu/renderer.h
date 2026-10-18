@@ -14,6 +14,8 @@
 #include <functional>
 #include <chrono>
 #include <string>
+#include <memory>
+#include "gpu/metal/gpu_execution.h"
 
 namespace Gpu {
 
@@ -47,6 +49,7 @@ struct FlipInfo {
 class Renderer {
 public:
     virtual ~Renderer() = default;
+    std::shared_ptr<ExecutionState> Execution() const { return execution; }
 
     // Draws using the current guest register state.
     virtual void Draw(const Liverpool::RegFile& regs, const DrawCall& draw) = 0;
@@ -94,6 +97,8 @@ public:
     // The 64 KB global data share, shared by shaders and CP DMA (call WaitIdle
     // before reading what shaders wrote).
     virtual std::uint8_t* Gds() = 0;
+private:
+    std::shared_ptr<ExecutionState> execution=std::make_shared<ExecutionState>();
 };
 
 } // namespace Gpu

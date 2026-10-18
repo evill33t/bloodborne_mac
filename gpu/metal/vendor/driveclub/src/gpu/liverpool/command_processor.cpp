@@ -15,6 +15,7 @@
 #include "core/memory.h"
 #include "gpu/renderer.h"
 #include "gpu/metal/command_validation.h"
+#include "gpu/metal/guest_label.h"
 
 namespace Gpu::Liverpool {
 
@@ -113,11 +114,50 @@ void CommandProcessor::ClearState() {
 }
 
 CommandProcessor::~CommandProcessor() {
+    stopping=true;execution->Notify();
     for (auto& r : rings) {
         if (r) {
             r->thread.request_stop();
             r->cv.notify_all();
         }
+    }
+    for (auto& r:rings) if(r && r->thread.joinable()) r->thread.join();
+    std::lock_guard guard(callback_gate->lock);callback_gate->alive=false;
+}
+
+void CommandProcessor::SetRenderer(Gpu::Renderer* r) {
+    renderer=r;if(r) execution=r->Execution();
+}
+void CommandProcessor::Fail(const std::string& reason) {
+    if(execution->Fail(reason)) DC_ERROR("gpu: %s",reason.c_str());
+}
+bool CommandProcessor::WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare,u64 mask,
+    std::chrono::steady_clock::time_point deadline,bool fatal_timeout) {
+    Metal::GuestLabel label;
+    if(!label.Capture(address,bytes)) {Fail("GPU wait refers to an invalid label at "+std::to_string(address));return false;}
+    const auto matches=[&](u64 v) {
+        v&=mask;
+        switch(compare) {
+        case 0:return true;case 1:return v<reference;case 2:return v<=reference;
+        case 3:return v==reference;case 4:return v!=reference;case 5:return v>=reference;case 6:return v>reference;
+        default:return false;
+        }
+    };
+    for(;;) {
+        const auto epoch=execution->Epoch();
+        if(execution->Failed() || stopping) return false;
+        u64 value=0;
+        if(!label.Load(value)) {Fail("GPU wait label was unmapped or reused at "+std::to_string(address));return false;}
+        if(matches(value)) return true;
+        const auto now=std::chrono::steady_clock::now();
+        if(now>=deadline) {
+            if(fatal_timeout) Fail("GPU fence wait timed out at "+std::to_string(address)+
+                " value="+std::to_string(value)+" reference="+std::to_string(reference));
+            return false;
+        }
+        // External CPU stores have no GPU callback. Periodic rechecks retain
+        // that protocol while GPU-completed labels wake immediately.
+        execution->Wait(epoch,std::min(deadline,now+std::chrono::microseconds(250)));
     }
 }
 
@@ -138,7 +178,8 @@ CommandProcessor::Ring& CommandProcessor::GetRing(u32 index) {
 
 void CommandProcessor::Push(u32 index, Job job) {
     std::unique_lock admission(admission_lock);
-    admission_changed.wait(admission,[&]{return !checkpoint_paused;});
+    admission_changed.wait(admission,[&]{return !checkpoint_paused || execution->Failed() || stopping;});
+    if(execution->Failed() || stopping) return;
     Ring& r = GetRing(index);
     {
         std::scoped_lock lk(r.lock);
@@ -175,6 +216,7 @@ void CommandProcessor::ResumeAfterCheckpoint() {
     std::lock_guard lock(admission_lock);checkpoint_paused=false;admission_changed.notify_all();
 }
 bool CommandProcessor::PauseForCheckpoint(CheckpointState& out,std::chrono::steady_clock::time_point deadline,std::string& error) {
+    if(execution->Failed()){error=execution->Error();return false;}
     {
         std::lock_guard lock(admission_lock);
         if(checkpoint_paused){error="GPU checkpoint is already paused.";return false;}
@@ -256,19 +298,24 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
                 }
                 ce.ce_counter = ce.de_counter = 0;
             }
+            if(execution->Failed() || stopping) break;
             Execute(buf.dcb, ring.index != 0, 0);
             if (ring.index == 0) {
                 RunConstantEngine([] { return false; }); // whatever the CE has left
             }
         }
-        if (job.after) {
+        if (job.after && !execution->Failed() && !stopping) {
             job.after();
         }
-        if (flip_label.addr || flip_label.interrupt) {
+        if (!execution->Failed() && (flip_label.addr || flip_label.interrupt)) {
             const FlipLabel label = flip_label;
-            AfterGpu([label, this] {
+            Metal::GuestLabel destination;
+            const bool valid=!label.addr || destination.Capture(label.addr,4);
+            if(!valid) Fail("Invalid GPU flip-label destination");
+            AfterGpu([label, destination, this] {
                 if (label.addr) {
-                    *Ptr<u32>(static_cast<u32>(label.addr), static_cast<u32>(label.addr >> 32)) = label.value;
+                    if(!destination.Store(label.value)) {Fail("GPU flip-label mapping expired");return;}
+                    execution->Notify();
                 }
                 if (label.interrupt) {
                     Interrupt(kIrqGfxEop);
@@ -299,37 +346,51 @@ void CommandProcessor::SetRegs(u32 index, const u32* values, u32 count) {
 }
 
 void CommandProcessor::AfterGpu(std::function<void()> fn) {
+    auto guarded=[gate=callback_gate,state=execution,fn=std::move(fn)] {
+        std::lock_guard guard(gate->lock);
+        if(gate->alive && !state->Failed()) fn();
+    };
     if (renderer) {
-        renderer->Signal(std::move(fn));
+        renderer->Signal(std::move(guarded));
     } else {
-        fn();
+        guarded();
     }
 }
 
 void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq) {
+    Metal::GuestLabel destination;
+    const u32 bytes=data_sel==kData32 ? 4 : data_sel==kDataNone ? 0 : 8;
+    if(bytes && !destination.Capture(addr,bytes)) {Fail("Invalid GPU fence destination at "+std::to_string(addr));return;}
+    u64 ticket=0;
     if (data_sel == kData32 || data_sel == kData64) {
         std::scoped_lock lk(fence_lock);
-        pending_fences[addr] = lo;
+        ticket=++next_fence_ticket;
+        const u32 ring=t_ring ? t_ring->index : 0;
+        pending_fences[addr] = {lo,ticket,ring};
         if (data_sel == kData64) {
-            pending_fences[addr + 4] = hi;
+            pending_fences[addr + 4] = {hi,ticket,ring};
         }
     }
     AfterGpu([=, this] {
-        WriteFence(data_sel, static_cast<u32>(addr), static_cast<u32>(addr >> 32), lo, hi);
+        u64 value=u64(lo)|(u64(hi)<<32);
+        if(data_sel==kGpuClock) value=GpuClock();
+        if(data_sel==kPerfCounter) value=__rdtsc();
+        if(bytes && !destination.Store(value)) {Fail("GPU fence destination was unmapped or reused at "+std::to_string(addr));return;}
         if (data_sel == kData32 || data_sel == kData64) {
             std::scoped_lock lk(fence_lock);
             // A later write to the same label may still be on its way.
             auto it = pending_fences.find(addr);
-            if (it != pending_fences.end() && it->second == lo) {
+            if (it != pending_fences.end() && it->second.ticket == ticket) {
                 pending_fences.erase(it);
             }
             if (data_sel == kData64) {
                 it = pending_fences.find(addr + 4);
-                if (it != pending_fences.end() && it->second == hi) {
+                if (it != pending_fences.end() && it->second.ticket == ticket) {
                     pending_fences.erase(it);
                 }
             }
         }
+        execution->Notify();
         if (irq) {
             Interrupt(irq);
         }
@@ -339,17 +400,21 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
 bool CommandProcessor::PendingFence(u64 addr, u32* value) {
     std::scoped_lock lk(fence_lock);
     auto it = pending_fences.find(addr);
-    if (it == pending_fences.end()) {
+    if (it == pending_fences.end() || it->second.ring!=(t_ring ? t_ring->index : 0)) {
         return false;
     }
-    *value = it->second;
+    *value = it->second.value;
     return true;
 }
 
-void CommandProcessor::SyncRenderer() {
+bool CommandProcessor::SyncRenderer() {
     if (renderer) {
-        renderer->WaitIdle();
+        std::string error;
+        if(!renderer->WaitIdleUntil(std::chrono::steady_clock::now()+std::chrono::seconds(10),error)) {
+            Fail("GPU dependency failed: "+error);return false;
+        }
     }
+    return !execution->Failed();
 }
 
 void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
@@ -451,6 +516,9 @@ void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first
 
 // Indirect draw/dispatch arguments live at the SET_BASE address + offset.
 const u32* CommandProcessor::IndirectArgs(u32 offset, u32 dwords) {
+    // These arguments are read by the CPU. A predicted pending fence is not
+    // sufficient: commit GPU producers and wait before reading their bytes.
+    if(!SyncRenderer()) return nullptr;
     const Ring* ring = t_ring;
     const u64 addr = (ring ? ring->indirect_base : 0) + offset;
     if (!addr || addr<offset || !Mapped(reinterpret_cast<const void*>(addr),u64(dwords)*4)) {
@@ -474,6 +542,7 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
 
     const u32* recent[4] = {}; // last packets, for desync reports
     while (p < end) {
+        if(execution->Failed() || stopping) return;
         const u32 header = *p;
         const u32 type = HeaderType(header);
         if (type == 3) {
@@ -634,7 +703,7 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
                 }
                 break;
             }
-            SyncRenderer(); // the GPU may still be producing what we copy
+            if(!SyncRenderer()) return; // the GPU may still be producing what we copy
             if (src_sel == 2) {
                 for (u32 k = 0; k + 4 <= bytes; k += 4) {
                     std::memcpy(dst + k, &body[1], 4);
@@ -654,28 +723,21 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
             const u32 ref = body[3];
             const u32 mask = body[4];
             if (memory) {
-                const volatile u32* addr = Ptr<const u32>(body[1] & ~3u, body[2]);
-                if (!Mapped(const_cast<const u32*>(addr),4)) { ++stats.malformed_packets; break; }
-                if (Compare(func, *addr & mask, ref)) {
+                const u64 address=u64(body[1]&~3u)|(u64(body[2])<<32);
+                Metal::GuestLabel label;u64 value=0;
+                if(!label.Capture(address,4) || !label.Load(value)) {Fail("Invalid WAIT_REG_MEM label");return;}
+                if (Compare(func, u32(value) & mask, ref)) {
                     break;
                 }
                 u32 pending = 0;
-                if (PendingFence(reinterpret_cast<u64>(addr), &pending) && Compare(func, pending & mask, ref)) {
+                if (PendingFence(address, &pending) && Compare(func, pending & mask, ref)) {
                     break;
                 }
                 // Whatever produces the value may sit in recorded host work.
                 if (renderer) {
                     renderer->OnSubmit();
                 }
-                u32 iters = 0;
-                while (!Compare(func, *addr & mask, ref)) {
-                    if (++iters > 1000000) {
-                        DC_WARN("gpu: WaitRegMem timeout (addr=%p val=%#x ref=%#x mask=%#x func=%u)",
-                                addr, *addr, ref, mask, func);
-                        break;
-                    }
-                    sched_yield();
-                }
+                if(!WaitLabel(address,ref,4,func,mask,std::chrono::steady_clock::now()+std::chrono::seconds(5),true)) return;
             }
             break;
         }

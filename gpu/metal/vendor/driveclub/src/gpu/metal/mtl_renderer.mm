@@ -298,6 +298,8 @@ struct MetalRenderer::Impl {
   std::atomic<u64> upload_allocations{0};
   std::vector<id<MTLBuffer>> chunks;
   id<MTLBuffer> chunk = nil;
+  std::shared_ptr<Gpu::ExecutionState> execution;
+  u64 submission_id=0,last_vs=0,last_ps=0,last_cs=0;
   u64 chunk_off = 0;
   u32 work_since_commit = 0; // draws + dispatches in the open command buffer
   static constexpr u32 kCommitEvery = 400;
@@ -1014,6 +1016,18 @@ struct MetalRenderer::Impl {
         gpu_ns += static_cast<u64>((c.GPUEndTime - c.GPUStartTime) * 1e9);
       }];
     }
+    const auto state=execution;
+    const std::string context="Metal submission "+std::to_string(++submission_id)+
+        " frame="+std::to_string(frame_count)+" vs="+Hex(last_vs)+" ps="+Hex(last_ps)+" cs="+Hex(last_cs);
+    cmd.label=@(context.c_str());
+    [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+      if(completed.status==MTLCommandBufferStatusError) {
+        const char* detail=completed.error.localizedDescription.UTF8String;
+        const auto message=context+": "+(detail ? detail : "command execution failed");
+        if(state->Fail(message)) DC_ERROR("gpu: %s",message.c_str());
+      }
+      state->Notify();
+    }];
     [cmd commit];
     last_committed = cmd;
     cmd = nil;
@@ -1172,6 +1186,7 @@ struct MetalRenderer::Impl {
       std::function<void()> fn;
       {
         std::scoped_lock lk(signal_lock);
+        if(execution->Failed()) {signal_queue.clear();signals_changed.notify_all();return;}
         if (signal_queue.empty() || signal_queue.front().first > reached) {
           return;
         }
@@ -4171,6 +4186,7 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
 }
 
 MetalRenderer::MetalRenderer(Device &device) : impl(std::make_unique<Impl>()) {
+  impl->execution=Execution();
   impl->device = (__bridge id<MTLDevice>)device.Handle();
   impl->queue = (__bridge id<MTLCommandQueue>)device.Queue();
   impl->Init();
@@ -4183,6 +4199,9 @@ MetalRenderer::~MetalRenderer() {
 
 void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
   std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed()) return;
+  impl->last_vs=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_VS);
+  impl->last_ps=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_PS);
   @autoreleasepool {
     impl->Draw(regs, draw);
     if (impl->profile && !impl->profile_passes) {
@@ -4198,6 +4217,8 @@ void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
 void MetalRenderer::Dispatch(const RegFile &regs, std::uint32_t x,
                              std::uint32_t y, std::uint32_t z) {
   std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed()) return;
+  impl->last_cs=regs.ProgramAddr(Liverpool::Reg::COMPUTE_PGM_LO);
   @autoreleasepool {
     impl->Dispatch(regs, x, y, z);
     if (impl->profile) {
@@ -4226,6 +4247,7 @@ void MetalRenderer::WaitIdle() {
   }
 }
 bool MetalRenderer::WaitIdleUntil(std::chrono::steady_clock::time_point deadline,std::string& error) {
+  if(Execution()->Failed()){error=Execution()->Error();return false;}
   // In particular, do not block the UI behind a Flip whose presentation has
   // not been acknowledged. The caller runs on a separate checkpoint worker.
   std::unique_lock<std::mutex> lock(impl->lock,std::defer_lock);
@@ -4241,10 +4263,12 @@ bool MetalRenderer::WaitIdleUntil(std::chrono::steady_clock::time_point deadline
       if (std::chrono::steady_clock::now()>=deadline) {error="Metal work did not complete before the checkpoint timeout.";return false;}
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    if(Execution()->Failed()){error=Execution()->Error();return false;}
     std::unique_lock signals(impl->signal_lock);
     if (!impl->signals_changed.wait_until(signals,deadline,[&] {
-      return impl->signal_queue.empty() && !impl->active_signals;
+      return Execution()->Failed() || (impl->signal_queue.empty() && !impl->active_signals);
     })) {error="GPU fence callbacks did not finish before the checkpoint timeout.";return false;}
+    if(Execution()->Failed()){error=Execution()->Error();return false;}
     impl->last_committed=nil;
     impl->arena_released.store(impl->arena_head,std::memory_order_release);
     error.clear();return true;
@@ -4255,6 +4279,7 @@ bool MetalRenderer::WaitIdleUntil(std::chrono::steady_clock::time_point deadline
 
 void MetalRenderer::Signal(std::function<void()> done) {
   std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed()) return;
   @autoreleasepool {
     impl->Signal(std::move(done));
   }
@@ -4262,6 +4287,7 @@ void MetalRenderer::Signal(std::function<void()> done) {
 
 void MetalRenderer::Flip(const FlipInfo &flip) {
   std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed()) return;
   @autoreleasepool {
     impl->Flip(flip);
   }

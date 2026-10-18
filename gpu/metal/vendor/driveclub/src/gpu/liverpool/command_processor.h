@@ -23,6 +23,7 @@
 #include "common/types.h"
 #include "gpu/liverpool/pm4.h"
 #include "gpu/liverpool/registers.h"
+#include "gpu/metal/gpu_execution.h"
 
 namespace Gpu {
 class Renderer;
@@ -85,8 +86,12 @@ public:
     bool RestoreCheckpoint(const CheckpointState&,std::string& error);
 
     void SetInterruptHandler(std::function<void(u32 irq)> handler) { on_irq = std::move(handler); }
-    void SetRenderer(Gpu::Renderer* r) { renderer = r; }
+    void SetRenderer(Gpu::Renderer* r);
     Gpu::Renderer* GetRenderer() const { return renderer; }
+    std::shared_ptr<Gpu::ExecutionState> Execution() const { return execution; }
+    // Bounded CPU-side label wait; never infers success from a queued write.
+    bool WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare,u64 mask,
+        std::chrono::steady_clock::time_point deadline,bool fatal_timeout=false);
 
     const Stats& GetStats() const { return stats; }
     const RegFile& Regs() const { return regs; }
@@ -133,7 +138,7 @@ private:
     static thread_local Ring* t_ring;
     static thread_local Liverpool::RegFile* t_regs;
     const u32* IndirectArgs(u32 offset, u32 dwords);
-    void SyncRenderer();
+    bool SyncRenderer();
     // Runs `fn` once the renderer has executed everything recorded so far.
     void AfterGpu(std::function<void()> fn);
     // AfterGpu for a fence/label write (`data_sel` as in EVENT_WRITE_EOP),
@@ -141,6 +146,7 @@ private:
     void FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq);
     // Value a recorded but not yet executed fence write will put at `addr`.
     bool PendingFence(u64 addr, u32* value);
+    void Fail(const std::string& reason);
     void ClearState();
     // Runs the CE until `done()` holds, it blocks on the DE, or its CCB ends.
     void RunConstantEngine(const std::function<bool()>& done);
@@ -161,6 +167,10 @@ private:
         bool interrupt = false;
     } flip_label;
     Gpu::Renderer* renderer = nullptr;
+    std::shared_ptr<Gpu::ExecutionState> execution=std::make_shared<Gpu::ExecutionState>();
+    std::atomic<bool> stopping{false};
+    struct CallbackGate {std::mutex lock;bool alive=true;};
+    std::shared_ptr<CallbackGate> callback_gate=std::make_shared<CallbackGate>();
     Stats stats;
     std::function<void(u32)> on_irq;
 
@@ -168,7 +178,9 @@ private:
     // waits for a value one of these writes will produce only waits for work
     // that is already ahead of it: the wait is satisfied without a round trip.
     std::mutex fence_lock;
-    std::unordered_map<u64, u32> pending_fences; // dword address -> value
+    struct PendingWrite {u32 value;u64 ticket;u32 ring;};
+    std::unordered_map<u64, PendingWrite> pending_fences;
+    u64 next_fence_ticket=0;
 
     std::mutex rings_lock;
     std::vector<std::unique_ptr<Ring>> rings;

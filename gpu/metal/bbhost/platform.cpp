@@ -260,3 +260,19 @@ bool engine_call_site_hook(ElfImage* image,std::uint64_t at,std::uint64_t target
     rel=std::int32_t(reinterpret_cast<std::uint64_t>(stub)-at-5); std::memcpy(p+1,&rel,4);
     return guest_protect_rx(&image->mem,at,5);
 }
+namespace MacFeatures {
+bool RedirectCheckedCall(ElfImage* image,std::uint64_t at,std::uint64_t target,void* fn) {
+    if(!image || !engine_eboot_supported(image->sha256) || at<image->mem.slide ||
+        at-image->mem.slide>image->mem.size || image->mem.size-(at-image->mem.slide)<5) return false;
+    auto* call=static_cast<std::uint8_t*>(guest_ptr(image->mem,at));std::int32_t displacement=0;
+    std::memcpy(&displacement,call+1,4);
+    if(call[0]!=0xe8 || at+5+displacement!=target) return false;
+    auto* stub=static_cast<std::uint8_t*>(exec_near(at));if(!stub) return false;
+    static constexpr std::uint8_t jump[]{0xff,0x25,0,0,0,0};
+    std::memcpy(stub,jump,6);std::memcpy(stub+6,&fn,8);
+    if(!guest_protect_rwx(&image->mem,at,5)) return false;
+    displacement=std::int32_t(reinterpret_cast<std::uint64_t>(stub)-at-5);
+    std::memcpy(call+1,&displacement,4);
+    return guest_protect_rx(&image->mem,at,5);
+}
+}
