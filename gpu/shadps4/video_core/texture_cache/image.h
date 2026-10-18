@@ -69,6 +69,9 @@ struct UniqueImage {
     }
 
     void Create(const vk::ImageCreateInfo& image_ci);
+    /// bbport: as Create, but returns false where the GPU has no memory left for the image
+    /// (the texture cache frees unused images and tries again).
+    bool TryCreate(const vk::ImageCreateInfo& image_ci);
 
     void Destroy();
 
@@ -139,6 +142,9 @@ struct Image : public Common::LRUNode<> {
 
     ImageView& FindView(const ImageViewInfo& view_info, bool ensure_guest_samples = true);
 
+    /// bbport: creates the Vulkan image again after allocation_failed; false while no memory.
+    bool RetryAllocation();
+
     using Barriers = SmallVector<vk::ImageMemoryBarrier2, 32>;
     void GetBarriers(Barriers& out_barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                      vk::PipelineStageFlags2 dst_stage,
@@ -163,6 +169,8 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
+    /// bbport: no GPU memory for the image when it was created (RetryAllocation).
+    bool allocation_failed = false;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address

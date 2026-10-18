@@ -236,6 +236,13 @@ public:
                                          bool is_depth, float extra_lod_bias = 0.0f);
 
     /// Retrieves the image with the specified id.
+    /// bbport: out of GPU memory for an image of its own (scene proxies): unused textures go at
+    /// once, up to `bytes` (ReclaimMemoryFor). Not with the cache's lock held.
+    u64 ReclaimMemory(u64 bytes) {
+        std::scoped_lock lock{mutex};
+        return ReclaimMemoryFor(0, 0, bytes);
+    }
+
     Image* TryGetImage(ImageId id, u64 uid) {
         if (!slot_images.IsAllocated(id)) return nullptr;
         auto& image = slot_images[id];
@@ -438,7 +445,18 @@ private:
     void UnregisterMeta(VAddr address, u64 owner_uid);
 
     /// Removes the image and any views/surface metas that reference it.
-    void DeleteImage(ImageId image_id);
+    /// bbport: now: at once, for an image the GPU is done with (ReclaimMemoryFor).
+    void DeleteImage(ImageId image_id, bool now = false);
+    /// Destroys the image and its views (DeleteImage, once the GPU is done with them).
+    void EraseImage(ImageId image_id);
+
+    /// bbport: a new image in slot_images; out of GPU memory for it, frees unused images and
+    /// tries again (ReclaimMemoryFor) rather than ending the game.
+    ImageId InsertImage(const ImageInfo& info);
+
+    /// bbport: destroys at once up to `bytes` of images unused for a few seconds that can be
+    /// recreated from guest memory, none overlapping [addr, addr + size). Returns bytes freed.
+    u64 ReclaimMemoryFor(VAddr addr, size_t size, u64 bytes);
 
     /// Touch the image in the LRU cache.
     void TouchImage(Image& image);
@@ -476,7 +494,7 @@ private:
     u64 gc_kept = 0, gc_kept_bytes = 0; ///< bbport: old images the latest pass could not evict
     std::chrono::steady_clock::time_point gc_report_time{};
     /// bbport: registered images and their guest size, for the once-a-minute memory line.
-    u64 image_count = 0, image_bytes = 0;
+    u64 image_count = 0, image_bytes = 0, image_host_bytes = 0;
     std::chrono::steady_clock::time_point memory_report_time{};
     void ReportMemory();
     /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).

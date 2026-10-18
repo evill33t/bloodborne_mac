@@ -145,6 +145,9 @@ public:
         return maintenance_6;
     }
 
+    /// bbport: prints the driver's fault report after a device loss (VK_EXT_device_fault), once.
+    void ReportDeviceLost(const char* where) const;
+
     /// Returns true if VK_KHR_maintenance8 is supported
     bool IsMaintenance8Supported() const {
         return maintenance_8;
@@ -580,6 +583,7 @@ private:
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
     bool maintenance_6{};
+    bool device_fault{};
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};

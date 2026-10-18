@@ -246,6 +246,13 @@ void EmitContext::DefineBufferProperties() {
             continue;
         }
 
+        // bbport: bindings 40 and up read their offset out of bounds before ShaderBinaryVersion
+        // 11 (stretched polygons on NVIDIA/Intel): logged to tell such shaders in reports.
+        static std::atomic<int> high_bindings{0};
+        if (binding >= 40 && high_bindings.fetch_add(1) < 8) {
+            std::printf("Shader %016llx: buffer binding %u uses its offset (past binding 40)\n",
+                        static_cast<unsigned long long>(info.pgm_hash), binding);
+        }
         const u32 half = PushData::BufOffsetIndex + (binding >> 4);
         const u32 comp = (binding & 0xf) >> 2;
         const u32 offset = (binding & 0x3) << 3;
@@ -781,9 +788,14 @@ void EmitContext::DefineOutputs() {
 
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
-    // bbport: two more members after upstream's, the object motion parameter and the scene size
-    const Id struct_type{Name(
-        TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[2], U32[1], U32[1]), "AuxData")};
+    // bbport: buf_offsets as four vectors, one byte per binding for all 56 (upstream declares
+    // 40 bytes: bindings 40 and up read out of bounds; resource.h), then two more members, the
+    // object motion parameter and the scene size.
+    static_assert(NUM_BUFFERS == 56 && PushData::BufOffsetMembers == 4,
+                  "buf_offsets vectors below must cover NUM_BUFFERS bytes");
+    const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
+                                         U32[2], U32[1], U32[1]),
+                              "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
     MemberName(struct_type, PushData::YOffsetIndex, "yoffset");
@@ -792,6 +804,7 @@ void EmitContext::DefinePushDataBlock() {
     MemberName(struct_type, PushData::BufOffsetIndex + 0, "buf_offsets0");
     MemberName(struct_type, PushData::BufOffsetIndex + 1, "buf_offsets1");
     MemberName(struct_type, PushData::BufOffsetIndex + 2, "buf_offsets2");
+    MemberName(struct_type, PushData::BufOffsetIndex + 3, "buf_offsets3");
     MemberDecorate(struct_type, PushData::XOffsetIndex, spv::Decoration::Offset, 0U);
     MemberDecorate(struct_type, PushData::YOffsetIndex, spv::Decoration::Offset, 4U);
     MemberDecorate(struct_type, PushData::XScaleIndex, spv::Decoration::Offset, 8U);
@@ -799,6 +812,7 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 16U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 32U);
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 48U);
+    MemberDecorate(struct_type, PushData::BufOffsetIndex + 3, spv::Decoration::Offset, 64U);
     // bbport: at the C++ struct's offsets, so the host can push PushData as it is
     MemberName(struct_type, PushData::MotionParamIndex, "motion_param");
     MemberDecorate(struct_type, PushData::MotionParamIndex, spv::Decoration::Offset,

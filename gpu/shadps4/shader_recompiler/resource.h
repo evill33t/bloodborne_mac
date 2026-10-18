@@ -228,8 +228,13 @@ struct PushData {
     static constexpr u32 XScaleIndex = 2;
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 BufOffsetIndex = 4;
-    /// bbport: members after the three buf_offsets vectors (see spirv_emit_context.cpp)
-    static constexpr u32 MotionParamIndex = BufOffsetIndex + 3;
+    /// bbport: the buf_offsets vectors cover every binding: u32x4 per 16 bindings, the last
+    /// one shorter (spirv_emit_context.cpp). With 56 bindings and 40 bytes declared (upstream
+    /// since 0.20.1), bindings 40 and up read their offset out of bounds or from motion_param:
+    /// buffers read shifted on GPUs that need the offsets (NVIDIA, Intel), stretched polygons.
+    static constexpr u32 BufOffsetMembers = (NUM_BUFFERS + 15) / 16;
+    /// bbport: members after the buf_offsets vectors
+    static constexpr u32 MotionParamIndex = BufOffsetIndex + BufOffsetMembers;
     static constexpr u32 SceneSizeIndex = MotionParamIndex + 1;
 
     float xoffset;

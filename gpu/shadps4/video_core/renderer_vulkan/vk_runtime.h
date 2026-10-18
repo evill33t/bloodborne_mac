@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -127,6 +129,27 @@ private:
     };
     BufferBarriers* resource{};
     std::vector<BufferBarriers> resources;
+    /// bbport (toggle 512): the entries in use since the last flush; the rest keep their lists'
+    /// storage for the next ones (FlushBarriers runs many times a frame).
+    std::size_t num_resources{};
+    /// bbport (toggle 512): ranges added since the last flush (access_epoch). Vertex, index and
+    /// indirect buffers are tracked per draw too, and the same ranges come back draw after
+    /// draw: adding one again changes nothing. Also which entry a buffer has.
+    struct AccessMemo {
+        const VideoCore::Buffer* handle;
+        u64 start;
+        u64 end;
+        u64 epoch;
+        u32 access;
+    };
+    struct ResourceMemo {
+        const VideoCore::Buffer* handle;
+        u64 epoch;
+        u32 index;
+    };
+    std::array<AccessMemo, 1024> access_memo{};
+    std::array<ResourceMemo, 256> resource_memo{};
+    u64 access_epoch{1};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
 };

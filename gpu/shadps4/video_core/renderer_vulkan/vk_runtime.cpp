@@ -797,8 +797,6 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    MakeCurrent(handle);
-
     Interval range = {
         .start = offset,
         .end = offset + size,
@@ -824,14 +822,31 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         range.start &= ~u64{0xFFF};
         range.end = (range.end + 0xFFF) & ~u64{0xFFF};
     }
+    memory_barrier.srcStageMask |= src_stage;
+    const u32 access = (src_access & WRITE_MASK ? 1u : 0u) | (src_access & READ_MASK ? 2u : 0u);
+    AccessMemo* memo = nullptr;
+    if (!BbToggle::Disabled(BbToggle::AccessMemo)) {
+        u64 hash = reinterpret_cast<u64>(handle) ^ range.start * 0x9E3779B97F4A7C15ull ^
+                   range.end << 13 ^ u64(access) << 61;
+        hash = (hash ^ hash >> 31) * 0xFF51AFD7ED558CCDull;
+        memo = &access_memo[(hash ^ hash >> 29) % access_memo.size()];
+        if (memo->epoch == access_epoch && memo->handle == handle &&
+            memo->start == range.start && memo->end == range.end && memo->access == access) {
+            memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
+            return;
+        }
+    }
+    MakeCurrent(handle);
     if (src_access & WRITE_MASK) {
         resource->write_ranges.Add(range);
     }
     if (src_access & READ_MASK) {
         resource->read_ranges.Add(range);
     }
+    if (memo) {
+        *memo = {handle, range.start, range.end, access_epoch, access};
+    }
 
-    memory_barrier.srcStageMask |= src_stage;
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
 
@@ -869,11 +884,13 @@ void Runtime::FlushBarriers() {
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
 
     image_barriers.clear();
-    for (auto& resource : resources) {
-        resource.read_ranges.Clear();
-        resource.write_ranges.Clear();
+    // bbport (toggle 512): the lists keep their storage; the memos of this epoch go stale.
+    for (std::size_t i = 0; i < num_resources; ++i) {
+        resources[i].read_ranges.Clear();
+        resources[i].write_ranges.Clear();
     }
-    resources.clear();
+    num_resources = 0;
+    ++access_epoch;
     resource = nullptr;
 }
 
@@ -881,12 +898,28 @@ void Runtime::MakeCurrent(const VideoCore::Buffer* handle) {
     if (resource && resource->handle == handle) {
         return;
     }
-    auto it = std::ranges::find(resources, handle, &BufferBarriers::handle);
-    if (it != resources.end()) {
-        resource = std::addressof(*it);
+    const bool memo_on = !BbToggle::Disabled(BbToggle::AccessMemo);
+    ResourceMemo& memo =
+        resource_memo[(reinterpret_cast<u64>(handle) >> 4) * 0x9E3779B97F4A7C15ull >> 56];
+    if (memo_on && memo.epoch == access_epoch && memo.handle == handle) {
+        resource = &resources[memo.index];
         return;
     }
-    resource = &resources.emplace_back(handle);
+    std::size_t index = 0;
+    while (index < num_resources && resources[index].handle != handle) {
+        ++index;
+    }
+    if (index == num_resources) {
+        // An entry past the used ones keeps its (cleared) lists' storage.
+        if (num_resources == resources.size()) {
+            resources.emplace_back();
+        }
+        resources[num_resources++].handle = handle;
+    }
+    resource = &resources[index];
+    if (memo_on) {
+        memo = {handle, access_epoch, static_cast<u32>(index)};
+    }
 }
 
 } // namespace Vulkan

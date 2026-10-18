@@ -671,6 +671,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         }
     }
     device_memory = Vulkan::Check(vk::ResultValue<vk::DeviceMemory>{alloc_result, device_memory});
+    arena_backed += alloc_info.allocationSize;
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
@@ -914,6 +915,9 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
 
     info.AddWait(signal_sema, signal_tick);
     auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        instance.ReportDeviceLost("sparse binding");
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     pending_binds.clear();
