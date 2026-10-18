@@ -1,0 +1,337 @@
+cmake_minimum_required(VERSION 3.24)
+set(CMAKE_OSX_ARCHITECTURES x86_64 CACHE STRING "Runtime architecture" FORCE)
+set(CMAKE_OSX_DEPLOYMENT_TARGET 15.4 CACHE STRING "Runtime minimum macOS version")
+project(bb_macos_runtime LANGUAGES C CXX OBJC OBJCXX)
+if(NOT APPLE)
+    message(FATAL_ERROR "The Darwin runtime target requires macOS.")
+endif()
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_OBJCXX_STANDARD 20)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+get_filename_component(BB_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+include(FetchContent)
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SDL_VULKAN OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(sdl3
+    URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.16.tar.gz
+    URL_HASH SHA256=c2ee715e42ec520c4d11fd8d249ef1d2b2baf4ad31148b72b3b000276c0b3633
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_Declare(atrac9
+    URL https://github.com/Thealexbarney/LibAtrac9/archive/efca2e3af35562a09a9bb6deed90e45b4b824dc4.tar.gz
+    URL_HASH SHA256=84463f04d92692f14c9a77fb36fb3d521222e4acabed50d21e8cac7536158db7
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(sdl3 atrac9)
+file(GLOB BB_ATRAC_SOURCES "${atrac9_SOURCE_DIR}/C/src/*.c")
+add_library(bbatrac9 STATIC ${BB_ATRAC_SOURCES})
+target_compile_options(bbatrac9 PRIVATE -w)
+target_include_directories(bbatrac9 PUBLIC "${atrac9_SOURCE_DIR}/C/src")
+file(GLOB BB_RUNTIME_SOURCES "${BB_ROOT}/src/runtime*.c")
+add_library(bbruntime STATIC ${BB_RUNTIME_SOURCES} "${BB_ROOT}/src/compat_macos.c")
+target_include_directories(bbruntime PUBLIC "${BB_ROOT}" "${BB_ROOT}/src")
+target_link_libraries(bbruntime PUBLIC SDL3::SDL3-static bbatrac9)
+target_compile_options(bbruntime PRIVATE -Wall -Wextra -Werror -fno-omit-frame-pointer)
+add_library(bb-gpu-diagnostic STATIC "${BB_ROOT}/src/macos_gpu_probe.c")
+target_include_directories(bb-gpu-diagnostic PRIVATE "${BB_ROOT}")
+add_executable(bb-macos-runtime-probe "${BB_ROOT}/src/probe.c")
+target_compile_options(bb-macos-runtime-probe PRIVATE -Wall -Wextra -Werror -fno-omit-frame-pointer)
+target_link_libraries(bb-macos-runtime-probe PRIVATE bbruntime bb-gpu-diagnostic)
+# Match upstream's reserved low LDT segment and keep host code out of guest VA.
+target_link_options(bb-macos-runtime-probe PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+enable_testing()
+set(BB_PORT_CP "${BB_ROOT}/gpu/metal/vendor/bbport/cp")
+add_executable(bb-metal-quality-tests "${BB_ROOT}/gpu/metal/tests/game_quality_tests.cpp" "${BB_PORT_CP}/cp_decoder.cpp")
+target_include_directories(bb-metal-quality-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-metal-quality-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-metal-quality COMMAND bb-metal-quality-tests)
+add_executable(bb-port-cp-tests "${BB_ROOT}/gpu/metal/tests/upstream_cp_decoder_tests.cpp" "${BB_PORT_CP}/cp_decoder.cpp")
+target_include_directories(bb-port-cp-tests PRIVATE "${BB_PORT_CP}")
+target_compile_options(bb-port-cp-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-independent-cp COMMAND bb-port-cp-tests)
+add_library(bb-checkpoint STATIC "${BB_ROOT}/src/checkpoint/cpu_x86_64.c"
+    "${BB_ROOT}/src/checkpoint/archive.cpp"
+    "${BB_ROOT}/src/checkpoint/coordinator.cpp"
+    "${BB_ROOT}/src/checkpoint/semaphore.cpp"
+    "${BB_ROOT}/src/checkpoint/import_proxy.cpp")
+target_include_directories(bb-checkpoint PUBLIC "${BB_ROOT}")
+target_compile_options(bb-checkpoint PRIVATE -Wall -Wextra -Werror)
+target_sources(bbruntime PRIVATE "${BB_ROOT}/src/checkpoint/runtime.cpp" "${BB_ROOT}/src/checkpoint/synchronization.cpp" "${BB_ROOT}/src/checkpoint/rwlock.cpp")
+target_compile_definitions(bbruntime PUBLIC BB_CHECKPOINT_RUNTIME=1)
+target_link_libraries(bbruntime PUBLIC bb-checkpoint)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_executable(bb-checkpoint-runtime-tests "${BB_ROOT}/tests/test_checkpoint_runtime.cpp")
+target_compile_options(bb-checkpoint-runtime-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-runtime-tests PRIVATE bbruntime bb-gpu-diagnostic)
+target_link_options(bb-checkpoint-runtime-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-checkpoint-runtime COMMAND bb-checkpoint-runtime-tests)
+set_tests_properties(darwin-checkpoint-runtime PROPERTIES TIMEOUT 15 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1;BB_CHECKPOINT_ENABLE=1")
+add_test(NAME darwin-checkpoint-runtime-process COMMAND "${Python3_EXECUTABLE}"
+    "${BB_ROOT}/tests/test_checkpoint_roundtrip.py" "$<TARGET_FILE:bb-checkpoint-runtime-tests>")
+set_tests_properties(darwin-checkpoint-runtime-process PROPERTIES TIMEOUT 45 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1;BB_CHECKPOINT_ENABLE=1")
+add_executable(bb-checkpoint-process-tests "${BB_ROOT}/tests/test_checkpoint_process.cpp")
+target_compile_options(bb-checkpoint-process-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-process-tests PRIVATE bb-checkpoint)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME darwin-checkpoint-process COMMAND "${Python3_EXECUTABLE}"
+    "${BB_ROOT}/tests/test_checkpoint_process.py" "$<TARGET_FILE:bb-checkpoint-process-tests>")
+set_tests_properties(darwin-checkpoint-process PROPERTIES TIMEOUT 45)
+add_executable(bb-checkpoint-coordinator-tests "${BB_ROOT}/tests/test_checkpoint_coordinator.cpp")
+target_compile_options(bb-checkpoint-coordinator-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-coordinator-tests PRIVATE bb-checkpoint)
+add_test(NAME darwin-checkpoint-coordinator COMMAND bb-checkpoint-coordinator-tests)
+set_tests_properties(darwin-checkpoint-coordinator PROPERTIES TIMEOUT 15)
+add_executable(bb-checkpoint-semaphore-tests "${BB_ROOT}/tests/test_checkpoint_semaphore.cpp")
+target_compile_options(bb-checkpoint-semaphore-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-semaphore-tests PRIVATE bb-checkpoint)
+add_test(NAME darwin-checkpoint-semaphore COMMAND "${Python3_EXECUTABLE}"
+    "${BB_ROOT}/tests/test_checkpoint_roundtrip.py" "$<TARGET_FILE:bb-checkpoint-semaphore-tests>")
+set_tests_properties(darwin-checkpoint-semaphore PROPERTIES TIMEOUT 45)
+add_executable(bb-checkpoint-memory-tests "${BB_ROOT}/tests/test_checkpoint_memory.cpp"
+    "${BB_ROOT}/tests/test_checkpoint_memory_bridge.c")
+target_compile_options(bb-checkpoint-memory-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-memory-tests PRIVATE bb-checkpoint)
+add_test(NAME darwin-checkpoint-memory COMMAND "${Python3_EXECUTABLE}"
+    "${BB_ROOT}/tests/test_checkpoint_roundtrip.py" "$<TARGET_FILE:bb-checkpoint-memory-tests>")
+set_tests_properties(darwin-checkpoint-memory PROPERTIES TIMEOUT 45)
+add_executable(bb-checkpoint-archive-tests "${BB_ROOT}/tests/test_checkpoint_archive.cpp")
+target_compile_options(bb-checkpoint-archive-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-checkpoint-archive-tests PRIVATE bb-checkpoint)
+add_test(NAME darwin-checkpoint-archive COMMAND bb-checkpoint-archive-tests)
+add_executable(bb-checkpoint-import-tests "${BB_ROOT}/tests/test_checkpoint_import.cpp")
+target_compile_options(bb-checkpoint-import-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -mavx)
+target_link_libraries(bb-checkpoint-import-tests PRIVATE bb-checkpoint)
+target_link_options(bb-checkpoint-import-tests PRIVATE
+    -Wl,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-checkpoint-import COMMAND bb-checkpoint-import-tests)
+set_tests_properties(darwin-checkpoint-import PROPERTIES TIMEOUT 15 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1")
+foreach(test IN ITEMS runtime sema)
+    add_executable(bb-macos-${test}-tests "${BB_ROOT}/tests/test_${test}.c")
+    target_compile_options(bb-macos-${test}-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_compile_options(bb-macos-${test}-tests PRIVATE -include "${BB_ROOT}/tests/macos_pthread_barrier.h")
+    target_link_libraries(bb-macos-${test}-tests PRIVATE bbruntime bb-gpu-diagnostic)
+    target_link_options(bb-macos-${test}-tests PRIVATE
+        -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+    add_test(NAME darwin-${test} COMMAND bb-macos-${test}-tests)
+    add_test(NAME darwin-checkpoint-${test}-contracts COMMAND bb-macos-${test}-tests)
+    set_tests_properties(darwin-checkpoint-${test}-contracts PROPERTIES TIMEOUT 30 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1;BB_CHECKPOINT_ENABLE=1")
+endforeach()
+set(BB_PS4_METAL "${BB_ROOT}/gpu/metal/vendor/driveclub/src")
+add_subdirectory("${BB_ROOT}/gpu/metal/bbhost" bbhost-features)
+add_library(bb-ps4-metal STATIC
+    "${BB_PS4_METAL}/gpu/liverpool/command_processor.cpp"
+    "${BB_PS4_METAL}/gpu/liverpool/tiling.cpp"
+    "${BB_PS4_METAL}/gpu/shader/gcn_decode.cpp"
+    "${BB_PS4_METAL}/gpu/shader/program.cpp"
+    "${BB_PS4_METAL}/gpu/shader/msl.cpp"
+    "${BB_PS4_METAL}/gpu/metal/mtl_device.mm"
+    "${BB_PS4_METAL}/gpu/metal/mtl_compiler.mm"
+    "${BB_PS4_METAL}/gpu/metal/mtl_renderer.mm"
+    "${BB_PS4_METAL}/gpu/metal/mtl_presenter.mm"
+    "${BB_PS4_METAL}/hle/gnmdriver/gnmdriver.cpp"
+    "${BB_PS4_METAL}/hle/video_out/video_out.cpp"
+    "${BB_PS4_METAL}/hle/kernel/sync.cpp"
+    "${BB_ROOT}/gpu/metal/game_settings.cpp"
+    "${BB_ROOT}/gpu/metal/game_overlay.mm"
+    "${BB_ROOT}/gpu/metal/game_achievements.mm"
+    "${BB_ROOT}/gpu/metal/game_input.mm"
+    "${BB_ROOT}/gpu/metal/spatial_upscaler.mm"
+    "${BB_ROOT}/gpu/metal/temporal_aa.mm"
+    "${BB_ROOT}/gpu/metal/vendor/bbport/cp/cp_decoder.cpp"
+    "${BB_ROOT}/gpu/metal/raw_texture_snapshot.mm"
+    "${BB_ROOT}/gpu/metal/frontend_snapshot.cpp"
+    "${BB_ROOT}/gpu/metal/game_bridge.mm")
+target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features
+    "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
+foreach(fixture IN ITEMS pipeline_cache temporal_aa input worklist)
+    add_executable(bb-metal-${fixture}-tests "${BB_ROOT}/gpu/metal/tests/game_${fixture}_tests.mm")
+    target_include_directories(bb-metal-${fixture}-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+    target_compile_options(bb-metal-${fixture}-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+    target_link_libraries(bb-metal-${fixture}-tests PRIVATE bb-ps4-metal)
+    add_test(NAME darwin-metal-${fixture} COMMAND bb-metal-${fixture}-tests)
+    set_tests_properties(darwin-metal-${fixture} PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
+endforeach()
+target_link_libraries(bb-metal-worklist-tests PRIVATE bbruntime)
+add_library(bb-game-entry OBJECT "${BB_ROOT}/src/probe.c")
+target_compile_definitions(bb-game-entry PRIVATE main=bb_guest_main)
+target_link_libraries(bb-game-entry PRIVATE bbruntime)
+add_executable(bb-macos-game "${BB_ROOT}/gpu/metal/game_main.mm" $<TARGET_OBJECTS:bb-game-entry>)
+add_dependencies(bb-macos-game bb-plugin-randomizer bb-plugin-boss_rush bb-plugin-mutators bb-plugin-debug_menu)
+target_compile_options(bb-macos-game PRIVATE -fobjc-arc)
+target_link_libraries(bb-macos-game PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-game PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_executable(bb-metal-integration-tests "${BB_ROOT}/gpu/metal/tests/game_bridge_tests.cpp")
+target_include_directories(bb-metal-integration-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-integration-tests PRIVATE -UNDEBUG)
+target_link_libraries(bb-metal-integration-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-integration-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-integration COMMAND bb-metal-integration-tests)
+add_executable(bb-metal-temporal-integration-tests "${BB_ROOT}/gpu/metal/tests/game_temporal_integration_tests.mm")
+target_include_directories(bb-metal-temporal-integration-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-temporal-integration-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-metal-temporal-integration-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-temporal-integration-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-temporal-integration COMMAND bb-metal-temporal-integration-tests)
+set_tests_properties(darwin-metal-temporal-integration PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1")
+add_executable(bb-raw-texture-snapshot-tests "${BB_ROOT}/gpu/metal/tests/game_raw_texture_snapshot_tests.mm")
+target_include_directories(bb-raw-texture-snapshot-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-raw-texture-snapshot-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-raw-texture-snapshot-tests PRIVATE bb-ps4-metal bbruntime)
+target_link_options(bb-raw-texture-snapshot-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-checkpoint-raw-textures COMMAND bb-raw-texture-snapshot-tests)
+set_tests_properties(darwin-checkpoint-raw-textures PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
+add_executable(bb-renderer-checkpoint-tests "${BB_ROOT}/gpu/metal/tests/game_renderer_checkpoint_tests.mm")
+target_include_directories(bb-renderer-checkpoint-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-renderer-checkpoint-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-renderer-checkpoint-tests PRIVATE bb-ps4-metal bbruntime)
+target_link_options(bb-renderer-checkpoint-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-checkpoint-renderer COMMAND "${Python3_EXECUTABLE}"
+    "${BB_ROOT}/tests/test_checkpoint_roundtrip.py" "$<TARGET_FILE:bb-renderer-checkpoint-tests>")
+set_tests_properties(darwin-checkpoint-renderer PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1")
+add_executable(bb-content-hash-tests "${BB_ROOT}/gpu/metal/tests/game_content_hash_tests.cpp")
+target_include_directories(bb-content-hash-tests PRIVATE "${BB_PS4_METAL}")
+target_compile_options(bb-content-hash-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-content-hash COMMAND bb-content-hash-tests)
+add_executable(bb-frame-handoff-tests "${BB_ROOT}/gpu/metal/tests/game_frame_handoff_tests.cpp")
+target_include_directories(bb-frame-handoff-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-frame-handoff-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-frame-handoff COMMAND bb-frame-handoff-tests)
+set_tests_properties(darwin-frame-handoff PROPERTIES TIMEOUT 10)
+add_executable(bb-material-snapshot-tests "${BB_ROOT}/gpu/metal/tests/game_material_snapshot_tests.cpp"
+    "${BB_ROOT}/gpu/metal/material_snapshot.cpp")
+target_include_directories(bb-material-snapshot-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-material-snapshot-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-material-snapshot COMMAND bb-material-snapshot-tests)
+add_executable(bb-texture-snapshot-tests "${BB_ROOT}/gpu/metal/tests/game_texture_snapshot_tests.mm"
+    "${BB_ROOT}/gpu/metal/texture_snapshot.mm" "${BB_ROOT}/gpu/metal/material_snapshot.cpp")
+target_include_directories(bb-texture-snapshot-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-texture-snapshot-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+target_link_libraries(bb-texture-snapshot-tests PRIVATE "-framework Metal" "-framework Foundation")
+add_test(NAME darwin-checkpoint-metal-textures COMMAND bb-texture-snapshot-tests)
+set_tests_properties(darwin-checkpoint-metal-textures PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 20)
+add_executable(bb-metal-color-tests "${BB_ROOT}/gpu/metal/tests/game_color_tests.mm")
+target_include_directories(bb-metal-color-tests PRIVATE "${BB_PS4_METAL}")
+target_compile_options(bb-metal-color-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-metal-color-tests PRIVATE "-framework Metal" "-framework Foundation")
+add_test(NAME darwin-metal-color COMMAND bb-metal-color-tests)
+set_tests_properties(darwin-metal-color PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-metal-raster-tests "${BB_ROOT}/gpu/metal/tests/game_raster_tests.mm")
+target_include_directories(bb-metal-raster-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-raster-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-metal-raster-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-raster-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-raster COMMAND bb-metal-raster-tests)
+set_tests_properties(darwin-metal-raster PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-metal-shadow-tests "${BB_ROOT}/gpu/metal/tests/game_shadow_tests.mm")
+target_include_directories(bb-metal-shadow-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-shadow-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-metal-shadow-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-shadow-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-shadows COMMAND bb-metal-shadow-tests)
+set_tests_properties(darwin-metal-shadows PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-metal-interpolation-tests "${BB_ROOT}/gpu/metal/tests/game_interpolation_tests.mm")
+target_include_directories(bb-metal-interpolation-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-interpolation-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-metal-interpolation-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-interpolation-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-interpolation COMMAND bb-metal-interpolation-tests)
+set_tests_properties(darwin-metal-interpolation PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-metal-depth-bounds-tests "${BB_ROOT}/gpu/metal/tests/game_depth_bounds_tests.mm")
+target_include_directories(bb-metal-depth-bounds-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-depth-bounds-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-metal-depth-bounds-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-depth-bounds-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-depth-bounds COMMAND bb-metal-depth-bounds-tests)
+set_tests_properties(darwin-metal-depth-bounds PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_executable(bb-metal-texture-coherence-tests "${BB_ROOT}/gpu/metal/tests/game_texture_coherence_tests.mm")
+target_include_directories(bb-metal-texture-coherence-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-texture-coherence-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-metal-texture-coherence-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-texture-coherence-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-texture-coherence COMMAND bb-metal-texture-coherence-tests)
+set_tests_properties(darwin-metal-texture-coherence PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_executable(bb-macos-settings-tests "${BB_ROOT}/gpu/metal/tests/game_settings_tests.cpp"
+    "${BB_ROOT}/gpu/metal/game_settings.cpp")
+target_include_directories(bb-macos-settings-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-macos-settings-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-settings COMMAND bb-macos-settings-tests)
+add_executable(bb-macos-trophy-tests "${BB_ROOT}/tests/test_macos_trophies.c")
+target_compile_options(bb-macos-trophy-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-macos-trophy-tests PRIVATE bbruntime bb-gpu-diagnostic)
+target_link_options(bb-macos-trophy-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-achievements COMMAND bb-macos-trophy-tests)
+add_executable(bb-metal-upscaler-tests "${BB_ROOT}/gpu/metal/tests/game_upscaler_tests.mm"
+    "${BB_ROOT}/gpu/metal/spatial_upscaler.mm")
+target_include_directories(bb-metal-upscaler-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-metal-upscaler-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-metal-upscaler-tests PRIVATE "-framework Metal" "-framework MetalFX" "-framework Foundation")
+add_test(NAME darwin-metal-upscaler COMMAND bb-metal-upscaler-tests)
+set_tests_properties(darwin-metal-upscaler PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-macos-overlay-tests "${BB_ROOT}/gpu/metal/tests/game_overlay_tests.mm")
+target_include_directories(bb-macos-overlay-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-macos-overlay-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-macos-overlay-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-overlay-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-settings-overlay COMMAND bb-macos-overlay-tests)
+add_executable(bb-macos-achievements-ui-tests "${BB_ROOT}/gpu/metal/tests/game_achievements_tests.mm")
+target_compile_options(bb-macos-achievements-ui-tests PRIVATE -UNDEBUG -fobjc-arc)
+target_link_libraries(bb-macos-achievements-ui-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-achievements-ui-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-achievements-ui COMMAND bb-macos-achievements-ui-tests)
+set_tests_properties(darwin-achievements-ui PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+add_executable(bb-macos-features-tests "${BB_ROOT}/gpu/metal/tests/game_features_tests.cpp")
+add_dependencies(bb-macos-features-tests bb-plugin-randomizer bb-plugin-boss_rush bb-plugin-mutators bb-plugin-debug_menu)
+target_include_directories(bb-macos-features-tests PRIVATE "${BB_ROOT}/gpu/metal/vendor/bbhost/src" "${BB_ROOT}")
+target_compile_options(bb-macos-features-tests PRIVATE -UNDEBUG)
+target_link_libraries(bb-macos-features-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-features-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-bbhost-services COMMAND bb-macos-features-tests)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_executable(bb-macos-timing-tests "${BB_ROOT}/gpu/metal/tests/game_timing_tests.cpp"
+    "${BB_ROOT}/gpu/metal/vendor/paleblood/limiter.cpp")
+target_include_directories(bb-macos-timing-tests PRIVATE "${BB_ROOT}" "${BB_ROOT}/gpu/metal/vendor/bbhost/src")
+target_compile_options(bb-macos-timing-tests PRIVATE -Wall -Wextra -Werror -ffp-contract=off -fno-fast-math)
+target_link_libraries(bb-macos-timing-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-timing-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-timing-reference COMMAND bb-macos-timing-tests --self-test)
+add_test(NAME darwin-timing-mutation COMMAND "${Python3_EXECUTABLE}" "${BB_ROOT}/tools/macos_verify_timing.py"
+    --binary "$<TARGET_FILE:bb-macos-timing-tests>")
+set_tests_properties(darwin-timing-reference darwin-timing-mutation PROPERTIES TIMEOUT 30)
+add_test(NAME darwin-patch-analysis COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+    -s "${BB_ROOT}/tests" -p test_macos_patch_analysis.py)
+add_executable(bb-macos-network-tests "${BB_ROOT}/gpu/metal/tests/game_network_tests.cpp")
+target_compile_options(bb-macos-network-tests PRIVATE -UNDEBUG)
+target_link_libraries(bb-macos-network-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-macos-network-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-bbhost-http COMMAND "${Python3_EXECUTABLE}" "${BB_ROOT}/tests/macos_http_fixture.py" "$<TARGET_FILE:bb-macos-network-tests>")
+set_tests_properties(darwin-bbhost-http PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+foreach(mode IN ITEMS rwlock-lifecycle rwlock-concurrency rwlock-timeouts)
+    add_test(NAME darwin-${mode} COMMAND bb-macos-runtime-tests --${mode})
+    add_test(NAME darwin-checkpoint-${mode} COMMAND bb-macos-runtime-tests --${mode})
+    set_tests_properties(darwin-checkpoint-${mode} PROPERTIES TIMEOUT 30 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1;BB_CHECKPOINT_ENABLE=1")
+endforeach()

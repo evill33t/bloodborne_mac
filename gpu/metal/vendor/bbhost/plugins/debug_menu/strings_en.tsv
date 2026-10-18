@@ -1,0 +1,3770 @@
+# The Debug Menu plugin's English (docs/plugins.md). One string a line: its Binary
+# Ninja address in the 1.09 eboot, the 64-bit FNV-1a hash of the game's own
+# UTF-16 text there, and the English, tab separated (\t, \n, \r and \\ escaped).
+# The game's text is not in here: tools/debug_menu_strings.py shows it from
+# your own eboot beside the English ("list"), lists what is left ("missing"),
+# and checks every row ("check"): the hash, the printf conversions, the font.
+4c69afc	9597b9ca75b9247e	%d is not a valid info level.
+4c69b1a	6bacd50e12add625	[Core::Logging SystemInfo:%s] %s
+4c7013c	9ca2aaa1658f3ada	Vertex shader
+4c7014a	bedc116647ebdefa	Pixel shader
+4c7015c	6aa712c6a9272ca0	Geometry shader
+4c70170	24c06725cd616a14	Compute shader
+4c70186	d0a813dc37c4f346	Export shader
+4c7019c	25758d47081b9178	Local shader
+4c701ae	d6dce71df920266d	Hull shader
+4c701bc	86a978f995025ab6	Invalid shader
+4c77808	e23fb484e525970d	Tried to read an EzStateValue holding no number as a number
+4c77858	5a0984bf74d60909	Tried to read an EzStateValue holding no string as a string
+4c77bca	4db47cee1c3841d5	Error: Argument name index is too large. A state may have 254 or more conditional events.
+4c9f774	5fe2a9aa9809d404	Av (aperture)
+4c9ffb6	5fe2a9aa9809d404	Av (aperture)
+4ca3966	b5a269aff880f51a	[GS]Lens Simulation Param Av (aperture)
+4ca3e80	5fe2a9aa9809d404	Av (aperture)
+4ca4308	5fe2a9aa9809d404	Av (aperture)
+4ca72f4	ac46bf8165df8eca	Light X-axis rotation[deg]
+4ca7310	0704c96b49379d5f	Light Y-axis rotation[deg]
+4ca732c	c4a3ffd35196f73b	Distance multiplier[%]
+4ca733c	c2625da4df5462b3	Light color R
+4ca7346	c2362fa4df2ed99e	Light color G
+4ca7350	c22bfda4df263023	Light color B
+4ca735a	cd421820a0a87596	Light RGB multiplier[%]
+4ca7370	6e5939e39ab1f495	Scatter direction coef
+4ca737e	88719521a13ed650	Rayleigh scatter coef
+4ca7390	abba953e2d18e5b1	Mie scatter coef
+4ca739e	b5c7e19a495859de	Blend coef[%]
+4ca73b2	cafa1e26908bbf1d	Ground diffuse color R
+4ca73c6	cab2c026904f1cc0	Ground diffuse color G
+4ca73da	cac3be26905d8c8d	Ground diffuse color B
+4ca73ee	83d5e2877d9e4a4c	Ground diffuse RGB multiplier[%]
+4cb3d74	fb21975a0bca9bec	MsgId:[%s]
+4cb6e18	7ffb93d0ef0a8bfb	Debug result to return:
+4cb6e38	46f004b781c29394	[Not set]
+4cb6e48	3fcef19b97d08169	[FALSE]
+4cb6e58	2f08d750b707cb12	[TRUE]
+4cb6e66	0d251e138b2d7e2b	Result mode:
+4cb6e7c	3b80e19be3b0184c	[Normal] //Not forcing the true/false result.
+4cb6eae	fb367773f05e34a7	[Forcing result] //Returning the true/false set ↑.
+4cb70e2	a334768b46b9b70d	Settings
+4cb70e8	344b5cc0f33babc7	Yield while waiting for tasks %s
+4cb7502	85a885a077de9111	Stop threads each phase
+4cb7d10	8be9907ce8c71cac	Pad name not set
+4cb7d20	c11dcbf74155fc5a	Input state
+4cb7d2a	600e697d44a24a53	Enabled?
+4cb7d34	822b9a88d07dbc66	Per-key data (Enable,Active)
+4cb7d62	4059bff2bf9ad9a0	6-axis
+4cb85a0	7c0bcb180928bb7e	User input
+4cb85de	27b5c965da7995f6	Live pads of pad device %d
+4cb8600	1b7ad5e8763f70d4	Key assignments of pad device %d
+4cb8c10	3c8b93da044391e5	Virtual key assignments
+4cb8c26	c25ed491b5bdb544	Virtual key assignments %d
+4cb8c40	bd681b5f4c77c1c7	Digital keys
+4cb8c4e	1b28ecfbb63cdbb1	Analog keys
+4cb8c5c	2721aef8ddb318d3	Current index[ %d ]
+4cb8c7c	fb37c45d6b6c6340	Max index[ %d ]
+4cb95c0	5ee3348321aec310	[%s] < %s
+4cb95d0	5e4f74443d7b8aea	《%f,%f,%f,%f》 < %s
+4cb95f2	bac7e98c58f3a06d	《%f》 < %s
+4cb960c	60858e21be5953e9	《%d/%d》 < %s
+4cb9622	9c733a24522e804a	《%d,%d,%d,%d》 < %s
+4cb9644	a0be00d2a885e160	《%s》 < %s
+4cb99d0	0e8df9ab2333a037	RegisterBookmark《%s》
+4cb9a52	ae55265fec2a265b	Nodes under Root:%d
+4cb9a78	0451a78b00981117	Direct child nodes:%d
+4cb9a8e	680ef8c4d427c8ef	Nodes under DebugMenu:%d
+4cb9ad2	6ee3af186083c371	Unknown index(%d)
+4cb9b6c	029905b474a54f5e	A : Select
+4cb9b7a	4789e4d6a780d603	B : Back
+4cb9b88	b414a055949c8317	LB : Values x10, list moves x10
+4cb9bb4	f6f8ac9ac67f454d	X : Values x100, list moves x100
+4cb9be2	f84201b61981e32b	Y : Reset value
+4cb9bf6	afd730552ce1167f	RB + D-pad : Move by parent node
+4cb9c22	0da1f6d28e55c71b	RB + RT + LB(Push):Open new window
+4cb9c5e	0522f4b6385a6e10	RB + RT + LT(Push) :Close window
+4cb9c9a	a0e70fc13523a0a9	RB + LB(Push) :Next window
+4cb9cce	3aa29b6da53e4e64	RB + LT(Push) :Previous window
+4cb9d02	6d38410149370d94	RB + L STICK :Move window
+4cb9d2e	800e8adde7de3b1d	RB + RT + L STICK :Move window (fast)
+4cb9d6c	99e0fe62e4a208bb	RB + R STICK :Change window line count
+4cb9da6	6cc61bf76b4b009c	RB + RT + R STICK :Zoom window text
+4cb9de6	71e5d33383270f90	START : Expand subwindow
+4cb9e4e	17850f58d46fd8b3	RT + Right or Left :(WIP) Reorder items
+4cb9e80	db1a9d000c0fcf4f	Log node list
+4cb9e96	b15a0d304788b075	Memory info FREE[ %d / %d ]
+4cb9ec2	563c61cdde7c0b84	Node count %d
+4cb9ed2	8b48cb74e4676be0	Registered keys %d
+4cb9ee4	4809e9825297fb42	Old debug menu (to be removed)
+4cb9f16	e60952baffc89543	(%s:%s) (%s:%s) (%s+%s:%s)
+4cb9f94	613dec03593d463b	Deleted 《%s》
+4cb9fac	bb31909a2dbd2db0	Expanded 《%s》
+4cb9fc4	03fa4b1037e1b4b9	Expanded 《%s》 in a new window
+4cb9fec	b396933207a974f2	《%s》
+4cb9ff6	905cbdb1a62a4b3c	Bookmarked 《%s》
+4cba018	e6c38a1a19a4dcb0	(%s:%s) (%s+%s:%s)
+4cba06a	0a05f07f7af49593	Layout saved
+4cba084	5058e0d91c60f762	Logged the current page info
+4cba0aa	ff872b9dd822a6f0	OutputPageInfo《%s》
+4cba0d0	e3c4fc4ea657a02a	 < (%s:%s)
+4cba7a4	6b5301efbafb8e78	Suppress lower pads: all
+4cba7c2	17cdbefc2a450a15	Physical pad
+4cba7ce	85f0e83cf12cf8c6	Priority %d
+4cba7dc	da1ef22394d37372	Suppress lower pads: none
+4cba7f8	8b3ef8929e876fd8	Input on release: reset
+4cbb2aa	2646e5f491c9885e	Registered: %d
+4cbb4b6	2e265855056e441f	Deleted layout 《%s》
+4cbb4da	829a387b81cc4d5c	Opened layout 《%s》
+4cbb4fc	b396933207a974f2	《%s》
+4cbc0b6	d239799897d2c5f5	[%03d] < color R
+4cbc0d6	d25edb9897f288b8	[%03d] < color G
+4cbc0f6	d26fd9989800f885	[%03d] < color B
+4cbc116	d2733f989803dbae	[%03d] < color A
+4cbc136	3a18cc255a4c57e1	[%03d] < active color R
+4cbc164	39ec9e255a26cecc	[%03d] < active color G
+4cbc192	39e26c255a1e2551	[%03d] < active color B
+4cbc1c0	39e5d2255a21087a	[%03d] < active color A
+4cbc1ee	f1423f9fd9a52ae6	《%0.1f / %0.1f》 < position
+4cbc222	84bcdb674f35d302	《%0.1f / %0.1f》 < size
+4cbc24e	fa157b8f74ba17bf	《%0.1f / %0.1f》 < scale
+4cbc890	64e748488b4f6fcb	Measure      %s
+4cbc8a8	8636bff2462cdc61	Record nodes %s
+4cbc8ba	756649e11b862c2c	Category load
+4cbc8c8	10122ef3ceb8ce3d	Milliseconds
+4cbc8d0	7c070a8f1eb7a220	Percent
+4cbc8dc	eae7d9aa94412ff6	Display type %s
+4cbc8ee	2c717ad4916c5608	    Avg/    Max/ Median
+4cbd4da	c42442403ac6d198	Tag<?%s?> is not registered.
+4cbf8fe	346659ad44a8c57b	OK if all are 0 after leaving the map ClothInstances:%d Collidables:%d
+4cbfaf0	3fab1311977ec0ac	Unnamed
+4cbfafc	ef9614aae8c5a5c8	Enabled %s
+4cc0074	22e5fc5794cee266	Wind dir/Max Pitch[deg] %.0f
+4cc009c	806fe6b19eecbbf8	Wind dir/Min Yaw[deg]   %.0f
+4cc00c4	b5d8e2ebf94fd773	Wind dir/Max Yaw[deg]   %.0f
+4cc00ec	e06ba4ec8a1e7701	Min period[sec]         %.2f
+4cc0118	744e9feb476ffa22	Max period[sec]         %.2f
+4cc0144	0c3969a710b6ca7c	Min wind speed[m/sec]   %.2f
+4cc016c	684a8f4cac01adb3	Max wind speed[m/sec]   %.2f
+4cc0194	ac8fd22e86e5d83b	Max influence           %.2f
+4cc01bc	d4dfe130d177d0bf	Per-vertex area check (high load) %s 
+4cc01ee	57cd9bedf06dee08	Radius %.2f
+4cc0202	c74bf6d44ba23278	Radius %.2f
+4cc02a2	08efbccde47d6125	Center to corner(X) %.2f
+4cc02c4	44fbca2537a68c9c	Center to corner(Y) %.2f
+4cc02e6	d17d8fc308e880d7	Center to corner(Z) %.2f
+4cc0398	a7efe3a5c5fd3ba0	Shape %s
+4cc03b2	2cdf3a6c381bbb20	None
+4cc03b8	08364207b4eee1d2	Sphere
+4cc03bc	a139f85a0b55d5f9	Capsule
+4cc0520	7d13071344008e92	Force management
+4cc0530	9cc0bc91f6a75195	Enable all actions %s
+4cc1f60	cd72ab44932a41e1	LuaEngineName: %s
+4cc285e	b7349634644149a1	---- Info ----
+4cc2878	43bc0fd6f185ba8d	Max nodes %d
+4cc288c	711478ebccfd54f1	Node interval %d
+4cc289e	80c9de9d9e231888	Current version %d
+4cc28b6	da33205e76572638	Current nodes %d
+4cc28cc	22b09952ddcfe6c5	---- Node list ----
+4cc2906	312e45e63b72e3f9	Index %d
+4cc291a	1ca25dc53ed0607a	Count %d
+4cc292a	5aae2c6556436660	Internal priority %d
+4cc2b62	878b4eb0acdb3533	[Per-block memory dump] Output all info (files etc.)
+4cc2ba2	7042cd4e95fd0bba	[Memory use per source file] Output as directory tree
+4cc2bec	2ff164d1a4282389	[Memory use per source file] Output ranked by memory use
+4cc2c36	7fab23dbe63e5dfc	[Full heap structure dump] Output as CSV
+4cc2c74	9d60b2caa3e88c15	-- Basic settings --------
+4cc2c9a	eed9d13ef66d1a73	-- Detailed settings -----
+4cc2cc0	2e0e18d0cfff1fcb	Memory dump per allocated block
+4cc2ce0	b0878d0c7bd0c48a	Memory usage (allocated, free, block count etc.)
+4cc2d12	1a726489d4ffd441	Memory usage per source file
+4cc2d36	de4f460a40c7b6cd	Details (allocation by block size etc.)
+4cc2d5a	5c0b35d7892d0382	Full dump of heap data structure
+4cc2d7a	8ffb044dcca70f7c	[Per-block memory dump] Output only heap, pointer, size
+4cc2dc8	9de846067e43efcb	[Per-block memory dump] Output all info (files etc.)
+4cc2e0a	f449ec401f7f9062	[Memory use per source file] Output as directory tree
+4cc2e56	e9522a5c351be881	[Memory use per source file] Output ranked by memory use
+4cc2ea2	fa8acce3c8ccd349	[Memory use per source file] Output ranked by block count
+4cc2eea	4a9f5667846f5b8b	[Full heap structure dump] Output in human-readable format
+4cc2f30	342bee074190ffdc	[Full heap structure dump] Output as CSV
+4cc2fba	fcfb598b1506eea8	Heap info
+4cc2fc6	687a93c28d0cd244	Allocator info
+4cc2fd6	102ddaf6084b6065	Debug features
+4cc2fe4	e07aefa28670e390	Memory dump
+4cc2ff2	a7cdb32f4c771e85	-- Basic output ----------
+4cc3018	efa6010f61b283f7	Run basic output (CSV format)
+4cc303c	e11270d077f41973	-- Detailed output -------
+4cc3062	6810cb6978759717	Type      %s
+4cc3078	a9e6931891d0c0d5	Option    %s
+4cc308a	bc3d6570efa43821	Whole?    %s
+4cc30a0	aaa02cd7f192e457	Run detailed output
+4cc30d6	f185de975cbcb426	Unknown
+4cc30dc	2aea004e03dbe45e	Output allocator :(%02d)%s
+4cc3c7e	5bc0bf20a31034ad	[Param][%d params][%0.1fMB]
+4cc4078	6cb1742ee909feec	%s][%d rows][%0.1fkB
+4cc409a	2067bb8e8442229a	[%s][%d rows][%0.1fkB]
+4cc40f4	e6c2698bab47ef1f	※Push [□+○] to SAVE[*.param]
+4cc412c	46d2962126fc3ae1	※Push [□+○] to RELOAD[
+4cc4158	2d7b2c6c389fe5f8	Disabled
+4cc4616	8d0f3e4d985dc78f	:[
+4cc461c	381df2fcfa0a2f78	]<
+4cc4efc	cbcd8bb32765a8ce	Yes
+4cc4f02	49528dc85a635935	No
+4cc4f34	ec2f3ff2656ca014	On
+4cc4f3a	ebbbb3f2650a74a2	Off
+4cc4f82	087a5107b528c81b	True
+4cc4f86	08e02a07b57f3908	False
+4cc4fe4	8cb26bb95547f116	Enabled
+4cc4fea	2d7b2c6c389fe5f8	Disabled
+4cc5008	0865c907b51737f9	1
+4cc500c	0869c907b51b20d0	0
+4cc5010	0d30cf53fff472af	Yes
+4cc5016	303a6991f4b083dc	No
+4cc501e	2d1aaea6c47a94b4	Yes
+4cc5024	ed4ab7dcd7ccd2db	No
+4cc502a	d1f15137fde4f9ed	Use
+4cc5030	9a642449df249e42	Don't use
+4cc6190	c5bb61a7527f164c	  %s %-3d
+4cc61a2	3b535262e95ed665	  %s %s
+4cc61b0	190e03c9e53bfa3b	Filter settings
+4cc61be	ea6b0c5c8d674ebf	Level filter %s
+4cc61d8	187b3b1df2933748	  Filter level     %d
+4cc61f8	2f41ddee4a76ea6e	Category filter %s
+4cc6214	33f487dcf2591311	  [%s] < %-3d
+4cc622e	719bf0f15c6d24d8	  [%s] < %s
+4cc65b6	95c18900b1b81d0f	No matching level
+4cc666e	8770ddb319a1c405	※Push [A+X] Load[%s]
+4cc6694	a4871ddfdebc7c39	※Push [A+X] Save as new[%s]
+4cc66cc	a3b97c061c6b6a90	Property file operations
+4cc66fc	adf1bc533d4ab404	Property file control
+4cc6738	2c4ff20a3911c9bd	Defined attribute list
+4cc6770	ce3ee02f71d1a144	Not set up
+4cc6920	8770ddb319a1c405	※Push [A+X] Load[%s]
+4cc6946	4ea774170c2f9fca	※Push [A+X] Save[%s]
+4cc6b86	ceb02e126ef08355	Show FPS
+4cc6b92	338ea84ab548d7cc	Window always on top
+4cc6baa	c8d1afb348563dc8	Throttle update rate
+4cc6bb8	0d94a77660da5087	No Fps limit
+4cc6bec	ba8406abb6d882e9	System values
+4cc6bfc	53a3c490803dc0d6	Heap list
+4cc6c08	f68de15bd2b1ef93	Draw system
+4cc6c16	63392e17a90cc052	Input manager
+4cc6c2c	2f06200df688b5a3	Filter manager
+4cc81fa	c8d69fb20f659790	Burst run count exceeded the maximum.
+4cc8384	499eb4f42e60c575	Failed to initialize step debug menu %s.
+4cc8460	21d374665d776c76	Forced target step no.[%%d]:(0~%d valid, -1: no transition)
+4cc84aa	6d4c44af8e74cbb8	<※Run debug forced step transition>(Press OK Button.) //It may hang, so use with care.
+4cc852a	043fd527dd10808f	//<※Run debug forced step transition>(Unavailable: the Step has ended)
+4cc8598	8d32eac6fa46bc6e	Destination step undefined
+4ccaf66	3f581b8617e07b4d	Tag<?%s?> not found
+4ccbe90	97a9f46f9a1828ea	《%s》 < (%s+%s:Unregister)
+4ccc182	d440f9dae541f5c3	No node( %d )
+4ccc430	61c49797d6c4b98f	Over the old debug menu's display limit.
+4ccc8d2	9faa581b29fe0158	Measure? %s
+4ccc8e6	c70e182b77ba860c	%02d>%s: %03.1f%% (%03.1f%%)<%03.1f%%>《%03.1f%%》[%d]
+4ccc946	e7b22c12b24d2f8e	%02d>: %03.1f%% (%03.1f%%)<%03.1f%%>《%03.1f%%》[%d]
+4ccc9a2	3fbacbf83a49175c	%02d>%s: %03.1fms (%03.1fms)<%03.1fms>《%03.1fms》[%d]
+4ccca0a	58536bbd5a7ac296	%02d>: %03.1fms (%03.1fms)<%03.1fms>《%03.1fms》[%d]
+4ccca6e	e69181a8ac7002f1	%03.1f%% (%03.1f%%)《%03.1f%%》[%d]
+4cccaac	24a725e7ae4aa37b	%03.1fms (%03.1fms)《%03.1fms》[%d]
+4cccaf0	4d5ab5ef15fc3b3a	SUM: %03.1f%% (%03.1f%%)《%03.1f%%》
+4cccb2e	461176fa7ebac1b8	SUM: %03.1fms (%03.1fms)《%03.1fms》
+4ccdaf4	06ac43751599203b	Instance created? [%s]
+4ccdb16	ea41391f5f16cab6	Bone cloth? [%s]
+4ccdb30	cbcd8bb32765a8ce	Yes
+4ccdb36	49528dc85a635935	No
+4ccdb70	c7b0dd9a4707e50a	?Unknown?
+4cce410	517fa527d25f0d3b	Max influence   %.2f
+4cce4ac	d7e966d11212fd71	Point wind: enabled\t%s
+4cce4c4	169d674ef1570e48	Point wind: skip force calcs\t%s
+4cce4e8	16faf8f36b3adf02	Point wind: force calc skip ratio\t%.3f
+4cce51e	2ee0b46a372e57a6	Directional wind: enabled\t%s
+4cce532	dfd234a239ebd387	Directional wind: skip force calcs\t%s
+4cce552	6510f6f04e8df181	Directional wind: force calc skip ratio\t%.3f
+4cce77e	5e2201a3b32cf81a	Update vertex data with DiferredContext %s
+4cce7c0	aeb40fedf2f784b9	Batch world registration %s
+4cce9e0	f13dac2a6cced87b	Performance (provisional)
+4cce9fc	8e4743b9417d3c0e	Performance %s
+4ccef20	f6631d2fc54cb5d8	[%s] < Multithreaded update
+4cd0206	a714b5cb2d41cc2d	%s <Category name
+4cd021a	ea5e6d0d846e3047	%s <Settings in use
+4cd0230	03d48b14ce6f9789	[NEVER ] < Log level
+4cd024e	21e523f3e943b285	[%s ] < Log level
+4cd0276	8fcd477df7428a35	[%s ] < Destination
+4cd028a	c7b0dd9a4707e50a	?Unknown?
+4ce6df6	96c253e244d7973a	Out of memory reading the Ext::Serialize header
+4d40b0a	bbce40918405b41f	Draw areas : %s
+4d40b20	ce39ad0b21cbbacd	Run observe test:%s
+4d40b54	5f161af74d569a10	======AddObserveArea test======
+4d40b92	b588c757ce1e24e0	Observe test angle:%d
+4d40bc6	f718ef8baaa8e017	======AddObserveRegion test======
+4d40c08	4c2fbde461effee5	Observe test entity ID:%d
+4d40c2c	1cc3b2f00b39f1a7	======AddObserveChrDmySphere test======
+4d40c7a	1a0b2a4327e790ae	Observe test dummy poly ID:%d
+4d40c9a	f61b66c0056ab0d4	Observe test distance:%.1f
+4d40cd4	29673b5454bf76fe	Observe test origin:%s
+4d40cf0	298c9d5454df39c1	Observe test origin:%d
+4d40d0c	dda0a84ec7e0319b	Observe test direction:%s
+4d40d28	e0537f84baa2e330	Observe test type:%s
+4d40d46	fd34692cd8ee8f38	Observe test draw:%d
+4d40d64	b430ad0f13f4eb22	Observe test target:%s
+4d40d80	b4047f0f13cf620d	Observe test target:%d
+4d40f88	08e35b1ceda4a310	Move points
+4d40f96	eec9bdaea487d735	[%s] < Draw home point
+4d40fae	7eaadfea1b277421	[%s] < Draw move points
+4d40fca	a45372cb933be2c6	==== Current patrol info ===
+4d40fec	ff031cae7b47c243	Loop
+4d40ff2	15d574a8e87d4d1c	Back and forth
+4d40ff8	122010593408bb27	Random
+4d41002	6688d33941370cdf	Gargoyle air patrol
+4d41016	1ec3c73016451bb6	Gargoyle landing
+4d41026	7151dffe120c64d1	One-way patrol & move nest
+4d41040	67712936f0f36d54	Free patrol
+4d4104a	14ebbed1173cede8	Reset patrol info (Push○)
+4d4106c	1049110684162897	Change patrol info (Push○): %s(%d)
+4d41098	21082a808185d55c	Change patrol info (Push○): None(%d)
+4d410c4	ab62f23d86907aad	[%d] < Current move point index
+4d410ee	a80ae14d42d0e9ec	[%d] < Previous move point index
+4d41116	157a388b27fbaad4	≪%s(%d)≫ < Patrol info
+4d41132	34b7b6c0396aaaf7	≪None(%d)≫ < Patrol info
+4d4114e	9e00d7955e7d0475	≪%s≫ < Move type
+4d4119c	8aebc5790ef96ec1	To home point %.2f[m]
+4d411b8	d2ea59c1421ef71a	To return-while-fighting distance %.2f[m]
+4d411e2	e28bc911bd9321ef	To always-return distance %.2f[m]
+4d41268	bb5fcab1289fdbcb	NON (no role)
+4d4127a	6813f0a3e50b0bab	ATKER (attacker)
+4d4128e	a3046776b37a2ea5	COVER (surround)
+4d412a6	85813db21e2e7b8f	SPECTATOR
+4d41300	f39f14ed6f33a57f	Ladder interrupt node check time : %.1f
+4d41334	7ec6381736966648	Ladder node detected:%s
+4d4134e	a2ef5aadcb5232ff	Door node detected:%s
+4d41446	8b669eb80dce0083	Command from event [
+4d4146a	e90c7a368e8f0f5e	Stuck-movement check SprjMoveChecker
+4d414b2	6050066ed09acf25	Sampling span[s]: %f
+4d414e6	e278ce348bd53016	Move length threshold[m]: %f
+4d4153a	c5d9440a15191017	Min goal distance to check[m]: %f
+4d4158e	ad099857ba721077	Sampling span (long)[s]: %f
+4d415d6	ab9547e8e008c504	Move length threshold (long)[m]: %f
+4d4163c	f8a85e8c7076cd05	Min goal distance to check (long)[m]: %f
+4d416a6	f2d0f13be0e84db8	≪%s:%d≫ < Current navmesh
+4d416ca	8a7e873766921d79	≪%s:%d≫ < Previous navmesh
+4d4170e	d01f9813307ed715	Show navmesh test position : %s
+4d41734	85119eb609c8c4ff	Move straight if pathfinding fails : %s
+4d417ac	90188dc94963c636	Draw all path results:%s
+4d417f8	0c634de2ba5fe85f	Nvm parts standing on:%s
+4d41834	4d02e9655984dc4a	Draw pathfinding result %s
+4d4187a	fabbd7fe71c91886	Draw pathfinding result Idx %s
+4d418e2	32c8f918afe557b0	Arrival distance:%.1f
+4d41902	49ce87acbd5a2bc7	Graph search
+4d4190e	1b44250cdaea924b	Use graph search %s
+4d4192c	f9b0702a749a499d	Log graph search %s
+4d41950	654d7384be3a6189	Graph search distance %.1f
+4d41970	70faf3cadaeb5a6e	Path search goal distance after graph search %.1f
+4d419a6	908441765726d9d3	Max path search iterations with graph search %d
+4d419e4	cfa7d721e96111c0	Max path search distance with graph search %.1f
+4d41a1c	3a6613e6742776f4	Draw HavokAI sensor AABB %s
+4d41a8a	5ab0ce28157a7166	Draw free patrol points: 《%s》
+4d41aac	3d6e83e1173220ef	Target
+4d41ab8	eab3479b391aaefc	Arrival distance
+4d41ac2	3db01fdacc63e0b6	Safety check distance
+4d41ad4	3ba833806ec6580a	Enemy reaction distance[m]
+4d41e10	604e28f5f2e5cd09	Action no.
+4d41e1a	8d0a02511711eb9b	Result on guard success
+4d41e2e	3d96301968805648	Don't stop after guarding an attack?
+4d41e4e	92da06d9fba382ea	Action slot no.
+4d41e60	eacc5d758de01f08	Attack target
+4d41e70	2970361ad98df498	Attack distance
+4d41e7a	263fbe71b5316216	Min range[m]
+4d41e8a	b55f8988c7cfc53e	Max distance[m]
+4d41e9a	0837aaae0f2a9c9c	Arrival check distance[m]
+4d41eae	fa255c5dc622b4f0	End result when guard ends
+4d41ec6	ca53503ef55276e1	Succeed on guard timeout?
+4d41ee2	8f880d8c3a5d3eee	Direction from target[Type]
+4d41efe	7d46b09f0261c379	Arrival check distance[m]
+4d41f12	133b09986359c698	Walk?
+4d41f1a	8106949b082935a9	Move target[Type]
+4d41f30	5be1d33426a224c6	Move right?
+4d41f3a	6af6820aa9452ed5	Angle[deg]
+4d41f46	12cf389862fef795	Walk?
+4d41f4e	c70d0f88b5c780d0	Succeed on timeout?
+4d41f5c	205072d54501cec7	Guard EzState no.
+4d41f76	06ffe2f46fe3ede5	Result value when guard ends
+4d41f8c	33b326ffe854d89a	EzState no.
+4d41fa0	b219cb8c3b8eb517	Turn target
+4d41fb0	2e61dc63712cab49	Turn time
+4d41fba	8c8699ba455958dd	Step direction
+4d41fc8	5d01d20bef4c56b8	Safe distance
+4d41fd2	89c03cb30976a924	Enemy reaction distance[m]
+4d41fe4	d5aed9291fe4c44a	Turn target[Type]
+4d4413c	0daf981bf638223b	Measure %s
+4d4419c	11e076f193d7ba76	%03.1f%%
+4d44642	75188c9926e9e8eb	Threw? (for CommonAttack):%s
+4d44670	3e38d185bb69fda5	Draw neck direction : %s
+4d446cc	bba9bcdc863fd1d9	Go to next point (Push Enter)
+4d4471c	34565367bd9e56d9	Switch to point patrol mode (Push Enter)
+4d447e0	ee8d08c389e39643	Action request
+4d447f0	980ad96dc6c96e3b	[%s] < Action requested?
+4d44810	628dc9997a88a9ec	[%d] < Requested action no.
+4d4482e	ddfb09feda74fdcd	[%d] < Requested action no.[continued]
+4d44854	c8b040d3df356697	[%s] < Action started?
+4d44874	06b603de819b94da	[%s] < Action ended?
+4d44894	4d6337470811f96c	Distance type[
+4d448a2	7a55c9b503e23fcd	Near:
+4d448ac	10208326b6f8b65a	Mid:
+4d448b6	b82eedf4f71263a9	Far:
+4d448c0	1c4ca00c9cae967f	In combat range:
+4d448ce	234972b4942203dc	Out of combat range:
+4d448f2	04f4f1fb71d160aa	No target
+4d44902	3030638fd33b1547	Angle diff[ horiz : %.1f, vert : %.1f ]
+4d44936	b4e3bc0481d1dca4	Angle diff[ no target ]
+4d4498c	0a0527af6fe4dfa3	Team order [
+4d449b8	d3147591b1244f77	Move point effect range [%.2f]m
+4d44bae	1968bc8e9adf14c0	Force battle goal:%d
+4d44bf0	76aeed2f5b290f46	Show goal details %s
+4d44c2c	a40b196a368ed6a9	Allow print from Lua:%s
+4d44c7a	36bd06791bb29514	Draw move target position:%s
+4d44cb6	e3347b028ca40e3a	No smoothing:%s
+4d44cec	13293a589a05867f	Draw all move points:%s
+4d44d2a	83892d690417c40b	Draw initial position:%s
+4d44d8e	002759b64697c0de	Team order role %s
+4d44dd6	2cdf3a6c381bbb20	None
+4d44ddc	56a5fa5b9ce17558	Phantom sound
+4d44de2	4be690d3ff136c90	Soul coin (normal)
+4d44df8	52c471cd67ffee82	Soul coin (undead)
+4d44e10	c23555a637761c09	Soul coin (beast)
+4d44e26	840fc279463163ba	Hit[%s%s]
+4d44e3a	08c44f07b566fd2f	Enemy
+4d44e3e	08d96207b5797982	Ally
+4d44e42	22dac00716f7f137	Target[enemy]
+4d44e54	8f23c8cb892dd064	All
+4d44e5a	7fe03cd1df228ed9	AI sound ID:%06d Interest:% 2d Type:direct Life:%.1f Target:%s Range:%.1f SpEffect impact:%d SpEffect:%.1f Base radius:%.1f Fake target:%s
+4d44f16	78f1b7e48b93b294	AI sound ID:%06d Interest:% 2d Type:move Life:%.1f Target:%s Range:%.1f SpEffect impact:%d SpEffect:%.1f Armor material:%.1f Floor material:%.1f Base radius:%.1f Fake target:%s
+4d44ff8	ea7d6097c12ed378	AI sound ID:%06d Interest:% 2d Type:attack Life:%.1f Target:%s Range:%.1f SpEffect impact:%d SpEffect:%.1f Attack material:%.1f Deflected:%.1f Base radius:%.1f Fake target:%s
+4d450da	0e8f7e8671c68f1c	AI sound ID:%06d Interest:% 2d Type:unknown Life:%.1f Target:%s Range:%.1f 
+4d45146	0dab8f62453b358c	≪%s≫ < Draw sound sources
+4d4515e	24568a9399b86ec9	[%06d]< Debug AI sound param ID
+4d451c0	bc809926fa90a358	≪%d≫ < Active sound count
+4d453d0	72169d6b081927b3	Target list update rate:%.3f
+4d453f2	cf4f6ba5173cbf04	Current update time:%.3f
+4d4549e	6ae2c0bca53ffa5b	%S<%S>(priority:%.2f)(hit:%.2f rate:%.2f)[memory:%.2f]<%S>
+4d45504	229a598b7afbc6d3	≪%.2f, %.2f, %.2f≫ [memory:%.2f][sound ID:%06d][interest:%d]
+4d45560	eb81119abdbdc9f3	≪%.2f, %.2f, %.2f≫ [memory:%.2f]
+4d4559a	9a8dc67f907c908e	Draw target parry timing region %s
+4d455fe	86be8c82d7ab8a43	Parry timing valid distance %.1f
+4d45622	e7a963514665dbf8	Parry timing valid angle %.1f
+4d45646	6fbcc7b07161772e	Overall AI target state>≪%s≫
+4d45668	b112d9c840fe1e5b	Event         > %s
+4d45686	65419c77e18db106	On ladder:%d
+4d456d4	b111fb051ae5d5cb	Target info
+4d456fa	57223b5c50991fbb	Draw all AI search ranges (height angle):%s
+4d45722	cbc3faa7155a768b	Draw all AI search ranges (width angle):%s
+4d45748	04e402b1948daf16	Clear
+4d4574e	f952ea1527350f60	Dark
+4d45754	662b18844acd1555	Pitch dark
+4d4575e	ae7be01944bd21d6	[%s] < Draw Top Enemy Target
+4d45796	52768885ee02a1b8	[%s] < Draw Searching Area Height
+4d457d8	b3e090919f3edea1	[%s] < Draw Last Sight Pos
+4d4580c	4cfef3ef85d91845	[%s] < Draw Last Target
+4d4583a	2076495260077e49	[%s] < Draw Low HP Friend Target
+4d4587a	a0ac0b6cd4d7242a	[%s] < Draw Near Corpse Pos
+4d4592c	c7339cab8e380b01	[%s] < Draw Searching Area Width
+4d4596c	8f72716ff32d2a12	[%s] < Draw Memory Target Pos
+4d459ec	81a29fd1262d2f8a	[%s]< Target's map visibility type
+4d45a16	a94b63834fbe49f3	[%s]< Show search areas toward the PC?
+4d45a46	1392ba663aa64b81	≪%d≫< Sound interest category
+4d45a94	c3f43a823c8e894f	%sSoul coin     > %s
+4d45ab2	e9e790d09626097c	%sPhantom sound > %s
+4d45ace	c3473fe94b231fb7	%sEnemy target  > %s[%s]
+4d45af4	311dfaf051e38259	Spotted
+4d45afa	fd448bfe33cf14c7	%sEnemy target  > %s
+4d45b18	1d98fea4e3a33787	%sSound target  > %s
+4d45b36	89e287cc89c343b6	%sMemory target > %s
+4d45b52	47fc08f68b151944	%sAlly target   > %s
+4d45b6e	b7d7f4376cebdf2f	Low-HP ally   > %s
+4d45b86	00194fcd1411b184	Last sight    > %s
+4d45ba0	c2f3cd6f0344b20d	Nearby corpse > %s
+4d45c86	aa48305650663bbb	[%s] < Share target?
+4d45ca6	96ef83832e3a1957	[%s] < Show squad?
+4d45cc2	9ac74cc90df3b202	[%s] < Show formation?
+4d45cea	7db96ccbd1619c80	≪%03d≫ < Squad member count
+4d45d08	75118f5c0d99324d	≪%s≫ < Squad state
+4d45d1c	034c2ff123524024	≪None≫ < Squad target
+4d45d36	314c3ed1ce23e9d6	≪%s≫ < Squad target[%.2f]
+4d45d5c	0f628ae25c0d0886	≪%d≫ < Squad logic ID
+4d45e44	2ce35367cc522b69	Response
+4d46020	51ea90a78aff1616	Squad
+4d46026	5fd6b7fe46bd47cd	≪%s≫ < Group patrolling?
+4d4603e	f9844826118c37f7	≪%s≫ < Collision disabled?
+4d4605a	80715a0c4c173d82	≪%s≫ < Squad reaction pending?
+4d46078	10ec7775b3a66951	≪%.2f≫ < Squad reaction wait timer
+4d460a0	8ccdf5cfc43737ca	≪%d≫ < Assigned squad
+4d460b4	bf63fbb21746eb50	≪%d≫ < Member no.
+4d460cc	e8d4a7ce66cba0dc	≪None>><Squad command
+4d460fa	a45c943f4cb5033c	≫ < Squad command
+4d4610c	c827407dc6bf259e	≪%.3f≫ < Base anim speed change
+4d46130	bf6488819f245b24	≪%.3f≫ < Anim speed change
+4d46340	e3c55e708bbcb799	Disable SprjBlackbord (blackboard): %s
+4d46384	807d9352844f7e8b	Reserve attack
+4d4638e	b23d452fca3c3ff3	Strafe left
+4d4639c	ee0b9f711b593904	Strafe right
+4d463aa	34c50df8d6415741	Attack order
+4d463b4	d07d1514002c629a	Rescue
+4d463ba	3cb5a1e16c802542	Call allies
+4d463c4	8a9c19504c95c789	Calling allies
+4d4643a	4a19118b9c471eef	Simultaneous attackers %d
+4d4646e	7dbc07f218a2e750	Surrounders %d
+4d464a8	34ceb549c007cf36	Team update interval %.2f
+4d464e2	8a0e881bbb338d83	Draw team member details %s
+4d4652a	9707c974ed4ff19f	Assign roles by total attack influence? %s
+4d4655a	2449140f202fbdf4	Total attack influence %d
+4d4656e	f587796020d89a88	Total surrounders %d
+4d46580	3a00d5b98e6fbe49	Team total:%d
+4d4661a	5135e14315004745	Memory used[kByte]:%d
+4d46800	b40332aeed911c20	Reduced squad AI updates %s
+4d46820	b62d391695d56696	Enable smoothing %s
+4d46842	fff7311817184946	HavokAI chr test
+4d4685e	e458cad31e7e3020	Enable HavokAI chr %s
+4d46888	7b79c2b258b46a71	Disable avoidance %s
+4d468a2	5afa1230b6737df9	[%d] < Move vector buffer count
+4d469f2	0dce82b57b97c969	LUA global name manager debug view(□+○)
+4d46a20	9d46e049b012fab4	[%.2f] < Sensor Size
+4d46b1a	8a38dd309754a21b	Normal AI sound
+4d46bce	a0be00d2a885e160	《%s》 < %s
+4d46bde	5ee3348321aec310	[%s] < %s
+4d46c92	821d69dab7b04b85	[%s《%d》 ACT:%d/%d](*)
+4d46cbe	07cb9834f0f1a03a	[%d《%d》 ACT:%d/%d](*)
+4d46cea	99eb61736557b84a	Condition group flag:OR(1~):
+4d47f74	7f4d23418a5c2b27	No server, removal requested
+4d48228	c4521f33b7854d96	Resistance (damage rate to part):<%.2f>
+4d48254	d812cd131a65aad3	Bullet resistance (damage rate to part):<%.2f>
+4d48284	42ebbc280a322cba	Propagation (damage rate back to body):<%.2f>
+4d4f484	6d79f2fdfa695c9a	White tendency: [%d]
+4d4f496	521477dc74a57b75	Black tendency: [%d]
+4d4f5ec	f2df5b8d53f22494	===== Priority ====
+4d4f662	6b5f80969553bdac	No such event. Check that it is defined in EventMaker.[EventID:%d]
+4d4f6ca	8912f7cca996a696	This event has already ended.[EventID:%d]
+4d4f706	4005560a3c839c08	Unknown error. Call an EventPG.[EventID:%d]
+4d4f752	6b4c69fa214b5afc	The program does not handle this error code. Call an ObjActPG.[EventID:%d]
+4d4f8ba	4e9db940b0aebf1a	Draw line to target Obj:%s
+4d4f8da	c18f31afe351f669	Draw info over target Obj:%s
+4d4f8f8	a06dc8846560c7fd	Draw line to reserved chr:%s
+4d4f918	c59b4a61868a7011	Event ID to run:%d
+4d4f934	dfcad99a0afff857	Allow trigger?:%s
+4d4f960	cdab96fa2ea50f2a	Activation request expiry:%.1f
+4d4f97e	3d4b2482814be34c	Current request activation time:%.1f
+4d4f99c	bebd6937ca6382ff	ObjAct target object:%x
+4d4f9c8	50ca9c06fcaabe42	Observing
+4d4f9d0	3262be3732234949	Requesting
+4d4f9d8	4f8764ddc92b244b	Reserved
+4d4f9e0	518740f01da4416c	Running
+4d4f9e8	405441342454d5b7	Trigger state:%s
+4d4f9fc	06fa5b231fe0d3fb	Time until reservation cancel:%.1f
+4d4fa1c	ae829404f5541050	Reserving chr handle:%x
+4d4fa3e	4d970082a9a4fca1	Node bank entity ID:%d
+4d4fa64	6a75f1d3c6c8299d	Draw action points:%s
+4d4fa9a	af463f791e41d2bf	Event flag for special-condition path:%d
+4d4fe24	2f74dabbb8a03005	Observe
+4d4fe2a	166e899fc9d44e82	Request
+4d4fe30	31524bec3a358230	Reserve
+4d4fe36	d00ae45b2691d183	Run
+4d4fe3c	69ed5e3cd1e00846	Stopped
+4d4fe42	53d3ced486dfc571	Unknown (impossible)
+4d501ce	4db68271580733c0	Area activation state change request
+4d50254	46d6fa2681a5c8c7	Block activation state change request
+4d502c0	15a48131ff17f46d	Draw lines to all ObjAct targets : %s
+4d50312	c73bd6c40ad55acf	Draw lines to all reserved chrs  : %s
+4d5036c	ac403919dd46d2fd	Draw info for all ObjAct : %s
+4d503b4	545c568c077e5397	Draw all action points : %s
+4d50404	e50c263a733ce1fc	Set all ObjAct to observe[push enter]
+4d50462	369d3a3c97ed241b	Nearby ObjAct: observe->stop[push enter]
+4d504f8	f95caf93eaf4f137	Nearby ObjAct: stop->observe[push enter]
+4d505c0	63daaa31408bac70	Operate test ChrIdx : %d
+4d5061a	daad3a4e65508fa0	Operate test MyIdx : %d
+4d50670	eeee02631d783db9	Run net operate test : %s
+4d508b6	4c628070f13b1f58	Run NetSync test:%s
+4d508ec	063de9c0ad75c16e	Sync test Target WorldBlockIdx(-1:ActiveIdx):%d
+4d50944	a92c31a07dae5bfe	Sync test MyIdx:%d
+4d50962	dce31cc58548e5b3	Sync test ChrIdx:%d
+4d50982	85e571cc4c118b36	Sync test host state:%d
+4d509a4	9c2ced6fb6b9d9e5	Net sync repeat interval:%.1f
+4d509c6	4368815fd023e655	Time to next net sync:%.1f
+4d509e8	4892d78d90afa95c	Net send disabled:%s
+4d50a38	4bdcbd3a98c1ae27	Timer list
+4d50c7c	c3021c25e4a57b42	-------<Link map number to current Index>-------
+4d50cc4	0da2e1df5bde5af3	[%d] < Current Index
+4d50ce2	4770342b5ece9bc1	ID[[C]AABRXXX]:[[%d]%d%d%d%d%d%d%d]
+4d50d2a	926fc465b35e9a21	ID[C[A]ABRXXX]:[%d[%d]%d%d%d%d%d%d]
+4d50d72	e6c5de19044c9951	ID[CA[A]BRXXX]:[%d%d[%d]%d%d%d%d%d]
+4d50dba	55b54656a6c6be59	ID[CAA[B]RXXX]:[%d%d%d[%d]%d%d%d%d]
+4d50e02	d728876b5e4271e9	ID[CAAB[R]XXX]:[%d%d%d%d[%d]%d%d%d]
+4d50e4a	6bad7a311e45b569	ID[CAABR[X]XX]:[%d%d%d%d%d[%d]%d%d]
+4d50e92	166f13f6aad8c619	ID[CAABRX[X]X]:[%d%d%d%d%d%d[%d]%d]
+4d50eda	e6540e2595e9d569	ID[CAABRXX[X]]:[%d%d%d%d%d%d%d[%d]]
+4d50f22	b720c222dec52c02	 : Value %d
+4d50f32	022500c57e548a0b	←  →
+4d50f3a	23dd6c0fe4fa976c	NetMode:on
+4d50f50	243f22da3f4c3ff2	NetMode:off
+4d50f7a	3a9e0802a133df35	UseBitNum:[%d]
+4d50f98	a0189d12e435aa04	SetEventValue[%d]:Push Enter
+4d51002	0a47c1d6dd36bcd8	SetCurrentDungeonIndex[%d]:Push Enter
+4d5104e	d9de8ca85486de9a	Apply link ↑ < (○)
+4d510da	b3258be5f36c37f3	New flags (testing)
+4d511a6	aef4b00f75151a38	≪%d≫ < PageUnitNum (alloc units per page)
+4d511e4	84db83b30b653fde	≪%d≫ < FormalPageNum (total)
+4d5121a	5b47b9811dccdcf7	≪%d≫ < UnitSize (byte)
+4d5124e	ababeeaa7e9c4089	≪%d≫ < OnePageSize (byte)
+4d51294	70bfd198459f0c04	≪%d≫ < FormalPageSize (total allocated, byte)
+4d512e0	34ff2f8957918d28	≪%d≫ < PageTableSize (high digit to page mappings)
+4d51326	152badc40421c0f8	≪%d≫ < TemporaryPageNum
+4d51360	2aea3b5b0c2de5c8	OutputLogMappingState < (□+○:OutputLog)
+4d513ac	08659207b516da84	]
+4d513bc	c911e43b38ecd8fb	(○:Inc) (△:Dec)
+4d513da	3406553cb29c94be	≪Flag:%s≫ < [%s] < (○)
+4d51928	f42958f3655c6988	   #\t\n
+4d51e44	78f47fb161cfde9b	Log load state (on press only)
+4d51e6c	117a71f956a4b67f	[%s]All STREAM<Log load state of all streams (ON/OFF toggle)
+4d51f1a	8eebd9d0c157ea16	《%s》[%s]STREAM%d<Log load state (ON/OFF toggle)
+4d5201e	afe0c970926216a6	%s < (○)
+4d52214	f9acdba163b59a84	[%s] < Limiter
+4d5222e	acf24377f8727e3c	≪%2d≫ < Count
+4d52240	5216d80c98f0f5cd	≪%6.2f[MB]≫ < Total size
+4d52264	a6d78b7f5f16e0a9	≪%6.2f[MB]≫ < Min size
+4d52288	fcb72280912cc0e2	≪%6.2f[MB]≫ < Max size
+4d522ac	65dcf7602bbdc894	≪%6.2f[%%]≫ < Usage
+4d5230e	60890197b057d8db	[%s] < Disable Update
+4d52336	2f5b5dcfcd24cee6	[%.2f] < Gain
+4d5234e	4c82b9421c8ee7f7	[%.2f] < Target Angle[deg]
+4d52380	6fe52d378a182f17	[%.2f] < Current Angle[deg]
+4d523e6	2cea9db1bc62211c	NearPlane[%0.3f]
+4d52408	61a680d12df33e94	ZoomInFovY[%0.3f]
+4d5242c	cb03c62004377b4d	ZoomOutFovY[%0.3f]
+4d52452	3ca26b2f25e5057f	ZoomRate[%0.3f]
+4d52472	4a82c5610d734b6e	ZoomRateNormalMin[%0.3f]
+4d524a4	006d0f763a2ebc12	ZoomSpeed[%0.3f]
+4d524c6	ee902e2451efd1d6	ZoomInOrg.x[%0.3f]
+4d524ec	fde6e4cc2dbd9957	ZoomInOrg.y[%0.3f]
+4d52512	bdbf101684069dd4	ZoomInOrg.z[%0.3f]
+4d52538	5e1e74e3460a53b9	ZoomInOrg.w[%0.3f]
+4d5255e	227e088557d347c7	ZoomOutOrg.x[%0.3f]
+4d52586	cb48416c2f87a506	ZoomOutOrg.y[%0.3f]
+4d525ae	02ae703244ffcf65	ZoomOutOrg.z[%0.3f]
+4d525d6	71dd59bef1ab7d28	ZoomOutOrg.w[%0.3f]
+4d525fe	a7b1cff10b02606f	BlendRateP.x[%0.3f]
+4d52626	cc537a01be3e73b2	BlendRateM.x[%0.3f]
+4d5264e	5e2c3ceafd7e40ee	BlendRateP.y[%0.3f]
+4d52676	eab7757e971c6573	BlendRateM.y[%0.3f]
+4d5269e	ab19b98122c948ad	BlendRateP.z[%0.3f]
+4d526c6	8b6a4c160ea400f0	BlendRateM.z[%0.3f]
+4d526ee	6cbae743700a07ee	RotRageMaxX[%0.3f][deg]
+4d5271e	1f7cd7dcbd409880	RotRageMinX[%0.3f][deg]
+4d5274e	2b3575ea0dc69f33	ChrTargetDist[%0.3f][m]
+4d5277e	935d06a2d1eae62e	InBloomBegin[%0.3f][pix]
+4d527b0	1268cd7c0879e186	InBloomEnd[%0.3f][pix]
+4d527de	d2c4c13d37997c5e	InBloomPow[%0.3f]
+4d52802	a6689d7cafe59457	OutBloomBegin[%0.3f][pix]
+4d52836	830b478e73fc801f	OutBloomEnd[%0.3f][pix]
+4d52866	622032c9af7e2d8f	OutBloomPow[%0.3f]
+4d5288c	ce90ea3c4892a262	TmpTgtAng.X《%0.3f》
+4d528b2	02d440392a0b0183	TmpTgtAng.Y《%0.3f》
+4d528d8	a287c31da4c0f8d4	TmpChrAng.X《%0.3f》
+4d528fe	41975bb12769dff5	TmpChrAng.Y《%0.3f》
+4d52924	31f3f5e1f87d828a	TmpCamAng.X《%0.3f》
+4d5294a	abbb341a8313fecb	TmpCamAng.Y《%0.3f》
+4d52970	f13d15eec7e85869	DirectPitchAng[%0.3f][deg]
+4d529a6	0adf3eb45cdeff73	DirectPitchRate[%0.3f]
+4d529d4	35344dca4c2692fd	CamTurnBaseRotY《%0.3f》
+4d52a02	5754342aa85ccff2	CamTurnRate《%0.3f》
+4d52a28	c0b5699178ec8e00	CamTurnRateIncTime[%0.3f][sec]
+4d52a7a	ea501e1900398f98	[%0.3f] < LerpTime
+4d52a9c	68aea06a69bbcdba	[%s] < Enable New Camera
+4d52aea	d0cfd4ffb0cbaaf4	FovY[%0.3f]
+4d52b02	f1de53795e5c27c8	X[%0.3f] < ChrOrgOffset
+4d52b2e	87b80737ee772891	Y[%0.3f] < ChrOrgOffset
+4d52b5a	67885ff091e5e53a	Z[%0.3f] < ChrOrgOffset
+4d52b86	2f3a8abb4bb07282	[%0.3f] < FulcrumDistRateByLrMoveMaxDist
+4d52bd4	61c8193c0c1fb06e	[%0.3f] < FulcrumDistRateMinByLrMove
+4d52c1a	4b6bc128dacf3810	[%0.3f] < FulcrumDistRateMaxByLrMove
+4d52c60	8dcaeb8a4fd52200	[%0.3f] < FulcrumDistRate
+4d52c90	b7412f94883d66b2	[%0.3f] < FulcrumDist
+4d52cb8	25e3773123024873	[%0.3f] < CamDist
+4d52cd8	257b52ed16cc3342	[%0.3f] < CamDistTarget
+4d52d04	147f998849be97a5	[%0.3f] < CamCastSphereRadius
+4d52d3c	8661acbccd644f3c	[%0.3f] < CamSafeMarginRate
+4d52d70	ff950d13a287f762	[%0.3f] < CamSafeMarginMax
+4d52da2	5125562e70e3ca13	《%0.3f》 < ChrTransChaseRate
+4d52dd6	0e5e13859d262993	[%0.3f] < ChrTransChaseRateForNormal
+4d52e1c	72b9ebbf1d5ae007	[%0.3f] < ChrTransChaseRateForEscapeWall
+4d52e6a	6ceec3110fa5bce3	[%0.3f] < TargetTransChaseRate
+4d52ea4	5e4f262d3a692760	[%0.3f] < TargetRotXChaseRate
+4d52edc	407dbe7256a83dd3	《%0.3f》 < TargetChaseRateXZ
+4d52f10	bdbd4b03897ac533	[%0.3f] < TargetChaseRateXZForNormal
+4d52f56	4b8c1024db87f5e7	[%0.3f] < TargetChaseRateXZForEscapeWall
+4d52fa4	4b25b44ba50120e8	[%0.3f] < TargetChaseRateY
+4d52fd6	764bc56523ed48b3	[%0.3f][deg] < TargetChaseRateMinAng
+4d5301c	14f271d22f6aae5d	[%0.3f][deg] < TargetChaseRateMaxAng
+4d53062	80a4cf38bc0f9683	[%0.3f] < TargetChaseDistRate
+4d5309a	1552ed9cb98efbbd	[%0.3f] < TargetChaseRateAtLockXZ
+4d530da	ee65a4f14c303706	[%0.3f] < TargetChaseRateAtLockY
+4d53118	00577bc1f37a3ecd	[%0.3f][deg] < TargetChaseRateMinAngAtLock
+4d5316a	4b953a4376693167	[%0.3f][deg] < TtargetChaseRateMaxAngAtLock
+4d531be	e310d4a9698cba46	[%0.3f][sec] < TransChaseByControlEndWaitTime
+4d53216	f2d050ca31c4bd3c	[%0.3f][sec] < TransChaseByControlEndReleaseTime
+4d53274	ff3423c84f42faec	[%0.3f][sec] < RotCtrlEndWaitTime
+4d532b4	d4132824a817f856	[%0.3f][sec] < RotCtrlEndReleaseTime
+4d532fa	07ea71f95f225de9	[%0.3f][sec] < RotHiSpeedRateIncTime
+4d53340	e3d8edb645127364	MaxX[%0.3f][deg] < RotRange
+4d53374	f83bdddf7850555a	MinX[%0.3f][deg] < RotRange
+4d533a8	bc8f8aab69386b8a	MaxX[%0.3f][deg] < RotRangeAtLock
+4d533e8	6b9f2e256f4dc8d4	MinX[%0.3f][deg] < RotRangeAtLock
+4d53428	800aa26941c44a23	Begin[%0.3f][deg] < RotRangeLerpHeight
+4d53472	f033bf5080d8ea4b	End[%0.3f][deg] < RotRangeLerpHeight
+4d534b8	ac2074f97fa129ca	X《%0.3f》[deg/sec] < RotSpeed
+4d534ee	ee7286156253473b	Y《%0.3f》[deg/sec] < RotSpeed
+4d53524	57da8003980ed158	X[%0.3f][deg/sec] < RotSpeedMin
+4d53560	bbdd8ea426ed71e1	Y[%0.3f][deg/sec] < RotSpeedMin
+4d5359c	590a84464ae33836	X[%0.3f][deg/sec] < RotSpeedMax
+4d535d8	ba69926173df4bcf	Y[%0.3f][deg/sec] < RotSpeedMax
+4d53614	9e296fc61f42d7bb	X《%0.3f》[deg/sec] < RotHiSpeed
+4d5364e	8cb7a9da700d3cea	Y《%0.3f》[deg/sec] < RotHiSpeed
+4d53688	3a9b1cdba0266dc1	X[%0.3f][deg/sec] < RotHiSpeedMin
+4d536c8	a9cfe96ef614dfd8	Y[%0.3f][deg/sec] < RotHiSpeedMin
+4d53708	39272098ed1847af	X[%0.3f][deg/sec] < RotHiSpeedMax
+4d53748	aaffedb1a8e946b6	Y[%0.3f][deg/sec] < RotHiSpeedMax
+4d53788	9fed95fa69019781	《%0.3f》 < OptionRotSpeedRate
+4d537be	2349b60b029128c5	[%0.3f][deg] < DirectPitchAng
+4d537f6	0fb705249ff4f1cf	[%0.3f] < DirectPitchRate
+4d53826	f0a2b4f50175b3f2	[%0.3f] < LockRotChaseRate
+4d53858	219020913048dae4	[%0.3f] < LockRotChasePlayAng
+4d53890	9bb4f9d020bcf5f5	[%0.3f] < LockRotXShiftRatio
+4d538c6	642e3c02a745e208	《%0.3f》 < ForceFrontLockRemainTime
+4d53908	bf2de09c1fb7a774	[%0.3f] < ForceFrontLockTime
+4d5393e	2f6875eb5891319f	[%s] < UpdateTargetRotXByLock
+4d53976	5967ecbb05f2ad56	[%s] < UpdateTargetRotXByFrontLock
+4d539b8	c933fe44e8b6a202	[%s] < Lock camera adjust enabled?
+4d539dc	d2b917221617e050	[%0.3f][rad]<Lock camera adjust max X rotation
+4d53a16	e8244416ad1d8741	[%0.3f][rad]<Lock camera adjust max Y rotation
+4d53a50	c660bef1769cacae	[%0.3f] < Lock camera adjust rotation follow rate
+4d53a7c	2be4ae4d51af616a	[%s] < UseEscapeWall
+4d53aa2	be3b85429f2fa6f7	《%d》 < IsEscapeWallMode
+4d53ace	023fec3d4f83cd00	《%0.3f》 < EscapeWallRotX
+4d53afc	0243523d4f86b029	《%0.3f》 < EscapeWallRotY
+4d53b2a	fe7c759f133796d3	[%0.3f][deg/sec] < EscapeWallRotAddX
+4d53b70	fe790f9f1334b3aa	[%0.3f][deg/sec] < EscapeWallRotAddY
+4d53bb6	7302c8d73978eccb	[%0.3f][deg/sec] < EscapeWallWeakRotAddX
+4d53c04	72ff62d7397609a2	[%0.3f][deg/sec] < EscapeWallWeakRotAddY
+4d53c52	a647bb59138a22cf	[%0.3f] < EscapeWallWeakBeginRatio
+4d53c94	d53946d1a9f169be	[%0.3f][deg/sec] < EscapeWallRotMaxX
+4d53cda	d53cacd1a9f44ce7	[%0.3f][deg/sec] < EscapeWallRotMaxY
+4d53d20	d76618a93db4de41	[%0.3f] < EscapeWallRotDampRatio
+4d53d5e	83b5fad7d794196f	[%0.3f][deg] < EscapeWallWingAngY
+4d53d9e	49fa34f0d10cf262	[%0.3f][m] < EscapeWallWingLen
+4d53dd8	53dea71ceb034f5d	[%0.3f][m] < EscapeWallWingRadius
+4d53e18	a02870238cf82fd8	[%0.3f][m] < EscapeWallWingSeparate
+4d53e5c	b632bf6aa73ed2a3	《%0.3f》 < EscapeWallWingHitFractionPlus
+4d53ea8	880b0603ada3db65	《%0.3f》 < EscapeWallWingHitFractionMinus
+4d53ef6	2b3f3b20d256a1e1	[%s] < Use territory avoidance?
+4d53f1a	1bcd4dae8793c06c	[%s] < Show territory avoidance range?
+4d53f42	d2cd17342849b5d4	[%d] < Max avg samples
+4d53f58	6da8b8d162126664	[%d] < Max weighted avg samples
+4d53f72	f97e6c013193fa1c	[%0.2f] < Weight multiplier
+4d53f8c	0962203e5e647b56	[%d] < Event-set lock camera param ID(-1:default)
+4d53fce	6f5da59335d92cd6	[%d] < Boss lock camera param ID(-1:default)
+4d54010	2ad0ece3cec1c97c	《%0.3f》 < RotCtrlRate
+4d54038	16a49e911475b533	《%0.3f》 < RotCtrlEndWaitRemainTime
+4d5407a	f8584431523957cb	《%0.3f》 < RotHiSpeedRate
+4d540a8	00a72eae2af22315	《%d》 < ResetRequest
+4d540cc	295fd998c80b35da	《%d》 < ResetCamRot
+4d540ee	e7388fe0d6b4bdd8	《%0.3f》 < CamRotX
+4d5410e	6a03cb26ade5e0ed	《%0.3f》 < ResetCamRotX
+4d54138	6a006526ade2fdc4	《%0.3f》 < ResetCamRotY
+4d54162	fff46997abdff626	《%0.3f》 < TargetRotX
+4d54188	aaeb89b0587382e1	《%0.3f》 < TransChaseByControlEndRate
+4d541ce	6abbd41c0b0dd1c9	《%0.3f》 < TransChaseByControlEndWaitRemainTime
+4d54228	5c369b0da8814af7	《%d》 < IsHandControl
+4d5424e	52e55f537b7f0286	EnableDbgDisp:[%s]
+4d54274	f39443d478be0836	EnableChrFollowCam:[%s]
+4d542a4	9beb7ea05d3a256d	EnableDbgDispForEscapeWallWing:[%s]
+4d542ec	16a9d697ab2fc18f	[%s] < Map-set camera mode param enabled?
+4d5431e	082fa01b561a4407	[%s] < Auto camera height enabled?
+4d54342	519ff008784592c1	[%s] < Lock camera arrange
+4d54520	2b50d15346713208	Player meets action button area condition:[%s][ActionButtonParamId:%d][entityId:%d]
+4d545a6	9491e6cf3e20d008	Target chr search failed[ID:%d]
+4d545c8	24b089bd150755ad	Party DispMask Or (all chrs' display masks)
+4d5460c	efb79183e163e125	Target DrawMask
+4d54648	664063951de13935	When not in draw range
+4d5465c	9db5ca4b5c7649d8	When in draw range
+4d5466e	f1f5fbcffa5a3913	Chr HP meets condition:[%s][%d][%d]
+4d546ae	1a212b5bc8266681	Event entity took given damage:[%s][%d][%d]
+4d546fa	14f08a75af058b89	Generic dialog branch:[%s]
+4d54718	dde8420257c631f6	Action button pressed:[%s]
+4d54740	8007c1cb60b73f16	Online mode meets condition:[%s][%d]
+4d5477c	07cf6207b496b200	Head
+4d54780	0cd46aed5156efc6	Body
+4d54786	0931eb07b5c4d823	Arms
+4d5478a	088b6307b53759e4	Legs
+4d5478e	028067e731b1c9e2	Player has equipment ID in slot:[%s][%s][%d]~[%d]
+4d548a0	7a6abe8bcb279a1a	[%0.1f] < Hint message active start range[m]
+4d548d2	76fcc6213051d86b	[%0.1f] < Hint message active end range[m]
+4d54904	efd0dff46106b3d0	[%0.1f] < Hint message, when off: start range [m]
+4d54936	84dd9ea3ee750d05	[%0.1f] < Hint message, when off: end range [m]
+4d54968	fd0e091e655ae870	[%d] < Max registrations: max value
+4d54984	6ceed96c1d9e8d8f	[%d] < Max registrations: min value
+4d549a0	751299623e49d7ad	[%d] < Max registrations
+4d549b6	3cb984533b3896a2	own
+4d549be	9ac0af6ac194eb65	server
+4d549c6	54b8a2235e955b05	Placed messages (%s)
+4d54a3a	2b03fd4d3192be02	[%02d] < Gesture ID
+4d54a88	77de2d132c822f2d	Message DB
+4d54a96	13442879b57ca993	Template ID:%d Word ID:%d Conjunction ID:%d Template2 ID:%d Word2 ID:%d Gesture ID:%d Good:%d Bad:%d Times read:%d
+4d54b58	d9f6f288b4ca38f0	Create test messages:%d (□+○)
+4d54b7a	89868964836c5620	Re-register own message Messengers (□+○ to run)
+4d54bac	a3e0ea92c9d93a63	[%d] < Bad ratings
+4d54bc0	372d3ca2b57bf89b	Map name ID [%d]
+4d54bd6	d4fc7f0b94101a36	Block name ID [%d]
+4d54bee	106f552c6db684fd	Channel ID [%llu]
+4d54c08	d20765029684b4a5	Play region ID [%d]
+4d54c26	a584ffb45375161b	Map UID:%s Net SN:%s ServerDataID:%lu) %d%d%d%d:%d:%d
+4d54c8e	959dfc736b6d4c7d	Pos:(%0.3f, %0.3f, %0.3f) Y angle:%0.3f[deg] Name ID:%d
+4d54cf0	aba3090781d3c2fa	Template ID:%d Word ID:%d Conjunction ID:%d Template2 ID:%d Word2 ID:%d Gesture:%d Good:%d Bad:%d Times read:%d
+4d54db2	e7151f421d7a41c1	Rated good
+4d54dbe	36e4a11c036f6e15	Rated bad
+4d54e3c	26190c182df9a7c5	Pos:(%0.3f, %0.3f, %0.3f) Y angle:%0.3f[deg] 
+4d54e90	45045e638ff6594a	Good:%d Bad:%d Times read:%d
+4d54ebe	0d7097a9c2fd0612	Favorite:[%s]
+4d54eda	8e2808201de0d98d	Death cause ID:%d Text:%s
+4d54efa	ac59213174067288	Killer ID:%d Text:%s
+4d54f1c	8bf51f60bfed3961	Bloodstain DB
+4d54f50	44ecabe4ae1015cf	[%d] < Good ratings
+4d54f64	3726167752a6d4fe	Map UID:%s Net SN:%s TombMessID:%llu %d:%d:%d
+4d54fbc	c96f00f245aab7a9	Times read:%d Rated:%s
+4d54fda	8027e0417d8edbab	Not yet
+4d54fe0	43c635d14785fdd9	Rate good (□+×)
+4d54ff4	adb29cb734281515	Rate bad (□+×)
+4d55008	21ee58a03d4ae6fd	Death cause ID:%d Cause text:%s
+4d5502c	4bca0e2a72e8e7d3	Killer name ID:%d Killer name:%s
+4d55050	44f2546715c841b4	Rating:%s Clear rating (□+○ to run)
+4d5507e	05d317c2890aef0b	Rated
+4d55088	c65bbcafd56c164d	Not rated
+4d55090	379dec12e32b17a8	Moved by debug:%s
+4d550da	c54ca9e70a810833	[%d] < Max base spot points
+4d55100	42d23b1a6ee6240f	[%d] < Max extra spot points
+4d55126	315dd79b2592ea6b	[%d] < Max total spot points
+4d5514c	cac4c72de09e51c4	Bonfire DB
+4d55158	3001cdc4daabc70c	Entity ID:%d Base:%d Extra:%d Parent:%c LV:%d Enabled:%c
+4d5525a	d170d561822576c5	Placed arena participants
+4d5526c	95952c6597ff3cba	Arena participant DB
+4d553c0	c6217e43df28fcdb	Connection node info
+4d553d0	4822d9007efdb0c0	Peer connection node info:
+4d553e8	f73bc7f4a7b0de6a	Own connection node info:
+4d55400	09cd9357d720134d	[%0.3f[sec]] Position send request interval
+4d5542e	b1fac56bd0701bdf	《%0.3f[sec]》 < Position send request time left
+4d554d6	b66f79f75050bbfc	[%d] < Connection tickets
+4d554f0	54ceec43f5d6506c	[%0.2f] < Connection ticket refill time left [sec]
+4d55524	4ccc7ec4784ae055	[%0.2f] < Connection ticket refill interval [sec] (start point)
+4d55564	6e379418a2a94c20	[%0.2f] < Connection ticket refill interval [sec] (end point)
+4d555a4	7300e6341f04bcbf	[%0.2f] < Connection ticket refill interval ratio (0.0:start point ~ 1.0:end point)
+4d555f4	dacfc769905ca801	[%0.2f] < Connection ticket refill interval ratio time left [sec]
+4d55634	780e4281d359c3f9	[%d] < Max connection steps
+4d55652	54b98b71e2c6c42e	[%d] < Max connections
+4d55668	5cf3cd8922cdbfc7	[%d] < Debug: active count
+4d5568a	f4d8710510997746	[%d] < Debug: active connections
+4d556b0	e8ab7174ae93cfc3	[%d] < Debug: active ambassadors
+4d556da	55c0503a78bb667e	[%d] < Debug: maps to connect to
+4d55702	6c043fc2041695ba	[%d] < Debug: node connect skip count
+4d55796	fadcedf9154153d0	QoS total: SRTT:%04d/%04d[last/avg] RTTVAR:%04d/%04d[last/avg] Resent:%0.1f%% Re-received:%0.1f%%
+4d55934	7d244a4d0f3c9cc2	Send: S:%04dB M:%04dB P:%04d
+4d55968	8e7c4ddd072287f1	Recv: S:%04dB M:%04dB P:%04d
+4d5599c	318b0e990a400279	QoS total: SRTT:%04d/%04d[last/avg] RTTVAR:%04d/%04d[last/avg]
+4d55a04	d732f8343d802ff3	QoS send: Rate:%04d[byte/sec] Packets:%06d/%06d[resent/total]
+4d55a64	0b6f7635a97024b4	QoS recv: Rate:%04d[byte/sec] Packets:%06d/%06d[valid/total]
+4d55b1c	748dae57310826f0	[%d] < Debug send (□+○)
+4d55b3e	6b174fa9f158c747	[%d] < Debug receive (□+○)
+4d55b60	a645dc3635b0e6f2	Event interference DB
+4d55b74	f718f101db4190e5	《%d》 < Event interference ID
+4d55b90	2fd9c64988c8e6da	Event interference ID:%d
+4d55ba8	5c0423a993519b4f	[Event interference ID:%d](*)
+4d55c9a	0172f44e36e19ff6	PS Plus membership disabled:%s
+4d55d1c	235d3d9d0b5a8a86	Nemesis
+4d55d3c	57aeb788ba0120ce	Always write nemesis sign:%s
+4d55d5a	1a02d313f3b757db	※Signed out
+4d55d6c	52eac6d6b779e070	←for demo play
+4d55e10	df57e5f55fb91c04	FRPG Net%s[On%c%c]《Ch.%d%s》ver.%d < ○ to disable
+4d55e64	de1c79888553d82d	FRPG Net%s[Off%c%c][Ch.%d%s]ver.%d < ○ to enable, ←→ change channel
+4d55ece	15b77ecd5f258beb	Network state LAN conn%c LAN disc%c Sin%c Sout%c LSin%c LSout%c SuLAN disc%c Online%c Offline%c
+4d55f60	86490001395c07e0	Force LAN disconnect:%d
+4d55f76	407f0f6f578fc9b2	Force sign-out:%d
+4d55f8e	bfa1a717c0f23bd1	Local sign-in:%d
+4d55faa	caf237574e5326cd	Override Live connection state:%d
+4d55fd0	fd971ed354608b9d	Live connection state:%d
+4d55fe8	d87cbd9093cbc6c0	Force PS Plus membership off:%d
+4d5600c	a6c0da4a63bafea5	Active connections:%d Ambassador connections:%d
+4d5603c	07d19eba2b16f520	Map UIDs to connect to:
+4d56056	4234c8a0ecf34e8e	Node connect skip count:%d
+4d56094	30dd281950d8f510	No party members
+4d560b0	386ace4224343149	[%lu] ChrId, [%lu] UserId
+4d560e0	535f1355827e1a40	Matchmaking password:%s
+4d56104	855b3c8f4442caa5	No matchmaking password
+4d56128	19c1486c5ffffb6f	Password in hostile multiplayer:%s
+4d5614e	8bc0026d66646a36	Use
+4d56158	f2fb78eb446f204d	Don't use
+4d56164	360a4823381486c3	Messenger appearance upload
+4d56184	e51650198f3d74f8	[%d] < Message good-rating level
+4d561a0	58d3c422ad8a5138	[%d] < Message bad-rating level
+4d561bc	167780b62ae4afe6	[%d] < Message rating level
+4d561d8	0d8a9adbeb681099	Upload current appearance (○+□)
+4d561fc	1a893abc4e024d06	[%s] < Blood-crazed hunter
+4d56216	5650af8307c4cd59	[%s] < Vileblood
+4d56228	e959b32eaa3276f8	[%s] < Vileblood hunter
+4d5623e	b8cf348218bfa024	[%s] < Hunter of blood-crazed hunters
+4d562ee	1b6214a36eb85deb	《%s》 < P2P system init requested
+4d5631c	bb6f0317481eaa60	《%s》 < P2P system shutdown requested
+4d56348	b30e2dc3b5f72eff	《%s》 < FRPG Net enable request
+4d5636c	85c50f6847d773db	《%d》 < FRPG Net enable channel
+4d56396	6e87d61a3afe7189	《%s》 < FRPG Net disable request
+4d563ba	aea4f603e84db5b3	[%s] < Lobby test
+4d5641a	bfa44504c216eed3	《%0.3f[sec]》 < Lobby bomb count-up time
+4d56452	ba514d6b03416209	《%0.3f[sec]》 < Explosion time
+4d56476	f0de39dc02b2b07b	[%0.3f[sec]] < Base explosion time
+4d5649e	b2297071f4c87346	[%0.3f[sec]] < Explosion node time
+4d564c8	f597dd0d2a7972df	[%0.3f] < Explosion node time decrease rate
+4d564ee	c6f546df848b48ce	[%0.3f[sec]] < No-throw base time
+4d5651e	0e2abcae0ff2648a	[%0.3f[sec]] < No-throw random time
+4d56552	d8261667e6eed57b	Lobby Bomb
+4d5655e	9f9abbfa4096cbeb	《%s》 < Exit request
+4d565c2	ff1faad1e7cff8a3	[%0.3f[sec]] < Own broadcast lifetime
+4d565ec	d4697a6bfa309328	[%d] < Own broadcast tickets
+4d5660c	d6b3630e9ce340af	[%0.3f[sec]] < Own broadcast update interval
+4d5663e	f53a57a9c13e9b6d	《%0.3f[sec]》 < Own broadcast update time left
+4d56670	a4a6a029ed6d7d24	Connected maps:
+4d5667e	b3d031adc6f2f10b	Own broadcast data
+4d56692	ff0fc1ef3595dd78	Node DB
+4d5671a	36f17fe5768ba0d9	Chr type:%d Covenant:%d Lv:%d Play region:%6d
+4d56788	e656a9d59b8b9ac8	[%s] < Mark bounty ranking loaded (dummy)
+4d567be	be41a7dd97f031b7	Ranking DB
+4d567d0	67d28e5093bc2510	《%d》 < Ranking ID
+4d567ea	520690a7657e1edf	Ranking ID:%d
+4d56800	b2eeb73fa092d48a	[Ranking ID:%d](*)
+4d56896	a1e3612d16073479	Bounty (own)
+4d568a4	3880b22112ae7316	Bounty (write A)
+4d568b2	b4b5541f9833d5b9	Bounty (write B)
+4d568c0	79e257cae7fb471b	Izalith (own)
+4d568ce	ffa0e287725efa44	Izalith (write A)
+4d568dc	2eb40c9f7fe46b73	Izalith (write B)
+4d568ea	d2ff1ce24a20511a	1A (load)
+4d568f8	4ebfddbdbb56d72d	1B (load)
+4d56906	61f84abad9b269c8	1C (load)
+4d56914	6b7f714d1080cdbb	1D (load)
+4d56922	83131e31e0f22c8e	1E (load)
+4d56930	6635cc5328058491	2A (load)
+4d5693e	37743f002ce3680e	2B (load)
+4d5694c	f98a925035b0933b	2C (load)
+4d5695a	9f4c9fbd543bb348	2D (load)
+4d56968	fd785444161398ad	2E (load)
+4d56976	4f63184c1f6d44c1	BA (load)
+4d56984	c3b4b5fe862f2c7e	BB (load)
+4d56992	532d53cd14a4f62b	BC (load)
+4d569a0	94a78bd1ef39be38	BD (load)
+4d569ae	cafaf5ffae3878dd	BE (load)
+4d569bc	27f8a47a7d23198d	1A (own)
+4d569ca	be1417f12c93ab16	1B (own)
+4d569d8	f6f377bbc0bb449f	1C (own)
+4d569e6	4b03f748692415b0	1D (own)
+4d569f4	6ddb7de9bed2b361	1E (own)
+4d56a02	b3f81f2c51959bba	2A (own)
+4d56a10	d10b9666bd0608e1	2B (own)
+4d56a1e	7d3620a6ac0f1730	2C (own)
+4d56a2c	8578d50f8902741f	2D (own)
+4d56a3a	7961db20d8674c96	2E (own)
+4d56a48	7e56ea05e507f12a	BA (own)
+4d56a56	ed60b6c301c6c591	BB (own)
+4d56a64	e9ed7ecd009305e0	BC (own)
+4d56a72	bfa21e3c796a11cf	BD (own)
+4d56a80	2557cd198a4cc186	BE (own)
+4d56a8e	36959ec345b4f317	1A (write)
+4d56a9c	c956576c81702b10	1B (write)
+4d56aaa	29deb15e470b1add	1C (write)
+4d56ab8	492c3a4a84c21bae	1D (write)
+4d56ac6	74a36716234f5a9b	1E (write)
+4d56ad4	4cd9036f7bc59664	2A (write)
+4d56ae2	7a215d671fd6331b	2B (write)
+4d56af0	ce68968134d2bc2e	2C (write)
+4d56afe	ada7ec8fdda3235d	2D (write)
+4d56b0c	3199e7c3c01e2d90	2E (write)
+4d56b1a	48a2ba0cb64594f4	BA (write)
+4d56b28	f3ad4969ee7a43eb	BB (write)
+4d56b36	3bebe0a6a1d57fbe	BC (write)
+4d56b44	1cde36b54c177b6d	BD (write)
+4d56b52	5e5b51fc82664460	BE (write)
+4d56b60	9743953d7c960007	List request
+4d56b6a	ee644518a66a8ba2	List waiting
+4d56b74	c20492de67f74cfa	List done
+4d56b7e	f7c5d2d7838991ed	List failed
+4d56b88	cf1a5b1a79f389a7	Detail request
+4d56b92	cedd0afa8b0ecf82	Detail waiting
+4d56b9c	f9c718c2c2c4d85a	Detail done
+4d56ba6	81529acc80e4da4d	Details failed
+4d603e2	05f9abcff9f686e1	[%s] < Use debug ranking board
+4d60410	8b547629db57be2c	Server
+4d60418	91cee046c69aaeb7	Odd months
+4d60420	4b903bebaede1b81	Even months
+4d60428	2cdf98dd50ce5b52	[%s] < Load setting (→%s)
+4d6044a	c967c77bcd6aca86	Register bounty ranking (□+○)
+4d6046e	434ca47ea48436fe	Load bounty ranking (□+○)
+4d60492	cae37934ac099936	Register Izalith ranking (□+○)
+4d604b8	14af1522fe2cb94e	Load Izalith ranking (□+○)
+4d604de	2c568955ead35594	Load Izalith ranking details (□+○)
+4d60508	2e58f04387ce7d09	Register arena 1v1 ranking (□+○)
+4d60532	f19dca4ff977b369	Register arena 2v2 ranking (□+○)
+4d6055c	feda9203e0cd19cb	Register arena battle royale ranking (□+○)
+4d6058e	565dfaddf59f6c35	Register League ranking (□+○)
+4d605b0	c56195f51197d17a	Ranking board manager
+4d605e6	61fc54c34b535f63	Ranking board instance
+4d60604	cac57439b45b4836	Bounty (load)
+4d60612	a808c6c98e7b1384	Izalith (load)
+4d60620	58ec36188bb3d498	%c%s>%d~%d:(%0.1f)
+4d60646	5f25ee76add0750a	Owner: start
+4d60656	57027ea1c14681ae	Owner: confirm revenge
+4d6066a	a9622b0817419cb3	Owner: confirm normal
+4d6067e	041738cc7d830144	Target: start
+4d60690	e414077044862cb3	Bounty owner:%s %d %f %f
+4d606ba	e47c16d2e65feaa1	Bounty target:%s %d %f %f
+4d6070a	040a219df416ed36	Bounty manager
+4d60716	f2a05f91fe6169f7	[%d] < Debug resonance level (-1:off)
+4d60742	25ec568cd62336cc	《%d》 < Resonance count
+4d60754	ecea5a77f2f06899	[%d] < Max resonance count
+4d6076a	00d606ec954a137e	《%0.3f》 < Resonance rate
+4d60782	2628416ac8153cf5	《%d》 < Resonance level
+4d60798	078cfb64cb66fc79	Resonance magic DB
+4d60910	f7ce3d5b23475133	[%d] < Registrable count
+4d60926	b149c025f1402906	Placed resonance magic
+4d6093e	02e23215e404b99c	[%0.3f[sec]] Own SOS request update interval
+4d60972	57397979acb5e101	[%0.3f[sec]] Own SOS request initial lifetime
+4d609a6	9370e9fdc91efd81	[%d] Own SOS request initial tickets
+4d609d2	e1e0ef1e8b823d1f	[%s] Always reject summon requests
+4d609f2	fc24a59ede3d3dac	Sign type:%s Sign map UID:%s Net SN:%s
+4d60a32	31ea553c8bf8d8b6	Region ID:%d Level:%d sosChrVowType:%d multiPlayCount:%d
+4d60d68	0a55162bd084cce8	 Summon refused
+4d60dac	69aff09d05334a76	Sign type:%s Map UID:%s Net SN:%s UserId:%d CharaId:%d
+4d60e10	2e370cac20afe2c6	Sign type:%s Map UID:%s Net SN:%s
+4d60e4a	abaa001f4e15a9e1	Region ID:%d Level:%d Covenant:%d Multiplayer count:%d
+4d60ea8	bff781cfe3463df1	Registered statue objects
+4d60eba	a11cbb6160ad6f5b	Own statue
+4d60ec6	b9caca57a18de2a5	Statue object list
+4d60f3c	d76f5ce79e42f386	Test 0 ※Push[□+○]
+4d60f5c	560ab8c9e2a32f07	Test 1 ※Push[□+○]
+4d60f7c	b1260faf43d0d680	Test 2 ※Push[□+○]
+4d60f9c	dd8e7a9387739e36	Test 10 ※Push[□+○]
+4d60fbe	130a2c1cbbb1b977	Test 11 ※Push[□+○]
+4d60fe0	c96349bf7bfdcef0	Test 12 ※Push[□+○]
+4d61002	0ea0944bac76ffdc	Map UID:%s Net SN:%s
+4d61028	54a1c7072b4a5c30	Entity ID:%d Map UID:%s Statue type:%d
+4d61066	883d29dd204910ac	Linked statue>Map UID:%s Net SN:%s %d
+4d6109c	6326b7c4a36a7219	Linked statue>None
+4d610ac	59dd6f8dbe3e82c3	Statue object list
+4d610c0	52590c51404f9c65	Own statue list
+4d610d0	d8324733fc469e46	Statue DB
+4d610dc	7add21086d1fe205	Map UID:%s Net SN:%s %d:%d:%d
+4d61114	6a7d8055488d2f1d	Pos:(%0.3f, %0.3f, %0.3f) Y angle:%0.3f[deg]
+4d61166	e4d85a9d3f0d0663	Statue type:%d Statue pose ID:%d
+4d611f0	0dc5f460cf5ffe41	[%s] < Block sending wandering ghosts
+4d61210	1ea6d84e4c7f472a	[%s] < Block receiving wandering ghosts
+4d61230	dc1ba4ddc98fa044	[%s] < Always show own wandering ghost
+4d6125c	f71bdfc09e444a4f	[%0.3f[sec]] < Own wandering phantom initial lifetime
+4d6128e	bae8d7a4bbef6f43	[%d] < Own wandering phantom initial tickets
+4d612b8	ca1199cea9d9b36c	Wandering phantom DB
+4d61300	b657f2e58efaccea	《%d[byte]》 < Uncompressed replay data size
+4d61332	4bdeefd6866e0b41	《%d[byte]》 < Compressed replay data size
+4d61362	d738a9f4a6b01810	Used debug dash:%s
+4d61386	cc8c7700a1221465	Yes
+4d6138c	c6975ffb2a421c8a	No
+4d61402	d2fcf81de4abb94f	Equip game data
+4d6142e	4f22d35d1de55234	Inventory
+4d61450	e19d7c56feb015c6	===== Add =====
+4d61492	e0bef1c961113ee4	Equip [carried]
+4d614a6	348c1ba5e0a2c4d2	Repository [storage]
+4d6159e	542c581e99df96cb	Item use request from menu : %d
+4d615fa	053ff063fb12b59c	Event item stash test (push enter)
+4d6162e	f71790eb371bb81d	Event item restore test (push enter)
+4d61696	dbb9b13a6ed33e29	Type to add : %s
+4d616b2	a26ec72167027b27	Add all base weapons
+4d616e6	23dc1f1cffe5553a	Add all base armor
+4d6171a	c875947e6fd8383c	By weapon category
+4d6172a	633c31de61c91c4c	====Select to add====
+4d61746	a5c9dc87e9c98806	Add dagger
+4d6176c	454bd91fef7173db	Add straight sword
+4d61790	4cce58d527f76a97	Add rapier
+4d617b8	bd2758f4a50c3ccc	Add curved sword
+4d617de	928b26a065adc966	Add axe
+4d617fe	bda96572be3ac1d2	Add hammer
+4d61824	300d3482b798ec9d	Add spear
+4d61846	c11bc1c6169d48ed	Add polearm
+4d61874	ffe2a15e47c38e69	Add catalyst (wand)
+4d61896	6562c73696ce9938	Add fist weapon
+4d618be	e930b78a371397b3	Add bow
+4d618da	fea1a47789ce89c8	Add crossbow
+4d61906	0f384823bbda0d28	Add arrows
+4d61928	773c099ee63b45d9	Add bolts
+4d6194a	eeea5f2c06f57717	Add shield
+4d61970	5cb2b89c2885e892	Add all armor
+4d619a2	4ad19828da71d2ed	Add all accessories
+4d619d4	79e541c407e44525	Add all goods
+4d619fe	9dd50c80e500f973	Add all goods (non-event)
+4d61a36	8e996d14c6483d64	Add all goods (event only)
+4d61a6e	9f78b40687a00c22	Delete all data (unequip all)
+4d61a9e	402f7bbb63247ce5	ID to add :[[%d]%d%d%d%d%d%d%d]
+4d61ad8	1b540c45dd481445	ID to add :[%d[%d]%d%d%d%d%d%d]
+4d61b12	41f91f7e533515a5	ID to add :[%d%d[%d]%d%d%d%d%d]
+4d61b4c	baa9ed96cf1a1f45	ID to add :[%d%d%d[%d]%d%d%d%d]
+4d61b86	4e655ed1286fd2e5	ID to add :[%d%d%d%d[%d]%d%d%d]
+4d61bc0	5ce1bd3a3f4ecfc5	ID to add :[%d%d%d%d%d[%d]%d%d]
+4d61bfa	cafe051c4a181125	ID to add :[%d%d%d%d%d%d[%d]%d]
+4d61c34	5c3ce8beff82b345	ID to add :[%d%d%d%d%d%d%d[%d]]
+4d61c6e	fb6e767841bacfd2	Add (push enter)
+4d61c90	71a3313c9111303b	EquipId : []
+4d61caa	18b32c8254ce53ec	EquipId : [%d] %s
+4d61ccc	69265801e6196420	Add gem
+4d61ce8	e7eb073a595af02e	[%s] < Gem drop doping param ID
+4d61d14	667d71c89f243f9e	[%s] < Gem drop modify param ID
+4d61d3a	9fcd2a12a6d7df83	[%s] < Gem generation ID1
+4d61d54	9fc2f812a6cf3608	[%s] < Gem generation ID2
+4d61d6e	12bbe06fb3047a68	[%d] < Number to generate
+4d61d80	afa3226373da527d	Get gem (□+○)
+4d61d94	8025a028203a1c68	Remove all fitted gems (□+○)
+4d61db0	47f0877b6389d300	Delete all unfitted gems (□+○)
+4d61dcc	df7e07500fe2304c	<Negative: +/- sets it to 0>
+4d61e30	da7655ecef34f687	===== Inventory list =====
+4d61f34	7b8419f345195c4e	Idx[%d] %s
+4d620a6	b19caee462b41788	Equip item data
+4d62410	5b9ca59877ff93fc	Equip magic data
+4d62442	8a66e28ebb493071	Selected array Idx:%d
+4d6245c	679cffa6e9487aa9	== Equipped magic list ==
+4d6249c	781a06ebcd30aacd	== Equipped magic quantity list ==
+4d624f0	082f1d891ade5bce	Quantity: %d
+4d6250e	d3a8699229954763	%d《%s》
+4d62588	ae2997dddbb2d070	Face_blow_nose_chin_ratio (brow/nose/chin ratio)
+4d625d0	d20e8f9e53e6f9a5	Face_forehead_sellion_nose_ratio
+4d62622	c7975684a42d7533	Face_heavy_light (face width)
+4d6264c	dffb9cf39a6c65ed	Face_round_gaunt
+4d6267a	1176569f393cfc48	Face_tall_short (feature balance)
+4d626ae	b169506806a14bc5	Face_up_down (feature tilt)
+4d626dc	2401fc61ba54a100	Face_wide_thin (feature balance L/R)
+4d62712	7322b6fab096f934	Skin_Flushed_Pale
+4d62740	5b2371e1711d9d4b	Skin_Shade_Dark_Light
+4d62776	d7c62c65d25d3bab	Skin_Tint_Orange_Blue
+4d627ac	c20f5da3668c5677	Skin_Tint_Purple_Yellow
+4d627e6	58a028528d72d235	Skin_Tint_Red_Green
+4d62818	4df0fe02bea8e386	Nose_Pale_Red (bridge color)
+4d62840	3adee87d5c0548b6	Cheek_Blush_Light_Red
+4d62874	3344ce0ed4b34e45	Forehead_small_large (between-brow width)
+4d628aa	6270d6ff044e9a60	Forehead_tall_short (between-brow depth)
+4d628e0	9bfbd6059f58f453	Forehead_tilt_foward_back (between-brow position)
+4d62922	fa0988135bbfc4b0	Nose_sellion_down_up (between-brow height)
+4d6295a	71cd17e723cfb54a	Nose_sellion_shallow_deep (upper nose bridge)
+4d629a2	6bf72cbafacbba60	Nose_sellion_shallow_deep2 (upper nose bridge)
+4d629ec	2190abcd19c76a4b	Nose_sellion_thin_wide (between-brow width)
+4d62a26	8e25c96a227e8b45	Brow_Ridge_high_low
+4d62a5a	1eafcf01d4df64b9	Brow_Ridge_Inner_down_up
+4d62a98	5d5b5163e3572b05	Brow_Ridge_Outer_up_down
+4d62ad6	6b3a4af61a01427d	Eyebrows_Dark_Light
+4d62b0a	89aa2ee9740a6dc3	Eyebrows_Low_High (angle)
+4d62b3a	0f17757662ed10ec	Eyebrows_Thick_Thin (thickness: thin_thick)
+4d62b76	7182b59fbfd97f2a	Eyebrows_Very_Thin_Thick
+4d62bb6	375e7dd9b1681d40	Eyebrows_Lower_Light_Dark
+4d62bfa	cd733d3c363660f2	Eyebrows_Outer_Light_Dark
+4d62c3e	fa4811a2c28dde68	Eyebrows_Upper_Dark_Light
+4d62c82	e3311f448ddb2ea1	Eyes_down_up
+4d62ca8	24a65dda52a1628b	Eyes_small_large
+4d62cd8	4814d6aa7708feb9	Eyes_tilt_inward_outward
+4d62d16	9a985d648effb0eb	Eyes_apart_together
+4d62d4a	70be27446c9dab9b	Eye_Whites_Dim_Bright
+4d62d7e	5c186d6a1600c4f4	Eyes_Dark_Brown_Light_Blue
+4d62dbe	f6295652c7a30844	Eyes_Dark_Brown_Light_Brown
+4d62e00	4525b9233b33ca0c	Eye_Sockets_Bruised_Bright
+4d62e42	050d41c4ab465363	Eye_Sockets_Dark_Light
+4d62e82	f02eb0f551efffde	Eyelids_Light_Dark
+4d62eb2	e0c36fcb409be5cf	Eyelids_Pale_Red
+4d62ede	67a12736f3077b3e	Eyeliner_Light_Dark
+4d62f16	d2a5df0b5d32e542	Eyeshadow_Light_Dark
+4d62f50	c45f776b8cc883ac	Nose_bridge_shallow_deep
+4d62f90	eef1cc52248a2538	Nose_bridge_short_long
+4d62fcc	3555da68fee35d55	Nose_down_up (nose length)
+4d62ff2	ddc178283833d8ae	Nose_flat_pointed
+4d63022	4b4300cc8d077997	Nose_region_concave_convex
+4d63064	f4e893397665ea50	Nose_short_long (nose projection)
+4d63090	2fab81b3ee5bef08	Nose_tilt_down_up (nostril wings)
+4d630c2	15b9a2d770bb85b6	Nose_nostril_tilt_down_up
+4d63104	235f09e627a3472f	Nose_nostrils_small_large
+4d63148	e991463a3e555382	Nose_nostrils_wide_thin
+4d63184	6738f877f0d441dc	Nares_Small_Large (nostril size)
+4d631b8	a533141ce4a1bb28	Cheekbones_low_high
+4d631ee	5790845aa3cfc4b3	Cheekbones_shallow_pronounced
+4d63238	72dca48e417e0279	Cheekbones_thin_wide
+4d63270	158feaaa11ec427a	Cheeks_concave_convex
+4d632a8	6244ea1fbfdc8140	Cheeks_round_gaunt
+4d632d4	69e3f21fc00360cf	Naso_Labial_Lines_Light_Dark (smile lines)
+4d63320	00cf5628fbf234ed	Mouth_drawn_pursed
+4d63350	8022896c0616730b	Mouth_happy_sad
+4d63386	e3451afb5828cc8b	Mouth_Lips_deflated_inflated
+4d633ce	4d8a6946d5f32866	Mouth_Lips_large_small
+4d6340a	8987d33a8e26bd46	Mouth_Lips_puckered_retracted
+4d63450	f5ee7f48de902477	Mouth_Lips_thin_thicks
+4d6348a	c84fdbc61df7175f	Mouth_puckered_retracted
+4d634c8	91e0651e65d25d2c	Mouth_tilt_up_down
+4d634f6	ae33df5887e7392c	Mouth_underbite_overbite
+4d63532	ee73944cde6e8e03	Mouth_up_down
+4d6355a	07c44e579963ad1c	Mouth_wide_thin
+4d63584	4109000f042b55ae	Mouth_Chin_distance_short_long
+4d635d4	39d9f142ef626100	Lips_Flushed_Pale
+4d63604	6f6bb6a6c10d5e24	Lipstick_Dark_Red_Light_Blue
+4d63646	b992eb64a9dde40c	Lipstick_Dark_Blue_Light_Red
+4d63688	3b0298b1ea809c18	Chin_foward_backward
+4d636be	470a059afba14ff1	Chin_pronounced_recessed (chin length)
+4d63702	1783049c9dca7a9a	Chin_retracted_jutting
+4d63742	c788cd52f01a99b9	Chin_shallow_deep
+4d63772	54d5f1d36f8a4c3a	Chin_small_large
+4d637a2	cbac56cab31d7cac	Chin_tall_short
+4d637ce	37588921f19dc4d4	Chin_wide_thin
+4d637f8	c09840b6f463f4c9	Jaw_retracted_jutting
+4d63834	b51bcba7a963702b	Jaw_wide_thin
+4d6385a	a5cd1fa960cf237b	Jaw_Neck_slope_high_low
+4d63894	18e39459e9e6bb36	Jawline_concave_convex
+4d638d0	111f77ee57246662	Beard_Flushed_Pale (brightness)
+4d63902	7fb0c6c96a2219ef	Beard_light_dark
+4d63932	bf2661ae4259861c	Beard_Cheeks_light_dark
+4d6396c	7fa62567e005b5b5	Beard_Circle_light_dark (around mouth)
+4d639aa	3eca55242d9b4fcb	Beard_Goatee_light_dark
+4d639e8	5aedd8266bfc051d	Beard_Moustache_light_dark
+4d63a2a	30dfaf8cc7948e4a	BASIC_FACE (base face, Asian?)
+4d63a5c	0583ac0fd2d345ca	RANDOM
+4d63a7a	7a6d6ea2f9870a4a	AVERAGE (make average, Reset?)
+4d63aaa	4b7c76fb6c978769	AGE
+4d63abc	e3bf913b8f6014a4	GENDER (male/female lean)
+4d63ad6	7dfb67cfaa52b96c	SIMILAR (make a similar face)
+4d63af4	c5fc15ae5bc91bb8	Caricature
+4d63b12	48fde7e3ce662f14	Face_Model_Id
+4d63b3e	81bce8ad6e4f141f	Eye_Left_Model_Id
+4d63b78	15bf6403f51d187b	Eye_Right_Model_Id
+4d63bb4	701dd39da62db637	Hair_Model_Id
+4d63be0	f27b0e75ccea6eb0	Eyebrow_Model_Id
+4d63c12	a76e64b8e5b6be5e	Eyelash_Model_Id
+4d63c48	a1c9328952ceacf2	Beard_Model_Id
+4d63c76	3f438569b6904188	Accessories_Model_Id
+4d63cb2	4f3e676e9a5a9169	Decal_Model_Id
+4d63ce6	0e8a0fab13f8baaa	Skin_Color_r
+4d63d0e	678b0c9f1aa2e276	Skin_Color_g
+4d63d36	124ac027508ac796	Skin_Color_b
+4d63d5e	25fa96860b02ac90	Eye_Left_Color_r
+4d63d92	4e95793c0c259448	Eye_Left_Color_g
+4d63dc6	4946fd28a51b8af4	Eye_Left_Color_b
+4d63dfa	2dc3caa2deb5f060	Eye_Right_Color_r
+4d63e30	9cc5301f5c42e9e4	Eye_Right_Color_g
+4d63e66	e74b681d801bef64	Eye_Right_Color_b
+4d63e9c	54b6bdeb4eba5ca3	Hair_Color_r
+4d63ec4	3b0726b73374e253	Hair_Color_g
+4d63eec	dc97bcd975910313	Hair_Color_b
+4d63f14	27777aad2ea7856c	Eyebrow_Color_r
+4d63f42	3b7e00647aa70988	Eyebrow_Color_g
+4d63f70	1ee6120b54c8cb48	Eyebrow_Color_b
+4d63f9e	6b69af48818771e6	Eyelash_Color_r
+4d63fd0	79a21d3d82b84822	Eyelash_Color_g
+4d64002	aa3b79ac9a539b4a	Eyelash_Color_b
+4d64034	48942ee655c03cae	Beard_Color_r
+4d6405e	53facdd0de693176	Beard_Color_g
+4d64088	5065a85a91ae4fc2	Beard_Color_b
+4d640b2	f4eae6771b6e7e54	Accessories_Color_r
+4d640ea	de61f1252e55ee28	Accessories_Color_g
+4d64122	b9813b0bc032e14e	Accessories_Color_ (blue)
+4d64158	6fb4cbf832604c1d	Decal_Color_r
+4d64188	7d40b0b866dfe521	Decal_Color_g
+4d641b8	997609abdb8ff2c5	Decal_Color_b
+4d641e8	becc4a2588f3d2ac	Body_Scale_Head
+4d64218	42a4708fff9a4a02	Body_Scale_Breast
+4d6424c	47b0a70a44396961	Body_Scale_Abdomen
+4d64282	39a973776905e6f5	Body_Scale_Arm
+4d642b0	2541bf39e30f63d2	Body_Scale_Leg
+4d642de	d038e1c86f66bde6	Face_Base_Param_Id
+4d6431e	3fecb3ffbc31200f	Body_Base_Param_Id
+4d64360	4d5bde2b8422c6b5	Eye_Model_Id (both eyes)
+4d64392	99a2b84feddd5b55	Eyes_Color_r
+4d643c0	00711d490a86fba1	Eyes_Color_g
+4d643ee	bef258670375680d	Eyes_Color_b
+4d6441c	148db33210b5d53c	Hair_Eyebrow_Beard_Color_r
+4d64468	a5eab3ccfb73a490	Hair_Eyebrow_Beard_Color_g
+4d644b4	05eea2b98b34e338	Hair_Eyebrow_Beard_Color_b
+4d64500	0b57893393136bce	Decal_Position_x
+4d64538	5196ca22fce1a6c6	Decal_Position_y
+4d64570	5db1e6400c1bfc7b	Decal_Angle
+4d64598	f57f502ae64cc250	Decal_Scale
+4d645c4	b9b6440d727ea3dc	Gender_Base_Param_Id
+4d6460a	0610bae5af4c68a0	[%3d] %s
+4d64864	71a2dd138ea7efad	Revive counter[0]:%d
+4d6487e	b1af5e59f23d1d74	Revive counter[1]:%d
+4d64898	53c74846f6f6c95f	Revive counter[2]:%d
+4d64908	afca6a4c7891285e	Use NPC Player Debug Menu [%s] (needs re-entry; may run out of memory)
+4d649a8	74507e04819e0166	Change param:[%s][push enter]
+4d64a10	98c3ae083fcdb956	LanCutPoint[%d] timer[%.2f]
+4d64a46	9fecf5e2f0f4ecab	[%s] < MapTimeslot
+4d64a68	9c12fe7aaec0eb95	[%s] < MapTimeslotRealtimeDebug
+4d64ab6	646e758e2267d792	Gesture equip data
+4d64b0e	1766216534d6dc8c	Gesture param ID:%d - %s
+4d64b4a	592f45036b0b4131	Display Idx:%d
+4d651d4	6e34d0aa53d2cfa6	[%d] < Bounty ranking points
+4d651f8	8e906764b97873d3	[%d] < Vileblood ranking points
+4d6534e	660a1b52e7767fc7	Vitality: %d
+4d6536e	427c2e889acc23d9	Willpower : %d
+4d65394	b5281798bcdccb09	Endurance : %d
+4d653b4	dc7255bfe5132134	Strength : %d
+4d653d6	f19b74ee7c4e9aeb	Dexterity : %d
+4d653fc	ababee9183e231be	Magic : %d
+4d65418	02c1021a3512f04f	Faith : %d
+4d65434	82e790b1573602f0	Luck : %d
+4d6544c	5fb183d660d597b5	Humanity (HeroPoint) : %d
+4d65472	035cdec22b1b7d9d	Durability : %d
+4d65646	fe9bd5efa9795e35	Gender (is male):%s
+4d65884	c91324e30eca47c8	Save category SpEffect
+4d658fe	1ea9819cd2ec7bfa	PlayerName:%s/forNetwork:%s
+4d65936	1430d1a23f1b49c0	0:No covenant
+4d65944	174f980a69a8e56a	1:Ambassa
+4d65952	94ec5788f0e75e67	2:Queen Mother Ambassa
+4d65964	f97ea6bbe0aa3c12	3:Sun Ambassa
+4d65976	2e04dfe3bd598801	4:Soul Sucker
+4d65982	15e7720a89348b1f	5:Dragonewt
+4d6599e	79f36262a5a3b7fe	7:Bandits
+4d659aa	7d9c9bbb38faea31	8:Brother Ambassa
+4d659ba	438c16064e38ba61	9:Izalith Sister
+4d659fa	ff3f3d1365057e4b	[%s] < Covenant type (points:%d rank:%d)
+4d65a42	6cc46b0ca5e33c45	[%d] < %s covenant rank points (rank:%d)
+4d65a92	67fafa5e9d86134b	Repository data
+4d65abe	3dc8378febdde9a2	Fill to max (push enter)
+4d65af8	fa3e5f1c19dca4e8	RepositoryIdx[%d] : [%s]
+4d65b2a	853b85cb27e645b7	RepositoryIdx[%d] : [No Data]
+4d65ba6	2d8bf41cbe18194d	HP rally slot
+4d65c18	8536d06016884f1a	★Gem fitting test
+4d65c2a	5b2d8bbc06a3bd8e	Weapon list
+4d65c34	79f16d71cab56a2c	Gem list
+4d65c7a	05954e722be6bbc3	≪%d≫ < Gem ID
+4d65c8e	dc30cc164795c49c	≪%s≫ < Gem name
+4d65ca0	3768e09c605dc2b5	≪%s≫ < Slot
+4d65cb4	2f5d44c40884f50a	≪%s≫ < Fit type
+4d65cca	88436ea71d8f79de	≪%s≫ < Gem effect %d
+4d65ce2	44481615f2be5139	Remove (□+○)
+4d65cf4	361e2fbe549d0cb8	Fit (□+○)
+4d65d12	7856436b698cbb93	 < Fitted in: %s(SLOT%d)
+4d65d92	90f1f46b873ddbd6	[%0.2f] < Delay time
+4d65dc0	45e833d07b13c9a3	[%0.2f] < Delay rate
+4d65dec	1deb95dac5dd79e8	[%0.2f] < Delay vanish rate [MaxHp/Sec]
+4d65e3e	81daa2161061424a	[%0.2f] < Rally rate
+4d65e70	5a7353193e46f9df	[%s] < Stack delay HP
+4d65ea2	e9c15ed5c3beb620	[%s] < Reset delay time
+4d65edc	b3b3077b74fd30c3	[%s] < Follow target delay
+4d65f1a	fbb59eafa2921110	≪%0.2f≫ < Current HP
+4d65f48	36fd22f61c7ebd7d	≪%0.2f≫ < Target delay HP
+4d65f82	d3c4834d22d067c7	≪%0.2f≫ < Delay HP
+4d65fac	0fef00ae8ccc3e75	≪%0.2f≫ < Vanishing delay HP [/sec]
+4d65ff2	1a6e394bda4055d0	≪%0.2f≫ < Rallied HP
+4d6601e	414fcfd4bbe24916	≪%0.2f≫ < Remaining delay time [sec]
+4d660f0	7bc29b2cb3eb90f9	Wind slot
+4d6610c	d361edb254a256b3	Create debug menu, delayed init (push enter)
+4d66166	37d9101a4aeefdf0	Allow print log from EzState %s
+4d66290	f2a39ee41a000d99	EzState action type [%d]
+4d662b4	1741951342fe211f	Falling:%d
+4d662ca	e38d1742310c97ab	Landed:%d
+4d6630e	225fc290d40935cc	Event EzState bit flags : %d
+4d6633c	84a7ead9a1ed9b1a	Ladder action state %d
+4d66358	a747e05dd9a7f869	Command ID from event (event→EzState) %d
+4d6639c	35f0dfe7e5376afc	Message ID to event (EzState→event) : %d
+4d663e0	8cc93def4e05c6f6	AI combo attack cancel:%d
+4d66422	e7b7645ba7dc0bb7	AI move cancel :%d
+4d66458	d2dcc376ef99d088	AI step cancel :%d
+4d66492	c8cd171e167089e0	AI attack cancel :%d
+4d664c6	820838936e7aef2f	Disable snipe mode :%d
+4d66502	abceff011f1be4f2	AI combo attack cancel by goal level:%d
+4d6658c	c0e295d874a1f405	Draw Direction: [%s]
+4d6660e	91dd4f11de2cb0ee	Anim 45-degree angle %f
+4d66626	c2274ca85dcbebad	No-anim turn angle when stopped %f
+4d66646	b6186ed291e511bd	[%s] < Don't move at all
+4d66664	1f751e22bb50ae93	[%s] < Height correction for IK errors
+4d66692	b12256f4114a32a2	[%.2f] < Height correction ON gain
+4d666b6	a5df67d2b6164ca4	[%.2f] < Height correction OFF gain
+4d666dc	0cb11d40421ac5ad	Debug: disable map hit %s
+4d666fc	2573fc8a9ba5218f	SetDamage: trigger damage (Push Enter Button)
+4d66746	fdc10227eb4b0c24	Current move param index %d
+4d6678e	a017ab4ff382761b	Change special move param (Push Enter Button)
+4d66900	ad7cdf1ed5577816	[Move state] Can move
+4d6691a	121c609d82f75943	[Move state] Can't move
+4d66936	046718a0a105650d	/[Turn state] Can turn
+4d66952	c24061b8102de1f0	/[Turn state] Can't turn
+4d66a34	8032c3fb28bedf21	Homing target: %s
+4d66a50	47e03d1fbb362161	TAE:Disable gravity flag[%s]
+4d66abe	ffa63b6b875df72a	[%s] < Replan when update authority moves
+4d66b22	45995a3433284f8e	No-anim turn angle %f
+4d66b3c	89f8a12d75b2c35e	90-deg turn anim angle %f
+4d66b54	22f8a4a050fc9990	Turn anim start angle while moving:%.1f
+4d66b7a	61cafd4c73d336ea	Turn anim motion distance correction:%.2f
+4d66baa	45b73e8e928530da	Turn anim allowed while moving?:%s
+4d66bd4	c25fd07e4160ad5a	Extra correction, small stick tilt:%.2f
+4d66bfa	0e280d7f38d37669	Extra correction, large stick tilt:%.2f
+4d66c20	9f9aacd13fe6497c	Dash turn anim threshold time:%.2f
+4d66cd0	d0ad7d8df54d63c7	Stick input period (frames): %d
+4d66cf4	8405d734ced37fc8	Stick input threshold (neutral): %.2f
+4d66d22	eb59203c96157b78	Dash button input period: %.2f
+4d66d46	ec41f5ac885cd737	Stick flick duration: %.2f
+4d66d6a	b5a8b59641d9751a	Stick neutral threshold: %.2f
+4d66d94	fe9d70114028742c	Don't align control fwd with camera fwd [%s]
+4d66dc8	67f265cd11393dbc	Reset angle: control fwd vs camera dir %.2f[deg]
+4d66e1c	353ff07facf15638	Backstep window: %.2f
+4d66e40	3f3a57203880a1cd	[%s] < Enable debug pad input
+4d66e6c	7c3a5fd624f36b43	[%.0f] < Debug pad angle
+4d66e8e	70895d54120f10d3	[%.2f] < Debug pad tilt
+4d66eb0	a79b61658e826675	DashInputTimer 《%.3f》
+4d66edc	89b4bf46572e8f9d	EnableBackStep 《%d》
+4d66f20	26118105c755f5b9	EnableBackStep_forward《%d》
+4d66f56	029edd681e886299	[%s] < Debug pad test NoMove (position stays put)
+4d66fca	1c74e06a5d204565	[%s] < Fixed move distance test
+4d67032	beefb99f4cec6375	Roll start turn angle, low[deg]:%.1f
+4d67060	456de7722b54bfe0	Roll start turn angle, high[deg]:%.1f
+4d6708e	802800de30df21ea	Walk→dash threshold:%.2f
+4d670ae	64a45e615e21d20a	D-pad forward angle:%.1f
+4d670ce	eec3330bc915c310	D-pad back angle:%.1f
+4d671dc	0382ab553cf4f86b	Move direction correction time[sec] %f
+4d671fe	1fc595372c202403	Run→turn time[sec] %f
+4d67224	d54826c16cbfb39f	Dash duration %.2f
+4d67254	0d6cf5164dc5ab73	Blend rate %.2f
+4d674a6	03d7681e1b8df44a	Attacker: selected chr:%d
+4d674c0	400fadda6205a0f9	Defender: selected chr:%d
+4d67502	9e3405dbaa4efcaf	Max position adjust distance :%f
+4d67522	72e2db2ce3b296c4	Max position adjust angle :%f
+4d67542	8f6b45c55e05f0f1	Self-escape_time left to start weight decay : %.2f
+4d67580	cf7b2c484de4d1ca	Self-escape_target weight rise : %.2ff
+4d675b4	15960171ae3b73d3	Self-escape_current weight rise : %.2f
+4d675e4	d378c58c82011106	Self-escape_target weight decay : %.2ff
+4d67618	4fac9866549edc43	Self-escape_current weight decay : %.2f
+4d67648	e5a2dda2e393fb4f	Timeout : %f
+4d67662	b7e67faa675d8363	ThrowParam ID x100:%d
+4d6767e	6abcc29f1e960b63	ThrowParam ID x1:%d
+4d676c4	3367ede98339103d	Draw all:%s
+4d676d4	d57424a18c4154b0	 Draw Y axis : %d
+4d67708	494bcb1c282d02e9	 Draw throw position : %d
+4d67746	82ebaf8d5076fc09	 Draw throw state : %d
+4d67788	faf07499ef4afbb2	 Draw throw escape HP : %d
+4d677c4	ebc7c1d731ac8ab0	 Draw escape anim weight: %d
+4d6781a	421e37422d3b20ba	 Draw throw mask : %d
+4d6785c	8b430281cff3cb20	 Draw chr throw state : %d
+4d678aa	e07513700b37b887	Throw movement as warp:%d
+4d678c8	c45c25cf7cce31db	Stop right before throw anim:%d
+4d678e8	05734cfd25b07eea	Use throw resist anim?:%d
+4d67908	2e0dbd75fdf10f7a	Disable sphere cast:%d
+4d67926	e86563335fe5ede2	Draw sphere cast:%d
+4d67942	a7ac5b0f2538416f	Sphere cast height correction:%.2f
+4d67978	a845c40093e967cc	|Enhanced|
+4d67982	6e13d23758cd3bc9	|Fall|
+4d6798c	ca6a6301314dc897	|Soul drain|
+4d679a0	d0bde3be22649c85	|Parry|
+4d679ac	1499534b1f14bcef	|Coffin|
+4d679b4	5b42c3b764c12cec	|Disabled|
+4d679d2	898a6f6e56efcba7	ThrowState:%s
+4d67b7e	8fee94eb8f3c26d9	Output throw verification log? : %s
+4d67da2	b47ac868209e96b8	Draw Y axis : %d
+4d67dd4	b3a978ac58e290a1	Draw throw position : %d
+4d67e10	27d2d6144e978e41	Draw throw state : %d
+4d67e50	af0d5ea65f4417ea	Draw throw escape HP : %d
+4d67e8a	c360d70efb0aee58	Draw escape anim weight: %d
+4d67ede	d7a2f27c99d2fd52	Draw throw mask : %d
+4d67f1e	f845d1fd66c59c1a	Draw chr throw state : %d
+4d67f68	e717eda01fc74bd1	No throw
+4d67f72	7e43958d1151371b	Attacker: throwing
+4d67f82	fe49335e464fb528	Defender: being thrown
+4d67f92	75a5d3da8c1e131b	Attacker: throw escape
+4d67fa4	f945df617ddd8740	Defender: throw escape
+4d67fb6	0faa6df2abdb9c99	Attacker: lethal throw
+4d67fc8	d5a93bb1700d02a6	Defender: lethal throw
+4d68010	76a5bece3e46d3da	Cycle time:%.1f
+4d68028	695c26cf8ca8fa9e	Current cycle time:%.1f
+4d68048	73107ce55af39402	Cycle counter:%d
+4d68060	07b1f698245eface	Current cycle counter:%d
+4d68080	fb3d114049c76dd3	Min-side stick distance threshold:%f
+4d680a4	1cecc67e950b0b38	Max-side stick distance threshold:%f
+4d680c8	cd1a950cd1101fc2	Resist anim_time left to start decay:%.2f
+4d68762	d2f4af342a2e9fca	%0.0f<Start range[m]
+4d6877e	2cfa3276e90a5d3b	%0.0f<End range[m]
+4d6879a	152e4056f6b7d06f	%0.1f<Start delay[sec]
+4d687be	545da93d360c32b6	%0.1f<End delay[sec]
+4d687e2	f464d066220f3649	For Default
+4d687f4	31c2ee4172455d6f	For Hit
+4d68818	f0f403975c4104e8	Invalid
+4d689a6	20321d57e62d0043	Save mode [%s]
+4d689be	c95084657ce31506	Current profile index [%d]
+4d689e6	73f559bd08c44e92	Current debug profile index [%d]
+4d68a16	af8698decf5a1f5c	HIT debug
+4d68a26	77feb9384bf35681	[%0.3f[sec]] < Blink interval
+4d68a4a	60154650a11a23cc	[%s] < Show map models
+4d68a6e	3d2a83d579adebb6	[%s] < Show low-res hits
+4d68a90	7866e66561277d26	[%s] < Show high-res hits
+4d68ab2	e6b91b9adcac5480	[%s] < IsDisableAllAreaEne
+4d68ae4	584a0329937e5312	[%s] < IsDisableAllAreaEvent
+4d68b1a	2751af7c9ffb5bfa	[%s] < IsDisableAllAreaMap
+4d68b4c	498735706e8d2d41	[%s] < IsDisableAllAreaObj
+4d68b7e	aa7c266b5e95bd3c	[%s] < IsEnableAllAreaObj
+4d68bae	5834eebc5c2f6483	[%s] < IsEnableAllAreaObjBreak
+4d68be8	1d2dc0847afefcfa	[%s] < IsDisableAllAreaHiHit
+4d68c1e	001d9c5e5ce759d5	[%s] < IsEnableAllAreaLoHit
+4d68c52	5c223a42b66045eb	[%s] < IsDisableAllAreaSfx
+4d68c84	8f8b56b0c3b9ea6d	[%s] < IsDisableAllAreaSound
+4d68cba	484457d48a33f93a	[%s] < IsObjBreakRecordMode
+4d68cee	de527a739633524d	[%s] < IsPlaytestMode
+4d68d16	e9b4ed48517444a6	[%s] < IsPlaytestMode_EnableFreeCamera
+4d68d60	fe86b093f9e784c4	[%s] < IsDisableOptionMenuActivation
+4d68da6	5618bb7439f295a3	[%s] < IsInvalidateHpRegain
+4d68dda	4d0497022e343770	[%s] < IsAutoMapWarpMode
+4d68e08	1da1347afe3bb3fd	[%s] < IsChrNpcWanderTest
+4d68e38	6799b8a7311e8099	[%s] < IsDbgChrAllDead
+4d68e62	89c6696404575921	[%s] < bRequestToEnding
+4d68e8e	dbec475a4a8edda4	[%s] < IsTitleStart
+4d68eb2	8929063d92b069a0	[%s] < IsOnlineMode
+4d68ed6	94af5be72c33c75a	[%s] < IsMyWorld
+4d6902a	34ac347f92803d65	Quick Load Game Data [%d] (□+○ to load)
+4d69070	ad5360f4292d59a4	Local time %2d/%2d %2d:%2d:%2d
+4d690a6	2502f077500939bd	Last Profile save %2d/%2d %2d:%2d:%2d
+4d690ee	bbed39cddd2b0f2d	Last Option save %2d/%2d %2d:%2d:%2d
+4d69134	360da317445d5718	Profile Save: requested
+4d69156	bd1b1743732d350a	Profile Save: no request
+4d6917a	3472df7ca24a9036	Option Save: requested %s
+4d691a0	11b59a14158e67b4	Option Save: no request %s
+4d691c8	f91789a3929d02c7	Power On
+4d691d2	6d58812b07558001	Power Off
+4d691de	48b6a0073145d788	Profile Load: requested, Profile Idx : [%d]
+4d69226	818f1fa3257648ed	Profile Load: no request
+4d6924a	c8b1cf8d03cb56fa	DbgSave Game Data[%d](□+○ to save)
+4d6928e	32945ee784fb7ea4	DbgLoad Game Data[%d](□+○ to load)
+4d692d2	0daa1957f062bd44	SOStype<White soul>,
+4d692f6	88c8c00cf7379c3f	SOStype<Black soul>,
+4d6931a	02b45182960366c5	SOStype<Intrusion>,
+4d69334	3e0dc878b6534dc6	SOStype<Forced summon>,
+4d69352	beaf21e9df207f9e	Summoned<%d>, From SOS pos<%d>, From message pos<%d>
+4d693ac	7f913b3c39cde1db	From pre-summon pos<%d>, Forced summon point<%d>, Chr type before summon<%d>
+4d69410	a6be8bd9475b4020	Next MapUid<%d,%d,%d,%d>, Next map start pos evid<%d>
+4d69464	5a057e1ee9e469b4	Summon spawn pos(%.1f, %.1f, %.1f) Safe pos(%.1f, %.1f, %.1f)
+4d695ea	932302ae96647bca	[%s] < DepthDraw_DepthNormal
+4d69620	aefaae2e1ab4ed43	[%s] < DepthDraw_DepthTexEdge
+4d69658	5f2bf8d648c5c729	[%s] < NormalDraw_Normal
+4d69686	9661de68be2c56d8	[%s] < NormalDraw_BoundingRegion
+4d696c4	1b1d3996fcc41048	[%s] < NormalDraw_TexEdge
+4d696f4	e89962ee74327cd3	[%s] < NormalDraw_WaterMask
+4d69728	07b7099f18fb2b57	[%s] < NormalDraw_Water
+4d69754	e30ecc561179cf40	[%s] < NormalDraw_Trans
+4d69780	3f9231bc12caf442	[%s] < ShadowDepth_ShadowDepthNormal
+4d697c6	279c7deb3392dcab	[%s] < ShadowDepth_ShadowDepthTexEdge
+4d69824	e88c73b893c5feaa	[%s] < Map
+4d69836	12b12f40a0414a11	[%s] < Obj
+4d69848	2871b3eb5a6aca4f	[%s] < Chr
+4d6985a	b1fa00b14ccc9cfb	[%s] < Sfx
+4d6986c	bd400e8c4db2e05b	[%s] < Remo
+4d69880	8eaf942463dd7cd0	[%s] < LightShaft
+4d698b4	d107bbe0537daca4	[%s] < UseCullCam
+4d698d4	c6007c71127351b0	[%d] < DispCullCamFrustum
+4d69904	8b5f182eb677c8ec	[%s] < Camera shake enabled
+4d69922	78e76c59317c737d	Min equip load[kg] %.2f
+4d69968	7ba6cedec65752fb	Equip load correction[kg] %.2f
+4d699c0	c46862cf34c3f051	Base max carry weight[kg] %.1f
+4d699e8	646f06eb2b64062b	Max carry weight coefficient %.1f
+4d69a0a	f30086373c176e4e	Heavy load check rate %.2f
+4d69a50	3e6ec15906ab1fda	Initial stamina regen[%%/s] %.2f
+4d69aae	481052285b60a6a5	Stamina regen coefficient α1 %.2f
+4d69b0a	50d39fcfc98fcf99	Stamina regen coefficient α2 %.2f
+4d69b66	9952c85efd772b94	Initial MP regen[%%/s] %.2f
+4d69bb6	359badf4547ac2e7	MP regen coefficient α1 %.2f
+4d69c04	9db83c5285369293	MP regen coefficient α2 %.2f
+4d69c52	1e47201fa5e85876	Max SP adjustments
+4d69c64	2f616dbc0805f3bf	Max SP: lowest value %.1f
+4d69c80	dcd8e9236a296c3a	Max SP: growth cap %.1f
+4d69ca0	449c4dc90b8eed00	 Spirit at max SP growth cap %.1f
+4d69ccc	ff34413adcec7b98	Adjustment coefficient %.2f
+4d69ce0	26b8afba6a1ad46c	Damage correction
+4d69cf2	43c6e06be5900cbf	Base cut rate %f
+4d69d06	d17a4f0b8471920d	Max cut rate %f
+4d69d1a	11e77b385ff33f6e	Min cut rate %f
+4d69d2e	b7e458dd2621fc05	Min applied multiplier %f
+4d69d42	1814f81e7cc9c184	Durability wear threshold %f
+4d69d5c	01af1767bec77cb9	Attack correction by wear: small %f
+4d69d82	786d40cf4a414af5	Attack correction by wear: medium %f
+4d69da8	376eb170d96a67c2	Attack correction by wear: large %f
+4d69dce	5401a39529bed1bc	Strength multiplier, two-handed %f
+4d69dee	51cf71caa33ef741	Attack penalty: sign of formula α1 : [%s]
+4d69e1a	ae3bc9ac7f96d7e8	Attack penalty threshold (stat shortfall) %f
+4d69e44	2c284844bd5aa3c9	Attack penalty threshold (damage ratio) %f
+4d69e70	21b9befd68894e58	Bow range multiplier (for display) : %.2f
+4d69e9c	1925b94fe4199303	Spell requirement check_force fail : %s
+4d69ec2	7e15d003ad29e333	Fall base weight [%.4f]
+4d69ede	9373051b7dc390f1	Max co-op points [%d]
+4d69efa	92fc83758afa9485	Test:co-op points [%d]
+4d69f1a	1052ea185ab5acb4	Total growth defense
+4d69f2c	b2dd1fd11e789fc0	Initial: defense %f
+4d69f42	ed4b7469f44c4d52	Mid: defense %f
+4d69f56	baf00baf4d305cf4	Max: defense %f
+4d69f6a	83282917934f2096	Mid: total growth points %f
+4d69f88	1adb29c91331a2b4	Max: total growth points %f
+4d69fa6	9c46036e1141c30a	Curve type α1 (initial - mid curve) [%s]
+4d69ffc	573511d4c5726521	Curve type α1' (mid - max curve) [%s]
+4d6a052	f25de93c008e96b8	Soul lv max (level cap):%d
+4d6a082	76aade245618b702	Vitality
+4d6a088	bd0f49560c6dba66	Spirit
+4d6a08e	324f19fea9bb0efa	Toughness
+4d6a094	092a2e07b5bd784e	Luck
+4d6a098	486d54e139c99a26	Humanity
+4d6a0a0	f3b2e929a48b5a56	Durability
+4d6a0a8	b128f7e79799cc68	Physical growth defense mult
+4d6a0be	442bc8e54d9e411b	Physical %s [%%.3f]
+4d6a0da	7cb878055690ff0d	Magic growth defense mult
+4d6a0f0	b3c87e825c2d738a	Magic %s [%%.3f]
+4d6a10c	c399e733cf683edf	Fire growth defense mult
+4d6a120	91717660323b9b18	Fire %s [%%.3f]
+4d6a13a	a63cd42499adfbff	Lightning growth defense mult
+4d6a150	df2911335dc7e978	Lightning %s [%%.3f]
+4d6a16c	1f9d7aef52e89c88	Item lots
+4d6a17e	c8984bd1d7c58fa8	Luck correction coefficient %.1f
+4d6a19a	3c4800c774ef9c12	QWC correction coefficient %.1f
+4d6a1ba	e7707d2e8d044a79	SpEffect correction coefficient %.1f
+4d6a1dc	c350acaff74690ee	Analog rules
+4d6a1f0	d35cac17c8f62358	Disable analog:[%s]
+4d6a20a	28d26c4f43b60190	Max damage ratio for PC anim blend %.2f
+4d6a238	84b006917b7b8da5	HitChain correction %.3f
+4d6a25a	d3a184a86dcdc5f9	Min blend rate before cutoff %.3f
+4d6a280	f182b6e3a225ca21	Max damage ratio for PC anim cancel %.2f
+4d6a2b0	af23bac9d757b247	Min headshot blend rate %.2f
+4d6a2d8	93849d2be0c7afb6	Base equip weight %.2f
+4d6a2f2	a81cf2f1eaf77cca	Min equip weight ratio %.2f
+4d6a30e	733f1560fc188cbd	Test:attack deflect/break Lv:%d
+4d6a330	18c7d3d25318f9c2	Test:guard deflect/break Lv:%d
+4d6a352	a67f7824a0c724b3	Base SA durability recovery time:%.2f
+4d6a374	dd45aa3a196831be	Build wide-area summon spawn point list
+4d6a392	92c1f3468fa1d7b0	Wide-area summon dest Index:%d
+4d6a3ae	4bf7e070c88b5e6a	[%s] < New stat scaling spec (SEQ18497)
+4d6a3dc	0baf766b95a4e9f0	▼Weapon ID:%08d(%s) upgrade results▼
+4d6a406	1a6b52018a9910a4	  ▽Upgrade▽
+4d6a412	9dc1bc4952fe86c2	  ▽Base change▽
+4d6a41e	b3a4831260be1f63	    %08d:%s <Material set:%d (base change cat:%d)
+4d6a45e	34b6584e8c1d2994	  ▽Revert▽
+4d6a46a	f9fe2fad33720049	    %08d:%s <Material set:%d
+4d6a492	ceda51d95f6cf330	    -None-
+4d6a4a0	c828b828119e86fc	Weapon ID: [[%d]%d%d%d%d%d%d%d]
+4d6a4d6	fe4bae9a62a6cb1c	Weapon ID: [%d[%d]%d%d%d%d%d%d]
+4d6a50c	c4d021b57b785f7c	Weapon ID: [%d%d[%d]%d%d%d%d%d]
+4d6a542	dd9d7053f72085dc	Weapon ID: [%d%d%d[%d]%d%d%d%d]
+4d6a578	6e525c306ae098fc	Weapon ID: [%d%d%d%d[%d]%d%d%d]
+4d6a5ae	b0c627f530f4431c	Weapon ID: [%d%d%d%d%d[%d]%d%d]
+4d6a5e4	e45453429bd51ffc	Weapon ID: [%d%d%d%d%d%d[%d]%d]
+4d6a61a	01109fb2f67b0f5c	Weapon ID: [%d%d%d%d%d%d%d[%d]]
+4d6a768	88116903b8f24f89	Weapon upgrade debug
+4d6a79e	83ad0fcf010bc3b5	%s map FLVER is too large. Split or reduce it.(%0.2fMB)
+4d6aca4	2d91fa5e5432ce4f	Anim sync sender>%c)ID:%d dT:%0.3f Rtime:%0.3f Ptime:%0.3f
+4d6ad0a	18ba41f099dddef4	Anim sync receiver>%c)ID:%d dT:%0.3f Rtime:%0.3f Ptime:%0.3f
+4d6b592	2092d72d08c24590	Can invade
+4d6b59c	0bb621f546b06e28	Wait NFD
+4d6b5a8	5dc97181884c05aa	Wait reload
+4d6b5b6	e1ac5c38ef30284e	Invaded
+4d6b5c0	67262636fff598fe	NPC invasion:[%s]EntityId[%d] NFD[%d] 
+4d6b68a	4eb2b355d2b7d576	White phantoms [%d]
+4d6b6aa	8a71771c5dee4bcd	Black phantoms [%d]
+4d6b6ca	50dbbae6ed82a4cd	Detection phantoms [%d]
+4d6b6e6	688041ced65860c6	Members with chr created [%d]
+4d6b70e	2928f581c3733bb2	Connected members [%d]
+4d6b730	d40fdba43c7614f0	NPC members [%d]
+4d6b878	8bdba72d99e18a79	Idle
+4d6b880	7fb5b41177a1aa80	Prepare
+4d6b88a	f5ffbf6434168a3a	Play
+4d6b892	e6ffcba60470595e	Pause
+4d6b89a	3a431205922d3ad8	Resume
+4d6b8a6	8f6a242d6a6970f8	Stop
+4d6b8b0	5843d3f79fdfd597	%c%cA%02dB%d(%d)《%s》(%d:%d):Disp%d On%d Play%d(%d) Vol(%0.2f) FT(%0.1f)<%c%s
+4d6b942	80b620a1c141ba0a	[%s] < Debug display
+4d6ba6c	d12754fe8b969890	DIALOG_T04 layout dialog
+4d6baa4	643be746737de6c3	Message creation menu (FrpgMenuDlgBloodMsg)
+4d6bc6c	c5cacb7b2965d9c9	DIALOG_Message details
+4d6bc9c	10f2990c66154e6f	DIALOG_F14 layout dialog
+4d6bec4	028cf40c859d1ad5	DIALOG_T05 layout dialog
+4d6bf32	8130c2dd8c2d8c47	DIALOG_Message category dialog
+4d6bf5e	c4ab6e64ac224ced	DIALOG_Message text dialog
+4d6bf86	8bb4af94d2c419e4	DIALOG_Message insert text dialog
+4d6bfb0	02fc03af4552d141	DIALOG_Message display dialog
+4d6c0fc	3b58b18fd0e4dd3b	Message management menu (FrpgMenuDlgBloodMsgManage)
+4d6c194	869583494e99c1b8	+Rating override:%d
+4d6c1aa	e2b33ff754e22796	-Rating override:%d
+4d6c4ca	70e7542509fe4aec	DIALOG_Selected entry sheet
+4d6c4e8	67f413aa25a998a2	DIALOG_Entry list sheet
+4d6c506	5555bf2dfed20818	Character sheet (FrpgMenuDlgCharacterSeat)
+4d6c546	a9663475d3460f50	Camera face zoom:%s
+4d6c87c	3da66b856e64761b	Entry help menu (FrpgMenuDlgContentsHelp)
+4d6c8c0	4b8e06d638160e8e	Message ID:%d
+4d6c8d6	6bbbffc2d56cb013	Group ID:%d
+4d6c8ea	f8b27f4785366a5f	Layout ID:%d
+4d6c992	73f86f7f6d37362c	Entry help manager (MenuContentsHelpMan)
+4d6c9f8	6b660ec1add297d5	Groups:%d
+4d6cc14	d8f2a79eece9f47e	SpEffect always blocks equip:%s
+4d6e23e	fd4fa1349468bd5f	Equipment menu
+4d6e4e8	f2dfa15420122364	Copy MenuData to FaceGenParam[%s] [Push □+○]
+4d6e576	653451976413be0e	Send FaceGenParam[%s] to Menu [Push L1+○]
+4d6e5f2	507c71e48fcae530	DIALOG_Detail edit dialog
+4d6e950	707ae073d1618bea	Referenced net player idx:%d
+4d6eeea	391f0fc0a9a31a0f	Force center layout:%s
+4d6f042	8f45d64cbe026502	Player state (FrpgMenuDlgFEPlayerState)
+4d6f084	02b7368a0c1cafdf	Fire icon idx:%d
+4d6f0ba	5e85d56b8cd07e99	White ring alpha:%d
+4d6f41e	2cdb953159edba25	DIALOG_Item pickup
+4d6ffba	7a48541f6de307da	DIALOG_Play mode select
+4d70094	4794bbc27d2387da	DIALOG_Character sheet
+4d700b6	33f7524051e049de	DIALOG_Chr info plate
+4d701dc	8c05c30334e5c14d	Called from character sheet:%d
+4d70220	844f04a9be145c49	Wait time left[sec] : %.1f
+4d70e56	7a969b8d22775588	DIALOG_Selected param
+4d7121e	e55dc5f3784097b2	Start tab (FrpgMenuDlgStartTab)
+4d71406	f5c0be75e87d07ca	DIALOG_FE dialog
+4d7151e	dd7e9aefa8bdd3fd	Title screen (FrpgMenuDlgTitle)
+4d7154e	dcd912f264057501	Wait time:%f
+4d7155e	067f199ab12a60e4	Max wait time:%f
+4d71572	c10c7ab1bc451e53	Movie finished :%d
+4d71672	c75d166e26943adf	General dialog (FrpgMenuDlgGeneral) %d
+4d71704	940f76fe735ec179	General dialog control (GenDlgCtrl)
+4d71744	d94db9d06c96d693	Body text ID:%d
+4d71768	af8cf87af727e48f	Button 0 ID:%d
+4d71796	1577d8687b04a277	Button 1 ID:%d
+4d717c4	6e512039926cb556	Dialog type:%s
+4d717f2	a6a0f8355fbe0dd0	Use event category for MSG:%d
+4d71844	84cf6ba0123e9bd1	Chosen button ID:%d
+4d7187c	86c6261a0b0db3ea	Chosen spin value:%d
+4d718b0	91e11d2c5e04d4f0	Input disabled:%d
+4d718e2	c0408d0c594bc444	Trophy error:%d
+4d71976	5341fac319707d0c	1 button
+4d71980	b5b3077d74fac22f	2 buttons
+4d7198a	d7b497ee4d8a7727	2 buttons, quantity
+4d7199c	15d2b4aecc578a58	1 button, large
+4d719a8	17b2b4c79a4670f3	2 buttons, large
+4d719b4	ff885b81b0bdd580	No buttons
+4d719c0	0ed2bda84c854896	In-map 1 button
+4d719d2	543a87ac98b80475	In-map 2 buttons
+4d719e4	51842ce1ba866bea	In-map no buttons
+4d719f8	b11369f94e280714	No buttons, large
+4d72018	61a30018311889af	aaa
+4d72020	1173bf3bc07139b7	aaa\na
+4d7202c	d340d3cc08b78cbd	aaaa\na
+4d7203a	b37042044591adb5	aaa\naa\na
+4d7204c	b36e95410e5e59fd	a\naa\naa\naa
+4d725d0	e971f8941fd51b06	Dialog
+4d72602	624adca782f886de	▼Info
+4d7260a	4c6483af1b020c5e	Node
+4d72612	19853498972edc7a	Gauge threshold
+4d7261e	6394396c49bb3cbd	▼Test
+4d72628	2eb847e39ce5cbae	Input value: [%.2f]
+4d7266e	0ba268f4988e56ef	▼Settings
+4d7267a	22d71402f6b52649	01:Resist gauge[%.2f]
+4d72698	05654a020bd9a883	01:Gauge length[%.2f]
+4d726b6	2809f12a75f6dc52	02:Resist gauge[%.2f]
+4d726d4	2439cfd84dbaec08	02:Gauge length[%.2f]
+4d726f2	33c2cccdd20bfc3b	03:Resist gauge[%.2f]
+4d72710	abbe9018c62ea07d	03:Gauge length[%.2f]
+4d7272e	ed43868bdb6d4c64	04:Resist gauge[%.2f]
+4d7274c	ebc797af0c40043a	04:Gauge length[%.2f]
+4d7276a	dcde2ac5b1ca8a0d	05:Resist gauge[%.2f]
+4d72788	09c869a693cbfdf7	05:Gauge length[%.2f]
+4d727d4	cf7ee4b21eadd0fb	Output:≪%.4f≫
+4d727ea	0afc5d07b74a0d3a	Poison
+4d727ee	8e2913eac5fc1ff7	Disease
+4d727f4	dffce18d4fb9583c	Bleed
+4d727fa	089afbde99d1a6b7	Curse
+4d72800	19767190902affe4	Beasthood
+4d729b0	716a67b5200de09f	Normal
+4d729c6	0924ec840e35d06f	Manage
+4d729dc	23a273758c1f4c0f	Sort
+4d729f0	dcf56dd2a49aa14b	Depo [deposit]
+4d72d86	205b8abe7e12f59a	Display time : %.2f
+4d72db2	452bb66a67fb378c	Required display time : %.2f
+4d72dea	c076cf43e28a7d11	Current logo type : %d
+4d72eac	d1e27854ec5896df	DIALOG_C05 list
+4d72f78	11cd58d3d07f43d5	C05 layout dialog
+4d72f8e	17dae6a4cc198bf0	Magic equip menu (FrpgMenuDlgMagicEquip)
+4d72fcc	f7b3067a995c554d	Show detail dialog:%s
+4d731fe	d841e24fce3d9b9e	DIALOG_C05 layout dialog
+4d73408	2a7104c2a20afb54	Display options (FrpgMenuDlgDispOption)
+4d73444	6f65852d42f8cc5a	Cursor position:%d
+4d7346c	294efc82669785cb	Brightness:%d
+4d734f4	6ed766406dafa06e	DIALOG_Option select menu
+4d7364c	dc1175fac4034890	Control (env) options (FrpgMenuDlgEnvOption)
+4d73732	304b861d2015626a	Ranking registration went Off→On:%d
+4d7376c	52ea83ba8e9c5f22	Ranking registration went On→Off:%d
+4d73842	d49bfcbe9a4e0658	DIALOG_R13 layout dialog
+4d73982	3358799b86279afb	DIALOG_R14 layout dialog
+4d739e8	140a20c8890e5c7e	Resolution Init:%d Prev:%d Cur:%d
+4d73a1e	5d868066d87de65b	Refresh rate Init:%d Prev:%d Cur:%d
+4d73a60	d93eb0fa786e9764	Fullscreen Init:%d Prev:%d Cur:%d
+4d73a9e	ce93244762a32c74	Anti-aliasing Init:%d Prev:%d Cur:%d
+4d73ade	8373452c7a59a632	Blur Init:%d Prev:%d Cur:%d
+4d73b8a	887006d322913232	Sound options (FrpgMenuDlgSoundOption)
+4d73d94	22cec2dd24f6f3d6	DIALOG_F08 layout dialog
+4d73fa6	8b798a5bb95af42e	DIALOG_Individual status 1
+4d7402e	0a02bc47fb3db56c	Ranking (FrpgMenuDlgRanking)
+4d74060	6024834d0c38397f	Force no detail data:%s
+4d7408c	74956a13c7487a1b	Own rank_force download end:%s
+4d740ba	5acc7f382c653541	Own rank_force download success:%s
+4d740e8	3948115d3363fb98	Own rank_list Idx:%d
+4d7410a	49ace4fba154c103	Jump to own rank(push enter)
+4d74136	3091756acf7214fc	Izalith
+4d74140	be7aec8f4e3abee1	Ranking type:%s
+4d74158	5d02613797c187a4	Selected rank Idx:%d
+4d74176	b53291ef38b96d27	Detail data loaded:%d
+4d74194	8f1c2ae01830fc7a	Detail data exists:%d
+4d741ac	93394d5561b22509	Selected OnlineID:%s
+4d741ce	71e94672faf1aa62	Snapshot time clear request:%d
+4d741f4	76c5ce6eb78e315f	Last received own rank list Idx:%d
+4d74222	d6d71f5d8d7b68bb	Arena type:%d
+4d74236	d583c78662edce4d	Arena Lv:%d
+4d74248	bee7b6d939f7197e	DIALOG_Ranking list dialog
+4d742b8	ef46c247c07125ac	Ranking list (FrpgMenuDlgRankingList)
+4d742f6	484c115ba2497e7b	Rank count override:%d
+4d7430c	617efbdaa27112e8	Selected rank Idx:%d
+4d7432a	a51cb554057a3b11	Selected serial rank:%d
+4d7434a	2a5438e6adcb9e60	Selected rank exists:%s
+4d74368	a42536c21e446d8b	Platform is PS3:%s
+4d74b28	a50a30df58f93ba7	Entry %d DisplayIdx:%d
+4d74c56	ebe11c6d9d770890	DIALOG_Bounty request dialog
+4d74c8c	7e85ce5296ec07b4	DIALOG_F13 layout dialog
+4d74cc4	c4e3a8c8be52a889	Bounty request menu (FrpgMenuDlgRevengeRequest)
+4d74d0c	c374ca15fdbfad62	Cursor Idx:%d
+4d74d22	6c204fecade63fac	Selection done:%s
+4d74d3a	cd8777ef6e88f365	Request bounty:%s
+4d754b2	0d41f77a918c7ee7	DIALOG_F05 layout dialog
+4d7567c	42ff16abaf6a1aa4	DIALOG_I05 layout dialog
+4d756bc	2ae4356a1f6ea324	DIALOG_PC params 2
+4d75b1a	c5ad31098dba7027	DIALOG_Icon dialog
+4d76784	cf491fa5fc252725	DIALOG_F07 layout dialog
+4d768c4	0ed458e462535f10	DIALOG_Layout dialog
+4d768f6	95355a96d3c79e9c	System menu
+4d76920	d078d341f3d94150	Force multiplayer mode:%s
+4d7697e	2c58fb754296d500	Japanese_10pt
+4d76990	e8da3ea53ce486d2	Japanese_12pt
+4d769a2	b8c59cbf1855f9a4	Japanese_14pt
+4d769b4	7546dfef12a3ab76	Japanese_16pt
+4d769c6	13b618e19746be48	Japanese_18pt
+4d769d8	21f6d1b84231fea3	Japanese_20pt
+4d769ea	65758e8847e44cd1	Japanese_22pt
+4d769fc	ae63730217f12347	Japanese_24pt
+4d76a0e	f1e22fd21da37175	Japanese_26pt
+4d76a20	3915b556b380dd3b	Japanese_28pt
+4d76a32	23fa5ca09434ee02	Japanese_30pt
+4d76a44	6ccd111a642aab30	Japanese_32pt
+4d76a56	3c7e0dd5e24f0cef	Japanese subtitles
+4d76ee6	3882bcb8cac64c83	Current pad idx:%d
+4d76f26	8227adf8c54b0fe9	Desired pad idx:%d
+4d76f6c	357a756b0bb723d2	Pad device refresh request:%s
+4d77af6	a69051e6940fdb12	[%s] < SafeAreaDebugDrawMode
+4d77b92	22c758b29fcc5206	State flags
+4d77bb4	4e137b7cd364c6dc	Bootup test
+4d7868c	e43c442084f74e3a	Fullscreen menu open:%d
+4d786d2	1f129c94e646792d	Force fullscreen menu open:%s
+4d78912	3a83f12a460770be	Acted in basic shop:%d
+4d78954	e72cfcd082fbd4b2	Acted in repair shop:%d
+4d78992	48ddd751a523e8e1	Acted in weapon upgrade shop:%d
+4d789e0	95f6f904152fa623	Acted in armor upgrade shop:%d
+4d78a2e	d28bcb68fa98432f	Acted in base change shop:%d
+4d78a86	af752cd3fdee4341	Acted in sell shop:%d
+4d78ac6	d867f133d11614a9	Acted in magic equip:%d
+4d78b06	8a91303fb18948b4	Acted in level up:%d
+4d78b3e	80b26177b048e625	Menu-side resonance Lv:%d
+4d78b74	ec8c4ab3fbab2b3f	Warp destination chosen:%d
+4d78b8e	25f142075378380c	Logo: overseas behavior:%d
+4d7982e	210da081f145b5ab	DIALOG_F09 layout dialog
+4d79946	526c2c4407dddbbf	Debug AutoMatching [%s]
+4d79976	5bf51222bb635077	Room Timeout Timer : %.2f(s)
+4d799b0	fd98aafa42e9532c	ForceJoin Timer : %.2f(s)
+4d79a70	5d06322df9dc0cc8	Test call LAN disconnect event (push enter)
+4d79ad2	9ae48ab3bd0e4da2	Test call NP sign-out event (push enter)
+4d79b42	a6c12bc99d35fd1a	Test call 360 sign-in status change event (push enter)
+4d79bd6	c8b1490e2a7250f9	Test call irregularLeaveSession, unstable session (push enter)
+4d79c46	0d04cb98017e51a8	Force session create failure:%s
+4d79c94	0d5d6aef9ddfd340	Force session join failure:%s
+4d79ede	f7289eb4ced0e5ec	Net handle awaiting chr creation : %d
+4d79f60	75b82c39607c66af	Member Limit [%d] : in multiplayer, can't change
+4d7a02c	8da7d07089e35c24	GameServer SignIn:%sNot SignIn (□+○ to sign in)
+4d7a082	77381a842226e6c5	NP SignIn:%sNot SignIn (□+○ to sign in)
+4d7a0c8	02c199ee3ad1913c	Lock State : debug toggle not implemented
+4d7a110	978a882ab14cca59	Server mode %s
+4d7a2e6	5b69c9ee50f3bfb3	Create session
+4d7a2fa	a7c65f85e6bc9bf0	Creating session
+4d7a310	83332069b254d286	Session creation failed. Press the button to try again
+4d7a352	0d7fd4fbc6d4535c	Connected to session
+4d7a36a	af06cf995726d726	Joining session
+4d7a380	8ec73fb3ec206ad0	Failed to join session. Press the button to try again
+4d7a3c2	8f12625eb5ffbcc9	You are the host of this session
+4d7a3e0	177c69239e10722e	Join session
+4d7a3f6	247b1d01e5e981aa	Search found a session. You can join it.
+4d7a42c	fea3ed0dec84b053	Session join in progress
+4d7a682	a099d683bf6807bb	Max regular packets kept per type:[%d]
+4d7a768	ab3d56fd43b09f36	Action button pressed:[%s][%d][%d][%0.3f]
+4d7a7ae	4001644974abc7dc	Target playing given anim:[%s][%d][%d]
+4d7a7e4	4bede3c6127db7d3	Aware
+4d7a7ea	61d3b1660e1b8a72	Warrior
+4d7a7f0	30083ab3fb8773c2	Knight
+4d7a7f6	8f5fe452a311e808	Wanderer
+4d7a7fe	bd14f72cd5d799b6	Thief
+4d7a804	58f077f0ce9cefb2	Hunter
+4d7a80a	8740ca5a47ef4e7a	Sorcerer
+4d7a812	66da3afbdcbbfc5d	Pyromancer
+4d7a81a	21340a9e0743c4c9	Cleric
+4d7a820	339995f3c254b918	Swordsman
+4d7a828	09959acb0e9a7b4b	Deprived
+4d7a836	df0622d93a5dc17c	Event message ID check:[%s][%s]
+4d7a868	a85fc9910a156f24	Backread done check:[%s][%s][%d]
+4d7a898	581dd7cc83f99074	Backread done check:[%s][%d]
+4d7a8c0	4eb0840eb164300e	Target chr took damage:[%s][%d][%d]
+4d7a8fa	47c7ff2133ea4a9b	Event message ID check:[%s][%s][%d]
+4d7a934	3f9d9adf455f0969	Target chr HP ratio meets condition:[%s][%d][%s][%0.3f]
+4d7a988	1751f5d3811b1833	Chr HP meets condition:[%s][%d][%s][%d]
+4d7a9e6	fe893a7d8572bc9b	Event message ID check:[%s][%d]
+4d7aa18	1fc485eec581c11b	Targeting check:[%s][%s][%d]
+4d7aa48	9ebe2bd7f6ff722b	Target chr is chr type:[%s][%d][%d]
+4d7aa82	14cdd8cd5b0696f1	Tendency meets condition:[%s][==][%d]
+4d7aad2	4fe7beb80b047563	Run conditions
+4d7aadc	6fe9153093d1d741	Condition group met:[%s][%s]
+4d7ab30	aa2e485555668746	Targets within distance:[%s][%d][%d][%0.3f]
+4d7ab74	8f05bf8160f4e7a4	Event flag ON:[%s][%d]
+4d7ab9e	f91fb83daf2fbb07	Event interference ID received:[%s][%d]
+4d7abce	128f8a8b3ec5de2e	Target chr part HP meets condition:[%s][%d][%d][%s][%d]
+4d7ac24	a25da84847f30818	Item discarded in region:[%s][%d][%d][%d]
+4d7ac68	74686756b1276157	Event value meets condition:[%s][%d][%d][%s][%d]
+4d7acb4	67e17c91e23a73c0	Event value meets condition:[%s][%d][%d][%s][%d][%d]
+4d7ad08	35f20ab95c162ae7	Event value meets condition:[%s][%s][%d]
+4d7ad44	16998494479580de	Accessory
+4d7ad4a	224ea620c0275666	Goods
+4d7ad50	2b0badc6f80f4cd1	Has item:[%s][%s][%d]
+4d7ad80	f45216e62f920cfe	Has SpEffect:[%s][%s][%d]
+4d7adb0	98c16c0f23105e10	Chr moving on collision:[%d]
+4d7ade0	25f3a2049508bbb9	Chr rampaging on collision:[%d]
+4d7ae10	9b74aa09ebe26053	Local player on collision:[%d]
+4d7ae40	495629eae5009bdb	DLC purchase meets condition:[%s][%d]
+4d7ae7c	44c71812143be608	Multiple event flags meet condition:[%s][%d][%d][%s][%d]
+4d7aed0	751c9596fa8b7780	Multiple event flags ON:[%s][%d][%d]
+4d7af06	f2f7050c31188932	Multiplayer state matches:[%s][%d]
+4d7af36	938c7d3079ff6334	ObjAct executed:[%s] KickEventId[%d]
+4d7af72	227add3f38588cf9	Target object took damage:[%s][%d][%d]
+4d7afb2	25806c6793cd546d	Target OBJ HP meets condition:[%s][%d][%s][%d]
+4d7affc	6047df8789899116	Timer:[%s][%.3f]
+4d7b01c	35b3b7a5153ded51	[Never satisfied]
+4d7b030	6c8df5692dd40a1a	Player soul level meets condition:[%s][%s][%0d]
+4d7b07c	2f70178f7ab55b5b	Cutscene playing:[%s]
+4d7b0b6	3fc43fd2aa1a24e7	Tendency meets condition:[%s][%s][%s][%d]
+4d7b0f8	f6e729fb9e64b7c1	≪0x%08X≫ < Slot number
+4d7b11c	bd997e73e1816b4a	≪%d≫ < Slot type
+4d7b13a	eb10eb62eb2527b4	            Atk[Total:%.3f P%.3f: M%.3f: F%.3f] Shield[C%.1f: S%.1f]
+4d7b1a8	204e2c45f2ca9899	            Durability [%.1f / %.1f] (%.2f)
+4d7b1ec	f7f9345ce5818c8f	Select %s[%06d]%s
+4d7b206	0a594107b6bf7c56	Arrow
+4d7b20a	89572d666c64d652	Bolt
+4d7b212	7bfa25635a2ec33a	Two-handed? %s
+4d7b220	2c15a36b152bed2f	Two-handed
+4d7b226	257bb27e44f59775	One-handed
+4d7b22c	458cdab5e9af32ab	Hand: %s
+4d7b23a	96adbd44bd54120e	Right
+4d7b240	28aaf0a331290ce5	Left
+4d7b246	f5b42755ddaf6e4b	Copy current player equipment
+4d7b27e	2cd5879f8819e59c	[%s] < Item lot log output
+4d7b29e	5b8d4c6cd0445e1c	[%d] < Item lot level
+4d7b2bc	12dcec60c513701a	[%d] < Target roll count
+4d7b2d4	30ed57385fccfea7	Item lot ID :[[%d]%d%d%d%d%d%d%d%d]
+4d7b316	a73ca7e8136cc187	Item lot ID :[%d[%d]%d%d%d%d%d%d%d]
+4d7b358	83bdcc50f0534d67	Item lot ID :[%d%d[%d]%d%d%d%d%d%d]
+4d7b39a	cf34980635b6de07	Item lot ID :[%d%d%d[%d]%d%d%d%d%d]
+4d7b3dc	c962866e8fb6cca7	Item lot ID :[%d%d%d%d[%d]%d%d%d%d]
+4d7b41e	3542290da4906707	Item lot ID :[%d%d%d%d%d[%d]%d%d%d]
+4d7b460	e9802df94ed391e7	Item lot ID :[%d%d%d%d%d%d[%d]%d%d]
+4d7b4a2	03449256b576a707	Item lot ID :[%d%d%d%d%d%d%d[%d]%d]
+4d7b4e4	665a4f7c0b8f7aa7	Item lot ID :[%d%d%d%d%d%d%d%d[%d]]
+4d7b526	cc80cf809867438f	○ to stop
+4d7b536	07a6fe82b71a4946	○ to start
+4d7b546	b4c81b4698d297d4	Rolls:%6d/%6d
+4d7b560	a80ccb2355cc4d94	--- Lot ID:%d ---
+4d7b580	7b8e2d5ba188f29e	 %d>%3d.%02d%%(%5d) <%6d:%sx%d
+4d7b5bc	98ed5a5d9963f8a1	Item lot sim
+4d7b5ce	ccf1e70c06722b9e	?Unknown?
+4d7b5d8	7c208e7a9c92cb3c	Miss
+4d7b5e0	8504231bf658d152	Level-based
+4d7b5ec	c0cd4e6e5322fa25	[%s] < DbgDispDropItem: show debug spheres
+4d7b628	969c6e329d3d4d42	Drop Items
+4d7b650	2dfd6882c3cd481c	Treasure Items (chests)
+4d7b67c	ac925abe56cee4eb	Corpse Items
+4d7b6a4	3a06055eb06dc4b0	End Treasure Item (looted chests)
+4d7b6de	634a68f6109bd2d6	//△ toggles shown info      ※Note: if a lot ID has several candidates, only the first slot is shown
+4d7b80c	cb6c6e1ecea14636	Debug SpEffect param ID: %d
+4d7b834	042a83ca5a30f261	Apply SpEffect to self (Push Enter)
+4d7b862	baac1dc40223bfa6	Apply SpEffect from player (Push Enter)
+4d7b898	173282a022b0d4bc	Delete SpEffect(Push Enter)
+4d7b8c0	fc59268424d43ab0	Clear all (Push Enter)
+4d7b8e4	08ba2707b55e64b2	All
+4d7b8e8	ae64932229657e8a	Body gem
+4d7b8f6	c8ec9cc6e1c8ceba	[SpEffect%d] ID=%d, life %.2f, interval %.2f, equip %s
+4d7b946	785931568a7f1881	[SpEffect%d] none
+4d7b95e	23d8f03ab3b72907	≪%.4f≫ < Elapsed time [sec]
+4d7b986	639e119dea48a310	≪%d≫ < Obj slot index
+4d7b9b2	8ab425e9c9dcc11c	≪%d≫ < Burning SFX count
+4d7b9ce	e89b2dcfdb488ca4	≪%.4f, %.4f, %.4f≫ < Ignition position
+4d7ba02	ec55f4303eb2975d	≪%s≫ < Glowing
+4d7ba62	5c74aaaebd8951d4	《%d》 < Sound space type
+4d7ba80	a1f40520c5338ddd	《%0.3f》 < Room value
+4d7ba9a	d708159c1477a1f2	《%0.3f[sec]》 < Room value interp time left
+4d7baca	3616b7ce9aac883a	[%0.3f[sec]] < Room value interp time
+4d7baf6	e21178666c292098	《%d》 < Evil eye level
+4d7bb14	9123bd91868920ae	[%s] < Use HDR
+4d7bb32	59baf191e731063d	[%s] < Use ITL
+4d7bb50	a32af5f608e2dd19	[%0.3f] < HDR culling lower limit
+4d7bb7c	66dec6f55e179873	[%0.3f] < HDR max value floor
+4d7bba4	4252c4186e0cc3da	[%0.3f] < HDR volume rise adjust (Attack)
+4d7bbdc	5c2b47d7abaacbc4	[%0.3f] < HDR volume fall adjust (Release)
+4d7bc2a	290304122a3340d5	《%s》 < Request ambient stream
+4d7bc50	879849be30cbca32	《%d》 < Ambient stream request area no.
+4d7bc78	63c759650e243079	《%d》 < Ambient stream request block no.
+4d7bca2	be23bc3af8288212	《%s》 < Ambient stream active
+4d7bcc4	51e0818fdbcc863e	《%d》 < Ambient stream area no.
+4d7bce8	9f31ff4cb0da5cad	《%d》 < Ambient stream block no.
+4d7bd22	b4e640177bd85226	Play/Regist《%04d/%04d》
+4d7bd50	738daf671c269907	UpdateTime《%0.4f/%0.4f》
+4d7bd80	57af6819b16a6c41	StaticEmitterNum/DynamicEmitterNum《%03d/%03d》
+4d7bf02	f6631d2fc54cb5d8	[%s] < Multithreaded update
+4d7bf20	fc650831aa2acc92	[%s] < Add cloth collision with ragdoll rigid bodies
+4d7bf5e	3d061f447847cc24	[%s] < Rigid body motion state change: new method
+4d7bf94	e69d326ed26b6ca5	[%s] < Disable ragdoll param overwrite
+4d7bfcc	269d0c5477b8a2e5	[%s] < Enable rigid body owner check
+4d7c000	79b438545c2f6f22	[%.2f] < Max impulse
+4d7c044	fa16ac5a25dda946	Old
+4d7c04c	afe9206caec8e609	New
+4d7c054	ce2b2c4d44113e84	New (fixed)
+4d7c060	758cc71286a82683	[Immediate] < Cloth vertex update mode
+4d7c08e	c9a490082085866d	[SingleBlock] < Cloth vertex update mode
+4d7c0c0	683a80bb9432c542	[MultiBlock] < Cloth vertex update mode
+4d7c0f0	79c6f4558696fa99	[MultiAsync] < Cloth vertex update mode
+4d7c120	43d3162437065c32	[unknown] < Cloth vertex update mode
+4d7c14a	48148ebd913d2a00	[□+○] Take WorldSnapShot
+4d7c17a	0a0af1b31dd2816e	[□+○] End capture
+4d7c19c	11c8c61f38529089	[□+○] Start capture
+4d7c1c2	9c8238a80b88cb42	[%s] < Raycast processing type
+4d7c28a	45e4746a3c7f4609	≪%5d/%5d≫(%5d) < Rigid bodies
+4d7c2b4	e2e01fad3ed1c6e7	≪%5d/%5d≫(%5d) < Constraints
+4d7c2e6	f11ddf2d1bce0ab8	≪%5d/%5d≫(%5d) < Motions
+4d7c312	b4bb74fb80d18483	≪%5d/%5d≫ < Materials
+4d7c334	69d418de772bc23b	≪%5d/%5d≫ < Motion properties
+4d7c360	4aa6f9ac4741c81b	≪%5dKB/%5dKB≫(peak:%5dKB) < Block stream allocator
+4d7c3b2	60df5c68de669d10	≪%5dKB/%5dKB≫(peak:%5dKB) < Step allocator
+4d7c3fa	d4a6ad021eaae867	Not set
+4d7c442	8072a1621c6da5c8	[%d] < DrawRigidIndex(-1:All)
+4d7c4a4	7eadbd03e545afc4	[%d] < DrawConstraintIndex(-1:All)
+4d7c554	7557af56dc6cfa97	[%f] < Ragdoll Blend Rate
+4d7c5b0	ba124dc6c6f29b07	[%s] < No velocity reset on ragdoll switch
+4d7c5e6	b8a0275b45b15c55	Penetration detected
+4d7c5f6	c75923eac4fbea8b	No penetration
+4d7c9c2	9faa581b29fe0158	Enable measuring %s
+4d7c9d6	351ae6d61ad40d7c	%02d>%s: %04.1f%% (%04.1f%%)<%04.1f%%>《%04.1f%%》[%d]
+4d7ca36	92497d4c8b77c7ae	%02d>: %04.1f%% (%04.1f%%)<%04.1f%%>《%04.1f%%》[%d]
+4d7ca92	dba4d94fcde849c6	%04.1f%% (%04.1f%%)《%04.1f%%》[%d]
+4d7cad0	e8846c688045403d	SUM: %04.1f%% (%04.1f%%)《%04.1f%%》
+4d7cc08	c505b99d90998260	Performance
+4d7cc1c	b19e38192bcddc66	World sync request
+4d7cc2e	3f0ba8731e723241	Mem update 1st half
+4d7cc3e	61c825d5559e7454	Multithreaded update setup
+4d7cc58	52f9e52e6735fa3f	Multithreaded update
+4d7cc6c	8ab5bc8129853a40	Single-threaded update
+4d7cc82	c03407ca98301f76	Wait for threads to finish
+4d7cc9a	3bbaaafecb6aac0a	Visual debugger
+4d7ccae	edaf673b62de178f	Mem update 2nd half
+4d7ccbe	ebad84c011723c0f	Cloth update
+4d7ccca	e43aa9420a4b09e9	  SprjClothModelIns pre-update
+4d7ccf8	28c877afafe2794c	    sprjClothModelIns->UpdatePre
+4d7cd36	0ff1f51bdb7ad6c0	  FD4HkClothManager()().Update
+4d7cd72	22758fd1d915a210	  FD4HkClothManager()().PostUpdate
+4d7cdb6	f8468972e04ed6f3	  sprjClothModelIns->UpdatePost
+4d7cdf4	76d22e2109af64f3	  m_clothVertexUpdater->UpdateVertexRequest
+4d7ce4a	ea36aa22b2e96243	  sprjClothModelIns->UpdateVertex
+4d7ce8c	909f0071f40c0a5f	  m_clothVertexUpdater->UpdateVertex_forBlock
+4d7cee6	0d6a046587814c98	  m_clothVertexUpdater->UpdateVertex_forAsync
+4d7cf40	b30efb647ae5a525	  m_clothVertexUpdater->UpdateVertex_forFinish
+4d7d1d4	8032a149e319866e	Ins::_Res_SetUp-create model
+4d7d200	385ce39667328bae	Ins::_Res_SetUp-create physics instance
+4d7d236	81704c9cfda6d114	Ins::_Res_SetUp-create animation
+4d7d262	65f6f4cb6b5501da	Ins::_Res_SetUp-initial setup
+4d7d28c	854f91bec8ae0105	Ins::_Res_SetUp-set animation
+4d7d2ba	486a19660d296031	SprjModelDrawEntity-set model matrix
+4d7d2fa	23b5cc23dc4d12ff	SprjModelDrawEntity-decal receiver
+4d7d332	2ab947b7ac15d78e	SprjModelDrawEntity-wind force receiver
+4d7d370	de208dcc80c76fea	SprjModelDrawEntity-GX world model matrix
+4d7d968	bf0afaada1e93c68	Field update
+4d7d978	16b71a3fa4193deb	Chr update
+4d7d984	5e4beeaf99e37938	MapIns update
+4d7d996	649b5eb179b5be11	HitIns update
+4d7d9a8	26be11fdc7e2decf	ObjIns update
+4d7d9ba	d4de4728b7f42317	Camera update
+4d7d9c6	190e03c9e53bfa3b	Filter setup
+4d7d9d4	3ddf882eda7daefb	Chr anim update
+4d7d9e6	5f4f3d71efdd8183	Character proxy update
+4d7d9fe	b4780c72c29b4971	Chr action EzState update
+4d7da22	9e9f34d2b5fb5ff4	Path search (update)
+4d7da38	0103a96d2dae63f8	AI update
+4d7da42	d17269b0ca1caa97	Network
+4d7da50	f92da235eabedb85	Bullet update
+4d7da5a	4fe061667d1a30eb	Event
+4d7da64	f70d3e2e16d710d5	Damage update
+4d7da72	584add57011466f0	Talk update
+4d7da7c	cc3e3faa11163c65	Sfx update
+4d7da88	a889813e933fb277	Lua garbage collection
+4d7daa4	cd017c7efdf1caa1	Lock-on update
+4d7dab0	d410bda8a3ea6ae9	Path search (batch)
+4d7dac6	99361ff37a328d12	NvmParts search
+4d7dadc	6e218d330eaa0941	AI sound
+4d7dae8	fde0185b1e5e2dd8	Target bank update
+4d7db02	7c8dd27abb5b45c6	FRPG system
+4d7db14	a742c7397d84bf09	Resources
+4d7db22	3dd28bb89f7a2ba0	Pad
+4d7db2e	311f28258712a0d5	Game
+4d7db3a	416d3e440474da0e	Tasks
+4d7db46	223e17aa44816d3c	Havok
+4d7db54	cbf0aee585288634	Debug menu
+4d7db6a	85e96e2571da5067	FFX
+4d7db76	fdcfa5784bd2e701	High graphics
+4d7db84	f05b6088fe96b37b	Wait for draw end
+4d7db92	26f5c95b9f18f51a	Network update
+4d7dbe0	06c430273395dcbb	Log categories
+4d7dbee	a714b5cb2d41cc2d	%s < Category name
+4d7dc02	ea5e6d0d846e3047	%s < Settings in use
+4d7dc18	8a919257a7c033c1	[NEVER] < Log level
+4d7dc34	ac92ea99a026cc3d	[%s] < Log level
+4d7dc50	608527df9e37881d	[%s] < Output to
+4d7f046	7a781aa6cb1da784	Draw Extract Motion [%s]
+4d7f082	aa20e33887fd4323	Skipped movement applied count %d
+4d7f0a4	a41f9e7591f81ef9	AnimSlotLog [%s]
+4d7f0c4	1416f869dcdf7b41	Force fade-out of previous anim [%s]
+4d7f0ec	0519ddf5c1b8defd	Anim test [animId:%s] : A:increase X:decrease Y:reset
+4d7f136	83a3b8477395f047	≪%s≫ < Loop anim test playback
+4d7f166	d533edeeccba1d7d	Use special blend type? [%s]
+4d7f186	89b860afadb5e3b5	Anim test [animId:%d] :push enter
+4d7f1c2	8254fdce2848c04b	Move distance [%.3f, %.3f, %.3f], %.3f
+4d7f20e	4c2cab0035dd5ec5	In move anim? isMoveAnim:[%d]
+4d7f240	3e33d80d3d9d0bf7	Anim ID offset [Nml:%d NpcParam2:%d TAE:%d SpEffect:%d = Sum:%d]
+4d7f2b8	598bf765f3d8a930	Play anim test : push enter
+4d7f2e4	e82b1f5f81472791	Create TrackTable: delayed debug menu init (Push Enter)
+4d7f74c	d411708b69b9cc52	Next after playing to the end
+4d7f762	9a475667c91a4569	Next after matching play time
+4d7f77a	23c8440852f61553	Next immediately
+4d7f94a	77faf6ab54ae59e7	Disable Update [%s]
+4d7fa3c	404f4b3345ed3281	[%s] < HelmetScale_useDbgParam
+4d7fa76	7c20ba41da396b9c	[%0.3f] < HelmetScale_ScaleX
+4d7faac	7c278641da3f31ee	[%0.3f] < HelmetScale_ScaleZ
+4d7fae2	cdf2b424dc87fcf0	[%0.3f] < HelmetScale_MaxX
+4d7fb14	cdf98024dc8dc342	[%0.3f] < HelmetScale_MaxZ
+4d7fc08	f8c423be7b17366a	[%s]: [%%0.3f]
+4d7fc26	b4287680a2d51e88	Generate (Push ○BUTTON)
+4d7fc5c	49dca2172655a6b8	[%0.1f](%0.1f) < Age (15-60)
+4d7fc98	2db06bf8aa712ce1	[%0.1f] < Age (15-60)
+4d7fcc6	b1829c4f62e1b870	[%0.3f](%0.3f) < Gender (-1:male, +1:female)
+4d7fd10	a1855a76f14a12f3	[%0.3f] < Gender (-1:male, +1:female)
+4d7fd4c	e8b61f84f8dcfb77	[%0.3f](%0.3f) < Caricature (0.01-2.00)
+4d7fd9e	46e0c959d3406600	[%0.3f] < Caricature (0.01-2.00)
+4d7fde2	bce541590e0475a2	[%0.3f] < Asymmetry (0.01-2.00)
+4d7fe26	83c27e3601b14e02	[%0.3f] < Race: ALLRACE to Cur
+4d7fe60	c9c9829413009c1a	[%0.3f] < Race: AFLO to Cur
+4d7fea8	1e8b247abc5fcf4c	[%0.3f] < Race: ASIA to Cur
+4d7fef2	9337cac2ec2b3668	[%0.3f] < Race: EIND to Cur
+4d7ff3c	7479f47820cce543	[%0.3f] < Race: EURO to Cur
+4d7ff84	75bf25ecba2acd58	Tex [%0.3f] Geo [%0.3f] < Caricature
+4d80002	3b48eef15cd7e2c6	%02d: [%0.3f](%0.3f) < %s
+4d80030	d349ac3bb9c995d9	%02d: [%0.3f] < %s
+4d80050	fb9e76fb75e2e5a5	Load Param (Push ○BUTTON) [%d]
+4d8008c	1cfd4fc64ed293ba	Save Param (Push ○BUTTON) [%d]
+4d800c8	272816bda3448b5b	[%s] < Suppress param linking
+4d800fe	d4373b2b3c9168be	ID:%8d, life:%.4f, hits:%d
+4d80130	15567e29e85e6241	■Hits %d
+4d80142	4aa4c112bd2262e5	■Attack ID %d
+4d80154	6da6bf27f7e6462a	■Attack power P: %.2f, M: %.2f, F: %.2f
+4d80192	f3a35803059aaa48	■Attack multiplier P: %.2f, M: %.2f, F: %.2f
+4d801d2	34d268e5f577c11b	■Attack bonus multiplier P: %.2f, M: %.2f, F: %.2f, T: %.2f
+4d80228	5ad8d35d5ed7d5af	■Stamina attack bonus multiplier: %.2f, knockback multiplier: %.2f
+4d8026e	3d21cf2aeba37c4c	■Sweet!
+4d8027c	6376551d33925d0c	■Weak!
+4d8028a	73b48762c137b44c	[%s] < Show debug spheres
+4d802a6	b1e82641c9011b7f	[%s] < Show debug info
+4d802c4	65901a373bd42c41	[%s] < Damage from weapon dummy polys
+4d802f4	478a6ea10d7b84d9	[%s] < Damage from attack params
+4d8032a	a4b818f06792038d	[%f] < Spark emit distance
+4d80344	df83cde637a928f5	[%f] < Low-hit slope treated as floor [angle 0-180]
+4d80382	e9f2c3341bc65b1b	Damage count [ SUM:%d / POOL:%d ] [ EM:%d / SUM:%d ]
+4d803dc	5e0b9171f764e8ef	History slots [USE:%03d(+%d)/MAX:%03d] [USE:%03d(+%d)/MAX:%03d]
+4d8044a	64ec0ff032528d9a	Active damage list
+4d8045c	552a6ba562aec5a2	Damage manager
+4d804a6	26874a2910c04ef6	Dropped echoes capture range [m]: [%.1f]
+4d804fe	7b0ad8d91e261965	Dropped echoes capture check interval [s]: [%.1f]
+4d8055c	f76e2b6ea2402072	No-theft distance, player to dropped echoes [m]: [%.1f]
+4d805de	7af52c841a04bceb	≪%s≫ < Dropped echoes stolen
+4d80656	757d08336fda5ecf	Bloodstain ID [%d] POS[%.2f] [%.2f] [%.2f]
+4d806aa	488ce9f8fe8133ab	Replay ghost ID : %d
+4d806c8	489323b44182758b	Position [%.2f] [%.2f] [%.2f]
+4d80984	b40c379291eb970f	Bloodstains
+4d809d8	44555afe46c4cfe7	|Summon slots>%d%d%d%d %d%d%d%d%d%d%d
+4d80a12	37c7819a2d2646db	|Summon state>
+4d80a20	ed133f924eb9bd79	[Normal 2: normal co-op]
+4d80a36	932ca83ad6e9a3ba	[Normal 1: normal co-op]
+4d80a4c	c7635d614c249b07	[Normal 2: Sunlight co-op]
+4d80a62	0015981a5dbb3f1c	[Normal 1: Sunlight co-op]
+4d80a78	0cd334fe91254b83	[Special 2: normal invasion]
+4d80a8e	6712528b1c06b0e4	[Special 1: normal invasion]
+4d80aa4	ef3f269f7e314cb5	[Special 2: betrayal invasion]
+4d80aba	893725f34cb55bb2	[Special 1: betrayal invasion]
+4d80ad0	6fe1a898ca42b155	[Normal 2: nemesis]
+4d80ae2	750b789cd5f3fc2a	[Normal 1: nemesis]
+4d80af4	0d55b2f56f83f5fe	≪%d summoned≫
+4d80b06	bc14a5d348f88701	Invalid or host
+4d80b14	d181e38ab91ca1ca	White summon
+4d80b1c	0fa35eb9ce9d8647	Soul-sucker
+4d80b24	0a5785739fe78cca	Red summon
+4d80b2c	f75e3c13561d5426	Detection
+4d80b34	1c0a124c0b87da01	White rescue
+4d80b3c	6b24ff611d648a36	Black rescue
+4d80b44	ef84676f83a0e3c5	Dragon
+4d80b4c	abb320016150c88c	Bounty
+4d80b54	bd2e63fb065cfc39	Arena 1v1 B
+4d80b64	a4ac8f6851c5ca70	Arena 2v2 A2
+4d80b76	0448895ffb368be8	Arena 2v2 B1
+4d80b88	0452bb5ffb3f3563	Arena 2v2 B2
+4d80b9a	50c4506827fc73d3	Arena battle royale B
+4d80bb2	50c0ea6827f990aa	Arena battle royale C
+4d80bca	50cb1c6828023a25	Arena battle royale D
+4d80be2	d5bda9ba4fc0671b	General invasion
+4d80bec	62626cc613b8f508	Nemesis (Vileblood)
+4d80bfa	4e4bafd0ff596bb9	Nemesis (Vileblood hunter)
+4d80c0c	dfdfbb9e26cbd709	Nemesis (hunter of blood-drunk hunters)
+4d80c28	b90a157f53ba9497	League
+4d80c2e	d49cd51804a3c20f	League leader
+4d80c36	982945512fe2b720	NPC normal co-op
+4d80c46	2bca5f239c17cbca	NPC normal invasion
+4d80c56	e230c61e073038f1	NPC nemesis (Vileblood)
+4d80c6a	e75be3f217e08884	NPC nemesis (Vileblood hunter)
+4d80c82	6a72a017f9fb9354	NPC nemesis (hunter of blood-drunk hunters)
+4d80ca4	c57dbf518f6db016	NPC League
+4d80cb0	65d52e199cb852f2	NPC League leader
+4d80cbe	466e0d41087d0954	Active SOS signs
+4d80cd6	726e6e5843844ef4	Accept forced intrusions: [%s]
+4d80cf8	cb0685ea9a76f8e8	Time limit coefficient: [%.2f][sec]
+4d80d1e	ac3a71b73526c510	  Clamp time: [%.2f][sec]
+4d80d46	138a5a4bd680b058	SosSign [PNID:%d]
+4d80df0	1356fe75066cb958	Last normal summon result:
+4d80e08	cde8ab0e492ec706	Last forced summon result:
+4d80e20	1223ec27526c4cf1	Processing
+4d80e28	8bc7b10945f09c76	No SOS sign
+4d80e3c	773366c37fa44896	Already summoned by another player
+4d80e62	5923018651a1239b	Moved to another block
+4d80e7a	29cea405fefbf562	Timed out
+4d80e88	e7b8e4e1b8591fe2	Not connected to the server
+4d80ea0	eb4aa13e28103e84	Summon not run yet
+4d80ebc	3c0cb1b54583a769	Other error
+4d80ecc	d133ed6554ab782f	Create dummy sign
+4d80ede	1516478639c8db0e	Black phantoms summoned :[%d]
+4d80f06	1143b50e19889c2d	White phantoms summoned :[%d]
+4d80f2e	b4340208e044751b	Detection ghosts summoned :[%d]
+4d80f5a	f5c63b56ee2ca488	Multiplayer condition state :[%d] [%d] [%d]
+4d80f8a	172014ae7f4aac6f	《%s》limitLv:《%d》 limitTimer:《%.2f[s]》  obTimer:《%.2f[s]》
+4d80ffc	08477507b4fdabae	Mystery
+4d81000	d0c2d92779e82c72	Active SOS signs
+4d81016	f252e7450e0d7497	Local SOS signs
+4d8117c	93d5ef63d5835b7d	%s: low-hit HKX is too large. Split it or reduce polygons. (%dkB)
+4d811d8	0f1d59d5fc13a86d	%s: high-hit HKX is too large. Split it or reduce polygons. (%dkB)
+4d812f2	b4436250bed13cff	[%d] < Lock-on camera slot no.
+4d81342	9ae389b07be4630a	[%03d:%s] < MabExp copy source (←→: change)
+4d8137a	fd8a2b67d5dc7e09	[%03d:%s] < MabExp copy dest (←→: change)
+4d813ba	696b691f69106b49	MapStudioExp>[%s] < Output file name (□+○: output, △: reset)
+4d81478	ee5ee283ef83c914	[%s] < Low-hit debug display
+4d814a0	6f9b9356e49a9284	[%s] < High-hit debug display
+4d81588	0c2521e9b1074571	Action point debug display: [%s]
+4d815ba	c3051c5ea8973d19	[%0.3f] < ActPntLifeTime
+4d8166e	2e1a051b53c17dba	IsLockMode: [%s]
+4d8168e	d152cf6f475f5436	[%d] < Stick flick frames
+4d816b0	a479fad656e8ed8a	[%0.3f] < Stick flick strength
+4d816d4	53328c2abae67899	[%0.3f][deg] < Stick flick range
+4d81702	6e8acba0880bcf7a	[%0.3f] < TgtHeightMax
+4d8172c	f8c65569050131f4	[%0.3f] < TgtHeightRate
+4d81758	596eba13920f44bc	[%0.3f] < VisibleCheckIntervalTime
+4d8179a	875424864b88aee3	[%0.3f][sec] < Out-of-sight lock-on timeout
+4d817d2	d67fe97dbad6f897	[%0.3f] < LockRangeRadiusBonus
+4d8180c	3d840e0678dc564a	[%0.3f][rad] < Lock range radius bonus falloff start angle
+4d8184a	7dd4aebe1b4e456b	[%0.3f][rad] < Lock range radius bonus falloff end angle
+4d81888	bf42e4d575ac4677	[%0.3f] < ChrLockRangeMaxRadius
+4d818c4	c24d256b1ee37b6f	[%0.3f] < ChrLockRangeMaxRadius_forDark
+4d81910	2ac208a18d376a11	[%0.3f] < ChrLockRangeMaxRadius_forPitchDark
+4d81966	fceab75ee220c412	[%0.3f] < ChrAllRangeLockRadius
+4d819a2	05abc6032c849f61	[%0.3f][deg] < ChrFrontRangeLockHalfAng
+4d819ee	766a0927a6ff9122	[%0.3f] < ChrFrontRangeLockRadius
+4d81a2e	d3db89904d835aee	[%0.3f] < ChrFrontScoreAddBonusMax
+4d81a70	79acc31d65108a8a	[%0.3f] < ChrFrontScoreAddBonusMaxEndHalfAng
+4d81ac6	7201e22193dff53c	[%0.3f] < CamAllRangeLockRadius
+4d81b02	7420c7ed0bd5683f	[%0.3f][deg] < CamFrontNearRangeLockHalfAng
+4d81b56	e21a86b55b72b47c	[%0.3f] < CamFrontNearRangeLockRadius
+4d81b9e	b2bdd0929a991c9a	[%0.3f][deg] < CamFrontFarRangeLockHalfAng
+4d81bf0	8f16782fa38b86b1	[%0.3f] < CamFrontFarRangeLockRadius
+4d81c36	6498b10d985b34c1	[%d] < Lock-on camera param ID (-1: default)
+4d81c6c	dc4c11b05819c71a	《%d》 < Map-set lock-on camera param ID (-1: default)
+4d81cac	4202285c2bcf3a8a	[%0.3f] < Lock-on camera param blend rate (0.0-1.0)
+4d81ce8	77ed7df24539a756	Lock-on target debug display: [%s]
+4d81d18	a4b83a507ddac8da	Visibility check debug display: [%s]
+4d81d48	1b1e25a39624af15	Debug display: [%s]
+4d81d68	01bec2165a910fbe	Lock mode: [%s]
+4d81d88	0d2ccfe1c9a69312	Player lock-on: [%s]
+4d81daa	e84267218cea5a12	Camera lock: [%s]
+4d81dca	b71c332368130022	Force lock-on to talking chr: [%s]
+4d81df4	345e3b7eb1461493	Manual lock-on switching: [%s]
+4d81e16	83fe70db3730685d	Use flick target switching: [%s]
+4d81e3c	e701abecc1fb4fbf	Auto lock-on switching: [%s]
+4d81e60	a6f92ffb77f86291	Auto lock-on switch limit: [%s]
+4d81e88	123f956d31d68de8	Lock range radius bonus falloff: [%s]
+4d81eb6	4ab0aa2cf8626c5a	Locked target out-of-sight timeout: [%s]
+4d81ef6	4f3affe2c9c40163	Test: lock-on ignores collision the camera ignores: [%s]
+4d81f3c	fa768f4a85138ef5	Summon magic lock-on target debug display: [%s]
+4d81f76	83f0d5c5d3a3ae35	Lock-on for shooting: [%s]
+4d81f96	f883659d715bc1c7	LockTgtListNum:《%d》
+4d82080	f99732780407ed7d	Action point slot
+4d8209e	85f3af29f933944e	Burning slot
+4d820ae	b49237fbf2ff320b	Camouflage slot
+4d820c8	531adf0f4349d03c	Arena participant slot
+4d820e0	41ed43f1ec322158	Status effect SFX/SE slot
+4d82100	14cac8856d9faabb	≪%d≫ < SFXID on release
+4d82120	d5cefa2e7d311d77	≪%d≫ < Sound ID on release
+4d82142	93570064a7881ef4	≪%d≫ < Follow dummy poly ID on release
+4d82168	42150a89a51bef4f	≪%d≫ < Controlled SFX
+4d82184	c6578bf2ff28fd45	≪%s≫ < Use DeactivateEmitters
+4d821c4	dcba3c2f6a01e863	≪%s≫ < Auto-update by SFX
+4d821f0	fdd9ea221eea4b74	≪%s≫ < SFX created
+4d82212	dad2ab258d058a9b	≪%s≫ < SE created
+4d82232	a22b0cbccc295048	≪%s≫ < Released
+4d82250	b7fe5518049cecb1	Foot effect slot
+4d8226a	eaf71995b9950bf6	≪%d≫ < Follow dummy poly ID
+4d8228a	05143cb10b797fa6	≪%d≫ < Floor material
+4d822a0	6e5770fdfcd9f6dc	≪%.4f≫ < Forced height [m]
+4d822c6	3e03848d7dcbf999	≪%s≫ < Follow dummy poly
+4d822e8	9f26899a342c782a	≪%d≫ < Height type ≪%d≫ < Direction type
+4d82314	faecd2da267a9c99	Gasman slot
+4d82364	4dc4c02ea94a1a01	Grass slot
+4d82372	b8548846b83846ab	Lantern slot
+4d82386	09e99fca7bd903be	Timed invincibility slot
+4d8239e	8042cf29b49f766d	Magic/item use effect slot
+4d823c4	ebc5109dd668a67c	Multi SFX slot
+4d823dc	3650eea8f43eba78	Rescue sign slot
+4d823f2	fc75ef77f812282f	Resonance magic slot
+4d82406	c8f2897c564398fe	Karma slot
+4d8241a	e8f2525061e21f59	Rigid offset chr slot
+4d8243e	d262d9ceb10df137	Rigid offset SFX slot
+4d82462	9b8a38dbe21e6376	≪%d≫ < Follow rigid system index
+4d82492	6235c439f3c97460	≪%.4f, %.4f, %.4f≫ < X axis direction
+4d824c6	f1bb3744cec04069	≪%.4f, %.4f, %.4f≫ < Y axis direction
+4d824fa	89338c13fd9749c6	≪%.4f, %.4f, %.4f≫ < Z axis direction
+4d8252e	557b6f5776d9aa70	≪%.4f, %.4f, %.4f≫ < Offset position
+4d82568	d7eea83d08010fd2	≪%s≫ < Show
+4d82582	dc81492e1ffa58cf	≪%s≫ < Created
+4d8259c	95966927a1052c27	Glowing chest slot
+4d825b0	5a86277c3cb5b182	Judge's belly slot
+4d825c6	569750ffdcee6f80	Single one-shot SFX slot
+4d825ec	18be8531e7405634	Single SE slot
+4d82604	aef6f4a28301bc67	Single SFX slot
+4d8261e	0a92cf99b9d3c77b	Single trail SFX slot
+4d8263c	8f61d67c3768d2a9	Pyromancy weapon slot
+4d82650	41dfceb04fcdfbaa	Soul form death slot
+4d82668	9918fdb843669be4	Soul pickup slot
+4d8267e	8e9b8d3733f48737	Statue death slot
+4d82690	876708c796353f5a	Weapon enchant slot
+4d826c6	8a78ed8619ccbc85	≪%d≫ < Requested SFXID
+4d826e4	4d0ca15042bb2ded	≪%d≫ < Sound ID
+4d82700	b76b32ed6eea7489	≪%d≫ < Requested sound ID
+4d82720	c373149ffe207b8a	≪%.4f≫ < Display intensity
+4d8273c	5507c197a9635b65	≪%d≫ < Soul param type
+4d8275e	4be0cca0c28b8f61	≪%d≫ < Requested soul param type
+4d827da	b5c70797f59c3af3	≪%d≫ < SFX count
+4d827f2	49528dc85a635935	No
+4d827fa	27657644ce9cd0a1	≪%s≫ < Updated
+4d828f6	d9e538601e119863	Event→EzState command ID (for debug): %d
+4d8293a	d670596daaa0261a	Send Event→EzState command (set ID ↑, send with ○)
+4d82a1e	a1e91dee72da6842	Debug Hungup: hangs the game on purpose. Ask a programmer before using (Push Enter)
+4d82afe	23d0b1da3a79b999	Ghost alpha [%f]
+4d82b12	b4d12815c991b6c1	[%.2f] < Sniping raycast offset from camera
+4d82b7e	7c30bc177df2a936	Force death
+4d82b88	578a3cd3caf2f68a	Fully disable
+4d82b92	1700e2780a52b528	Damage from this chr
+4d82c1c	79b17cc696b413b5	Chr update level: %d Cloth update level: %d
+4d82c50	1266f32c06c2adca	None
+4d82c60	5040a2536572dded	Preparing backread
+4d82c8c	60ea56e6972a9626	Backread done
+4d82cb0	3ac30b7208977036	Activating
+4d82cca	a04da796989ba0f8	Active
+4d82ce0	883670188663b2a0	Deactivating
+4d82d52	0d30cf53fff472af	Yes
+4d82d58	303a6991f4b083dc	No
+4d82dde	01bee96840ca3322	StatueType: petrified
+4d82e02	06f633d7e93e8c5f	StatueType: crystallized
+4d82e28	567e69b2eaa08e4e	StatueType: none
+4d83442	cc5d8baa0ccfcaf8	SFX variation ID %d
+4d83484	202e7fc83cae58dc	Active Event→EzState command IDs [
+4d834ba	ea32f94d5a5cd0e5	Active EzState→Event message ID [%d : %d]
+4d83502	fd90d1ac4aa183db	Fall height [%f] %s %s
+4d83526	11c63e0110f54f01	Not grounded
+4d83530	f3a32d0cd1966cf7	Truly grounded
+4d8353e	aec83452c50bef59	Truly not grounded
+4d8354e	1e0bcde7bd2ccc29	Last grounded position : %.2f %.2f %.2f
+4d83584	ef9b51516ca1a594	Update omission [ Omitting ] Lv%d
+4d835aa	4e1d9a5075886491	Update omission [ Normal ] Lv%d
+4d835ce	2dcc574635d4acc0	[%d] < Update authority bonus from events
+4d835fa	d5f28eaa1f1e1daa	[%d] < Update authority bonus for locally controlled chrs
+4d836ac	44b2163dc3369a6d	Current item ID %d
+4d836c6	ac4c2961c57df829	Current magic ID %d
+4d839fa	f58826b51834662d	On movable obj:%s On moving obj:%s
+4d83a58	2f7185540b86d0f5	No Gravity : %d
+4d84238	d68c6502bff54f90	Team type incl. SpEffects:%d
+4d84260	1f1ef8f8a38adf9d	Capture bloodstain (□+○)
+4d84298	6fc64829e25b4d31	Release bloodstain (□+○)
+4d842d2	fd0fbf7fe4266f44	Measure attack range (□+○)
+4d84520	3100b3ba7ca40b59	] < ArmStyle
+4d8453a	599ba190026994f7	》 < ArmStyleMask
+4d84558	d50ae1dceea9fc9b	] < CurrentWepSlotOffset<LEFT>
+4d84592	816cae61674cd9d8	] < CurrentWepSlotOffset<RIGHT>
+4d845ce	73015af8b839959d	] < CurrentWepSlotOffset<LEFT_ARROW>
+4d84614	415476d1ac4e5b8e	] < CurrentWepSlotOffset<RIGHT_ARROW>
+4d8465c	6d67d6063ab824a9	] < CurrentWepSlotOffset<LEFT_BOLT>
+4d846a0	08691807b519f40d	[
+4d846c8	1eea7206f32ac502	] < CurrentWepSlotOffset<RIGHT_BOLT>
+4d849ba	24858b69a5686b0d	[%06d] %s
+4d84f28	f12d99690fbfe87f	[%s] < Non-synced chr
+4d84f42	c8a555d5a9599912	[%.2f] < Slope control gain
+4d84f62	ba3720d470a0f6d9	EzState action request no. [ %+6d : %+6d ]
+4d84fa4	a939eae4ad580511	EzState action request no. [ %d : %d ]
+4d84ff0	f5ce4203549fd9ff	[%s] < Draw points
+4d85024	dd553cd8d2e097ce	[%s] < On/off by event
+4d85046	0da4c5202319104d	[%d] < Spawn type
+4d8506e	e5880df42fb0ae19	[%d] < Max count
+4d85090	92886bf820504154	[%d] < Total limit
+4d850b6	0899f700310ae373	[%d] < Min spawned at once
+4d850f2	2c75118b8454e326	[%d] < Max spawned at once
+4d8512e	dbad0962f7e69b72	[%.1f] < Min spawn interval [s]
+4d8516c	1291a965b25253d3	[%.1f] < Max spawn interval [s]
+4d851aa	e25028323807bd77	Delayed spawn min [s]: %f
+4d851e2	9ac84171a0d095ba	Delayed spawn max [s]: %f
+4d8521a	cf98e7ecdb9f858d	Awaiting spawn
+4d8523c	4ba94437af77fdb4	[Update timer %.3f][Respawn timer %.3f]
+4d85272	c8478e29cbac7482	≪%s≫ < On/off by event
+4d85294	ab605d1b4fa0858e	≪%d≫ < Initial count
+4d852be	cde537bacdcd7a3e	≪%d≫ < Current respawn count
+4d852f4	500ff5814dc3577d	≪%d≫ < EntityID
+4d85322	82ee3919d06cbf34	Delayed respawn timer:%f
+4d8533a	3eb579e89d372870	Queued respawns:%d
+4d8534c	e5c5eaa4a4c53fbc	Checking if spawn needed
+4d85368	eb9059067a918bd1	Waiting for spawn timing
+4d85384	2d01b7d4cda40051	Registering respawn
+4d8539a	f2cc95a934a6dc23	Respawning
+4d853cc	4763970d03824e41	Armor
+4d853e0	8ff52327574b46f2	Flow state of item used via menu %d
+4d85414	b6e6bdf50c72b32a	Item ID when menu opened %d
+4d8543c	b1fc015b27bf3619	Stamina base recovery speed [%%/s] %.1f
+4d854a4	4498927fc9fbadcb	MP base recovery speed [%%/s] %.1f
+4d854fe	bb67ab47da04683a	Mimicry move AI coefficient %.2f
+4d8551c	b3f37b33846e4761	Down attack start angle: %f
+4d85536	ae631907d05ade48	Up attack start angle: %f
+4d85550	195de807c9cab82b	New up attack start angle: %f
+4d8556c	5f2dc6e51fc9684a	Use new lock-on control %s
+4d85586	75761ff06e2bc98d	Analog anim skip value: %f
+4d855a8	fb675c6044547be5	Move anim blend rate: %f
+4d855c6	3e2ae867ac1ba5ef	Move anim index: %d
+4d85606	4c65d35e2356e64a	SaveHumanity FlagTop :《%d》
+4d85680	52e4ea6d3ba1f598	Kick Out [host only]
+4d85720	ded8929ea7f484df	Eye Scroll Offset  U[%f] V[%f]
+4d8575c	7df089a38c3a4282	[%0.3f] < Category scale
+4d8577e	0c33d18af2971d78	Head
+4d85784	f1b5fc7b1dff5a65	Chest
+4d8578a	0652874c99a24fcf	Abdomen
+4d85790	8b3737f35a57c4d3	Arms
+4d85796	d5d1745acbebdb9c	Legs
+4d858b8	22c93a4bafdd79e5	-TBD-
+4d858c2	6d4e515eb64bb85e	[%s] < Output file name (□+○: output, △: reset)
+4d858fc	1bec4d47bc69a440	-None-
+4d85906	de48d397956fd39b	[%04d:%s] < Target
+4d85926	ee4f4488a25f143c	[%0.3f][m] < Coord X (%0.3f)
+4d85954	fa67c883b8b1d5e5	[%0.3f][m] < Coord Y (%0.3f)
+4d85982	6d2fbb5b60115c4e	[%0.3f][m] < Coord Z (%0.3f)
+4d859b0	afc230cc784417af	[%0.3f][deg] < Angle X
+4d859d2	afbecacc78413486	[%0.3f][deg] < Angle Y
+4d859f4	afbb64cc783e515d	[%0.3f][deg] < Angle Z
+4d85a32	b7814b9f36106635	Within 10m of player
+4d85bb4	01d9816d0e7e189c	Player No Dead [%s]
+4d85bdc	4ea3bfd5d883465d	Player Exterminate [%s]
+4d85c0c	7d0a1267e2ad3786	All No Dead [%s]
+4d85c2e	0e4d346a89b83021	All No Damage [%s]
+4d85c54	34c1eba8307c26ef	All No Hit [%s]
+4d85c74	e36fe63ca0f5b802	All No Attack [%s]
+4d85c9a	6f9b7f0ea771ffd3	All No Move [%s]
+4d85cbc	5d6d89e534b67a23	All No Update Ai [%s]
+4d85ce6	2de8b164fd4ff073	All No Stamina Consume [%s]
+4d85d1e	2ae1e03f6d5900cb	All No MP Consume [%s]
+4d85d4c	a7930318d83d5447	All No Arrow Consume [%s]
+4d85d80	8896571fd7ca979b	All No MagicQty Consume [%s]
+4d85dba	6fb43dc9fceb7ba9	Player Hide [%s]
+4d85dda	17672f644baf9532	Player Silence [%s]
+4d85e00	c6d21df2138daebf	Player No DebugDash [%s]
+4d85e30	3adfd5c6e2a67375	Stop/resume all (No Update) (Push Enter)
+4d85e82	f70a07346ebfebb6	All Draw Hit [%s]
+4d85ea6	68eef564d8f3cbe0	All Omission Mode [%s]
+4d85ee4	43dedcc132cfcbb7	Chrs always updated %d
+4d85efe	060dbb917cea4f42	Chrs omitted further when unseen %d
+4d85f2a	52d4aef84f8174a5	Never-update distance %f
+4d85f4c	617f3f6a3db7a096	Show update omission state [%s]
+4d85f6a	973732ad165bc971	Show locally controlled NPCs [%s]
+4d85f8e	e62171df8f9d65e8	Max active chrs (dungeons) [%d]
+4d86038	54a7d6fc6a61317c	Debug dash toggle input:%s
+4d860ba	fff1724d7dff99a6	Watch ActionFlags
+4d860e8	075a78a0efc35e80	▼Handy tools▼
+4d860fa	887e06cebdbed2b6	▼Bulk debug state change
+4d86112	57c2659d5f4ac287	Warp to position
+4d86122	c59ccb520dabd652	▼Tests and experiments▼
+4d86142	1638812226ff5b2f	Low-stat test %s
+4d86158	4099d351cd54ed1e	Test equip weight effect multiplier %f
+4d86176	0a316951b9b56c23	Enemy anim blend add A %d
+4d86196	ab414a38025aa8e0	Enemy anim blend add B %d
+4d861b6	e9b5804883d7c6e6	EnableBurnTest [%s]
+4d861dc	e11337b121f107ee	BurnTestBeginDis [%0.3f]
+4d8620c	79b09146187574ba	BurnTestEndDist [%0.3f]
+4d8623a	1dc1300f19797025	BurnTestEndTime [%0.3f]
+4d86268	863865454ec1cabf	Electric: BurnTestBeginDis [%0.3f]
+4d8629e	2f5a67f4b22bf593	Electric: BurnTestEndDist [%0.3f]
+4d862d2	58513314a20478bc	Electric: BurnTestEndTime [%0.3f]
+4d86306	5139152bbc3ec602	On fire: BurnTestBeginDis [%0.3f]
+4d8633e	e0ac7ce106061226	On fire: BurnTestEndDist [%0.3f]
+4d86374	566719b1ef7d71f9	On fire: BurnTestEndTime [%0.3f]
+4d863aa	66128e7e507b7bc6	GasmanTestBeginDist [%0.3f]
+4d863e0	d55d61f04e90cd6e	GasmanTestEndDist [%0.3f]
+4d86412	b2802c7886da1fac	GasmanTestSpeed [%0.3f]
+4d86440	b9fea7b0cb74b89d	[%s] < Grass test
+4d86458	34fee0bfd881fb80	[%d] < Grass test: texture type
+4d8647a	544cac608d61b0d5	[%0.3f] < Grass test: height scale
+4d8649e	c871854f6aeeac29	[%d] < Grass test: blades
+4d864b4	e6fb660b905b6ee8	[%0.3f][m] < Grass test: blade spacing
+4d864d8	ce5ad35a5d46a532	[%0.3f] < Grass test: base color R
+4d864f8	cea2315a5d83478f	[%0.3f] < Grass test: base color G
+4d86518	ce91335a5d74d7c2	[%0.3f] < Grass test: base color B
+4d86538	4281c3ba4fb1146b	[%0.3f] < Grass test: tip color R
+4d86558	425595ba4f8b8b56	[%0.3f] < Grass test: tip color G
+4d86578	424b63ba4f82e1db	[%0.3f] < Grass test: tip color B
+4d86598	a05679f83cceb096	[%s] < Damage direction indicator test
+4d865c0	b857184bc8b11bec	[%0.3f][m] < Lock-on test: fall height that cancels lock
+4d865f4	56587f474cd8dfd7	[%s] < SA hitstop test
+4d8661c	3981fd4637bf2865	[%s] < Hitstop test
+4d86640	156a4103d9b3ed7e	[%0.3f] < Hitstop coefficient
+4d86664	12e169113044bd79	[%0.3f] < Hitstop ramp-in time [?]
+4d8669a	98c05bd3c747936e	[%0.3f] < Hitstop hold time [?]
+4d866d0	6f6fecee894564b0	[%0.3f] < Hitstop ramp-out time [?]
+4d86706	ab3a95cb0d489e1b	[%0.3f] < Hitstop knockback distance [?]
+4d8673e	580dd0b116d48091	[%0.3f] < Hitstop knockback time [?]
+4d86776	20648c867d8b5989	[%d] < Hitstop vibration ID
+4d86798	c4c57ddc93724d20	▼Debug markers▼
+4d867ae	66126ab7f4580fc4	[%s] < Show damage hit positions
+4d867d0	91bba5424bf691cb	Player reload [%s]
+4d867ea	907bec5ab782d6c4	[Name display] First floor hit [%s]
+4d8683a	b0fdf4e6764ad68e	[Name display] Update state [%s]
+4d86880	46c6c9ec0d0783bf	[Name display] Dead state [%s]
+4d868c2	619909221de19a80	[%s] < Fall death camera
+4d868dc	b5951844a0929b4a	○: respawn all chrs (reinit version)
+4d86908	cb422e34bd189728	○: reload all chrs
+4d86924	2a5c2a73a9a80f19	[%s] < Log SpEffect sync sends
+4d86950	14a4fe221e4d4002	[%s] < Create Behavior chrs on background thread
+4d8698a	c275aa1352220511	[%s] < Chr update: multithreaded
+4d869c2	e76695420bce3b65	[%s] < Cloth update: multithreaded
+4d869fa	015e5ea277f81d39	[%s] < Disable ChrIns::DbgDraw
+4d86b42	46981e7768f04ae4	[%s] < Disable enemy collision
+4d86b62	790e7e8adb3b0297	 excluded
+4d86b68	74bcaeca6e62bcc6	All active chrs
+4d86b76	5f66f2b39146c2d0	[%s] < Bulk change target
+4d86b90	e320ac8afcf98dfd	※Push [○] > Set target to No Dead
+4d86bc6	52f2825050aed11a	※Push [○] > Set target to No Damage
+4d86c00	6d4c4be511117a08	※Push [○] > Set target to No Hit
+4d86c34	3334f7470613dec1	※Push [○] > Set target to No Attack
+4d86c6e	a24b75df287ab25c	※Push [○] > Set target to No Move
+4d86ca4	1affb40e52d60044	※Push [○] > Set target to No Stamina Consume
+4d86cf0	cbd0ce7f98e80924	※Push [○] > Set target to No MP Consume
+4d86d32	fba0b9a238390e0c	※Push [○] > Set target to No Update
+4d86d8e	d69dd2878a78b7ea	Step anim cancelable?:%d
+4d86db6	f4a0750fc8834967	Move input can cancel anim?:%d
+4d86de4	0c16de25a326c2c2	Whiffing:%d
+4d86df6	ade0b32527f45d3a	Ladder state:%d
+4d86e08	17308645706119b5	X axis:%.1f
+4d86e18	cca98d371ed573e0	Y axis:%.1f
+4d86e28	5978f159ed65cd87	Z axis:%.1f
+4d86e38	f953bf9ba1e64060	Execute warp 《PushEnter》
+4d8780c	86972a01399e708f	Force LAN disconnect:%s
+4d87822	c6964301e09c5876	Force sign-in state change:%s
+4d87840	a9f0cae886b0a3a5	Force PSN disconnect:%s
+4d87856	41255d3ef6410daa	Force party chat:%s
+4d87872	81424dba3efda980	Force IO error:%s
+4d87888	74bf5aa2c744b0ca	Ignore net errors as client:%s
+4d8794e	44f0773614308b2a	[%s] < Show as solid body
+4d88816	864d63b96e91ef00	MapUid:[%s] < (A:increase X:decrease Y:reset)
+4d88856	512d298155708462	Select from move-map list
+4d88874	d0da353031ee10a7	Summoned
+4d88880	da98e2fdcc099a32	Healing spring
+4d8888a	629f805af8c3a5a1	Return home from summon
+4d888a0	4e3576867a51becb	Save file start
+4d888b4	487967d34c078cba	Arena return
+4d888c0	314618c7bd83ba0d	[%s] < Map entry situation
+4d888da	4ba81e1f61071623	Don't override
+4d888e8	e64d85fd0c27f74f	Configured coords
+4d88906	28a8f98c76b7ddfd	[%s] < Player position source
+4d88926	6e91acdaaeb65930	[%.1f] < PosX
+4d8893e	6e9512daaeb93c59	[%.1f] < PosY
+4d88956	6e9878daaebc1f82	[%.1f] < PosZ
+4d8896e	c47d91c6242e5184	[%s] < EntityId < (A:increase X:decrease Y:reset)
+4d889b0	1b7d823d26d06da3	[%s] < Override entry animation?
+4d889e0	19e83f9cbfd6cb6c	[%s] < EnterAnimId < (A:increase X:decrease Y:reset)
+4d88a28	2c91b95e1ff717aa	[%s] < Override invasion type?
+4d88a4e	311275221e3a05d0	[%d] < Invasion type (raw number for now)
+4d88a7a	9ba445c60275c3bd	ExecuteMoveMap (MapSelect screen only) < (□+○)
+4d88b42	aa76e51226694418	DUNGEON MOVEMAP TEST
+4d890ce	0dbdb8e439abbb1d	m29_%d%d_%d%d_%d[%d]
+4d890f8	3802070dcc335a1d	m29_%d%d_%d%d_[%d]%d
+4d89122	c8db104a8b10e8d5	m29_%d%d_%d[%d]_%d%d
+4d8914c	b7b9ca327f4b4955	m29_%d%d_[%d]%d_%d%d
+4d89176	7f117671a07bb4ed	m29_%d[%d]_%d%d_%d%d
+4d891a0	8d43ce0039fd416d	m29_[%d]%d_%d%d_%d%d
+4d891ca	1afa08c2d569833b	< (○:Inc) (□:Dec) (△:Reset)
+4d89f2e	4ccfd63d2c9c00af	CaptureAngle:%s (○:Capture)
+4d89f88	079f8b34f87623db	AutoCapture (○)
+4d89fa6	b6f5e216f11bb688	[%d] LoadCapturePosInfo (○)
+4d89fda	3f6221cc6eb827d7	[%d] SaveCapturePosInfo (○)
+4d8a00e	c856a1b150d0ec57	ClearCapturePosInfo (○)
+4d8a03c	cb3cb9d38f1b6d37	AddCapturePosInfo (○)
+4d8c31c	9b6d6553076697fa	[%d] < BndIdx(□+○:Apply)
+4d8d29c	c1b2dd5bca1600f0	[%s] < Draw placement matrix
+4d8d2b4	92555880d667a244	[%s] < Draw grid
+4d8d2cc	2b3d8d3baaeb6ca5	[%0.1f] < Grid spacing [m]
+4d8d2f0	404aed149177338d	[%0.1f] < Grid radius [m]
+4d8d6e4	7ab2457a3990e67f	[%d] < %s
+4d8df42	a9311d2d51acbba9	%03d Anim ID:%d
+4d8df5c	c5b253db47f3fd5d	---Anim ID:=ReferencePose=
+4d8df8e	768b441e3bda8c6e	(Full reuse > source anim ID:%d)
+4d8dfb6	697bcf827d214232	(HKX-only reuse > source anim ID:%d)
+4d8dfe4	62eef91739d51aca	(TAE data only > no HKX data)
+4d8e0ca	8d7dd223d904bd24	MODEL VIEWER
+4d8e0f8	9e66dab7e42c9790	CHR LIST
+4d8e11c	144a589b5d8a2f62	OBJ LIST
+4d8e164	3b93ad01b5a5eabb	PARTS LIST <Weapons>
+4d8e194	9ad098bb6b09f8fe	PARTS LIST <Armor>
+4d8e1c4	8e05dcb8c356e343	SKYBOX LIST
+4d8e20a	3645f17bf9ec7dac	Disable sky dome
+4d8e23e	5f86d9b9fb0eafa8	TEXTLIST LIST
+4d8e790	8c93775c11191c31	  Anim count [%d]
+4d8e88c	1816b87dd8ea5ed2	  No resource
+4d8f2d6	cc53955c89bd6242	LOAD TEST
+4d90d8e	f38548b8fec8a539	%s:---
+4d90db2	8c65f70d6ad93afd	%s:--- <%s>
+4d91242	8400f7018158209f	ID:%d, Bullets:[%d/%d] Parent:[0x%8x] Handle:[%x]
+4d91292	f108db6641d35c50	Meteor : planar range : %f
+4d912b2	d2f306241891345b	Meteor : Raycast offset : %f
+4d912e2	6ce39c5749bbde30	Izalith breath : planar range : %.1f
+4d9132a	650eec6e8c6e69ad	Not implemented
+4d91332	7a9adad1871326e1	ID:%d, life:%.1f, speed:%.2f, state:%S, total move:%.1f
+4d913b2	2dd1e42c3177fce6	Draw bullet direction [%s]
+4d913c8	3008c90a363a2baa	▼Fixed param tuning
+4d913e0	1b952b9ecb885250	Offset for firing from above dummy poly [%.3f]
+4d91412	f22c5f0c68fa2230	Sliding bullet: speed falloff on floor hit [%.4f]
+4d91440	f2fcd0e5667da483	Sliding bullet: previous direction add rate [%.1f]
+4d9146e	59fb926fc3bb9af3	Sliding bullet: external force [%.4f]
+4d9148a	546ab2fadd7a1032	Disable attach system %s
+4d914a8	c90ee572f657420b	Usage: [%d/%d][%d/%d]
+4d914d2	6939217c3b9d7764	Range:%.1f\n
+4d914e4	2f7b349fa2efe980	Attach effects
+4d914f2	f03f8ef75776a69b	Bullet instances
+4d91504	208744f6e61ca213	Bullet emitters
+4d91512	94e810b9d3383cd2	Bullet manager
+4d91750	ef99f9e2bf80cf56	Damage level (DmgLv) [ %d : %d ]
+4d91784	8ab45b91ad735031	Guard level (GuardLv) [ %d : %d ]
+4d917ba	577948eed33e8edc	Physical attribute (atkAttr) [ %d : %d ]
+4d917ec	38764466882d6098	Special attribute (spAttr) [ %d : %d ]
+4d9181c	7ed0fa8a2ca08d32	[SPRO] Is sweet spot:%d
+4d918d0	7a56e2775c71bf31	Request state
+4d918e0	ba2a5f0f12f3e0a4	Right1                
+4d918fe	4083b64275717ddf	Right2                
+4d9191c	a1ea33783dcdaf37	Left1                  
+4d9193a	f84e6f7a617019c4	Left2                  
+4d91958	bfa4722aa861adab	Action                
+4d91976	cd8b69388241e59f	SpMove              
+4d91992	d41101d3e5046b09	Drug               
+4d919b4	e4083205d73e29c3	UseItem            
+4d919d0	0f4ddc13fec24074	Reload          
+4d919ea	da5bbefe8438e023	ChangeWeaponR  
+4d91a08	19d117d745add07d	ChangeWeaponL  
+4d91a26	a40d4e8bd57e23a6	ChangeItem        
+4d91a44	7998d87232d5f09c	R3        
+4d91a52	1d44d6c6320e2d32	L3        
+4d91a60	f23ed36c71d8dbe2	TouchR        
+4d91a76	f43c92a707e590ec	TouchL        
+4d91a8c	0f19b8e5ccfceb8c	Backstep            
+4d91aaa	1436436093784f70	Rolling            
+4d91ac6	9ca9be9b5c8f8c42	DushRolling        
+4d91ae6	a866842beb89273a	Gesture            
+4d91ba6	8704d96ec8422c68	  Trigger |  Combo   |  Buffer  |  Input   |  cancel  |  ACTION_ARM(time)\n
+4d91c5c	24240809365d4c9d	    %s    |    %s    |    %s    |    %s    |      %s      |  %s(%6d)\n
+4d91cba	083bc907b4f27fe5	-
+4d91cc8	c2318080fdfd8148	In idle state: 《%s》
+4d92d34	70bb0b06f8bdf741	[%0.2f] < Play speed
+4d92d62	bcd0b535c34d7d06	[%s] < Test anim ID (○:Inc □:Dec △:Reset)
+4d92dbe	61b18e68cfd454ec	[%s] < Test anim loop
+4d92df6	8444c85e53a401c5	[%s] < Output event log
+4d92e12	d1cfc836d54f1b3d	Draw skeleton [%s]
+4d92e46	96fb821f913309f7	Draw bone names [%s]
+4d92e78	875bdd935dc3cf0c	Draw LookAt [%s]
+4d92eaa	8daa6289091c9392	Use Behavior (may not work) [%s]
+4d92eea	78b9a6937c977ccc	Play test anim (loop) ID:%d (Push○)
+4d92f1e	ef1256309f3724cb	Play test anim (one-shot) ID:%d (Push○)
+4d92f58	7f248231b188a46e	Stop test anim (Push○)
+4d92f78	17db58e073dd0bd7	Reset placement (Push○)
+4d92fa8	65c9d1ecedc2a62a	[%s] < Disable root motion
+4d92fda	9251c4f0860038c5	[%s] < Pause
+4d92ffa	70b567286f0adadd	[%s] < Frame advance
+4d93022	4ef1666f90aaeb1a	≪%s≫ < Leaf state
+4d9303a	646092237cf7ece2	≪%s≫ < Related Variable
+4d9305a	3fa69c037aa34aa2	Reset Variable (Push○)
+4d93082	bc3a83c0905e68f0	[%.1f] < FootIK max ankle angle (negative: no limit)
+4d931ae	e956550e5ddab873	Sync: states [%s]
+4d931de	04f3387d1aa640df	Sync: variables [%s]
+4d9320e	fe1fc9a2bdf7435e	Sync: events [%s]
+4d9323c	d043805603e2ef8a	Sync: variables, allow for missed sends [%s]
+4d932e2	a515d42f282f2157	[%s] < Output log
+4d9337c	d111380684aee7ca	Blend time for anim ID : %09d ( %.5f )
+4d933de	9083efee55f7a352	Set guard level %d
+4d93412	3dba79885ee9f0ed	Set damage level %d
+4d93444	7958128d8d05d344	Set damage direction %d
+4d93476	728f56a9194c63e6	Set weak point damage %s
+4d934a8	a7114276b2eccc3c	Damage blend rate A %.2f
+4d934ca	b8b1ae73f712965b	Damage blend rate B %.2f NPC only
+4d934f8	6d72c5ce2eb337fa	≪%s≫ < Enable quick damage test (○ deals damage)
+4d93548	5377fc50711408c3	Unused
+4d93550	a4ff6562a90548cf	Damage test [%s]
+4d93568	f0a8cb1a7751b274	Damage direction [ %d ]
+4d93598	b4726d5b41aed478	Death
+4d9359e	26b3c6cdba04a130	Repelled by guard
+4d935b6	970271d01e74ae55	Guard break
+4d935c6	d6bed3ba9a30e393	Back attack
+4d935d0	8a773c16c04e62d0	[%d] %s %s damage level %d, guard level %d, %s
+4d9361a	09fa3c07b66edf53	Fire
+4d9367e	132451508f5a16ca	Heavy damage threshold: %f
+4d93698	23b8ecc32ed213b5	Analog damage anim cancel value: %f
+4d936fe	692802df1c14055f	Chain timer %.2f
+4d93734	1e18723830c20d7e	On-hit turn: max angle %.2f [deg]
+4d93770	c46c12d894b56423	On-hit turn: duration %.2f[sec]
+4d938d6	21395f261342483d	Knockback initial speed [m/s] %.2f
+4d93926	454214cf83033d3a	Knockback speed hold time [s] %.2f
+4d93972	14c397abe0bf3e79	Knockback time to stop [s] %.2f
+4d93a66	5a892f0bc43f5356	Ladder (ChrLadder)
+4d93a82	309d70269a249718	[%s] < Draw end positions
+4d93aa2	1813e73d6f8bda50	Ladder: grab at bottom
+4d93ab2	5f7dbdd442a39a85	Ladder: grab at top
+4d93ac2	9a66b52442449f7d	Ladder: up (right)
+4d93ad2	8e0cc55c06823016	Ladder: up (left)
+4d93ae2	6c728c43d13a3d18	Ladder: down (right)
+4d93af2	4f1da8019786fd2b	Ladder: down (left)
+4d93b02	c629c55bd9cf4ada	Ladder: exit at top
+4d93b12	bf98523dab60ae07	Ladder: exit at bottom
+4d93b22	933bce035e28a082	Ladder: idle (right)
+4d93b30	5dc1669a1ab5e795	Ladder: idle (left)
+4d93b3e	89044f7769dfff60	Ladder: attack up (right)
+4d93b4e	271c59b608f1603b	Ladder: attack up (left)
+4d93b5e	eb767ad97d62f979	Ladder: attack down (right)
+4d93b6e	0ac29bc5fe9843d2	Ladder: attack down (left)
+4d93b7e	e33985175df1d698	Ladder: slide start (right)
+4d93b92	f523df98e019fe45	Ladder: sliding (right)
+4d93ba2	252471b9375fd831	Ladder: slide stop (right)
+4d93bb4	3b7063fec16fb4fb	Ladder: slide start (left)
+4d93bc8	494efef7a5751d42	Ladder: sliding (left)
+4d93bd8	4327dce542794126	Ladder: slide stop (left)
+4d93bea	c4e373c19846e9d0	Ladder: slide landing
+4d93bfa	22b0430d69b0e368	Damage
+4d93c04	63a41aedaa6b40b0	Heavy damage
+4d93c10	f321db62895ae6be	Fall (no stamina)
+4d93c1e	65c1a39818ab9350	Death fall
+4d93c28	1cda8fd906be791d	《%s》 < In ladder state
+4d93c40	2f1fbf21157985a2	《%s》 < Right idle
+4d93c54	7d22a74f01fafe0a	《---》 < Ladder state (enemy)
+4d93c72	caf4dd3c2d391de5	《%s》 < Ladder state (enemy)
+4d93c8e	dcdfe875cc56201c	《%d/%d》 < Actions/total actions [ladder state (PC)]
+4d93e96	ba38eb0e5c0e5a0b	[%s] < Slope sliding enabled
+4d93eb0	088e25929fdeadec	[%.1f] < Slope fall speed
+4d93ed0	bfb67c342f3d2096	[%.1f] < Slope fall angle
+4d93ef0	1a230e0267902d65	[%.3f] < Slope fall damping
+4d93f12	1ffd2bf72b4997eb	Slope angle:%.3f, [%s] [speed %.3f %.3f %.3f]
+4d93f5c	ce6b0750e636138d	Slope
+4d93fc4	28931f45208ac7d4	Disable raycast floor collision check : [%s]
+4d9409a	1efc0bfe47ae1f0f	[%s] < Show root position
+4d940b4	85d8da704ba07d5f	[%s] < Show proxy
+4d940cc	ab39c4eb72f0d01e	Rotate visuals about Y axis : [%s]
+4d940f8	b2cf7094738b5c39	Rotate move direction about Y axis : [%s]
+4d94158	843381ce2d463dbd	Fall speed limit XZ : %.3f
+4d9417c	e8e3afca9338e5b2	Fall speed limit Y up : %.3f
+4d941a0	6d1ed4267cfe6b6b	Fall speed limit Y down : %.3f
+4d941c4	9fbf0eabe7164b63	Collide on Integrate lift-up? [%s]
+4d941fe	7cc100d952c81d13	Don't add extra speed [%s]
+4d94226	ecc1d779e968ba70	Ignore speed of ridden objects [%s]
+4d94284	85e23ed6bca3242e	Fall movement %.3f, %.3f, %.3f [%s] sec:[%.2f]
+4d942ce	935c15f224044d2f	Grounded
+4d942d6	a3784e618070b752	Airborne
+4d942dc	2405cafd853ebb4d	Floor material:%d, floor alpha:%.3f
+4d943f6	b9e5a497e8f635a8	HP : [%d / %d] (%0.2f%%) REGAIN≪%0.2f(%0.2f)|%0.2f[s]≫ 
+4d944b0	e133614879cff53d	MP : [%d / %d] (%0.2f%%)
+4d944e0	ea801e065a7c2695	Stamina : [%d / %d] (%0.2f%%)
+4d9451a	5f31fe633725bd13	[%s] < No Dead
+4d94534	6acd8db98c66347c	[%s] < No Damage
+4d94552	6b7618249be6d3f2	[%s] < No Hit
+4d9456a	bb4e7852b856a647	[%s] < No Attack
+4d94588	26a31b64ef5f210e	[%s] < No Move
+4d945a2	e7b87ab035d3a59e	[%s] < No Stamina Consume
+4d945d2	af323824d02e1e06	[%s] < No MP Consume
+4d945f8	13d13bb9c9c7121b	[%s] < No Goods Consume
+4d94624	5ea0d7021a88135e	[%s] < No Update
+4d946b0	6f57680fad0d48f9	Resist recovery rate [point/s]: %d
+4d94700	42007ad690a3d2ab	Beasthood resist : [%d / %d]
+4d9474c	673ab3574ef123b8	Poison resist : [%d / %d]
+4d94788	0f634a6a96819806	Rapid poison resist : [%d / %d]
+4d947c8	16f46c4b88ac8410	Bleed resist : [%d / %d]
+4d94804	c356bcc5b0569e2f	Curse resist : [%d / %d]
+4d948ec	c11cf4367756a710	[%s] < Perform throws
+4d94904	097e605a5842f68a	[%s] < Collision off during throw
+4d94920	29d99ee3f137ea84	[%s] < Ignore gravity during throw
+4d94e8c	76fa2434fb57b5bb	[%s] < Show regions (debug)
+4d94eaa	a84fc0e20a8c1861	≪%I64d≫ < Map regions
+4d94ec8	c2795420590a3ec8	≪%I64d≫ < Managed regions
+4d94ee8	cc71f68e54f78a30	≪%I64d≫ < One-shot regions
+4d94f0c	3aaf6dc11e97863f	Dark sight
+4d95152	f66ed5cfbdfaddc5	Show all points
+4d95184	7c404c7a1b3f2207	Far point select
+4d951b0	da1ef22394d37372	Lower pad suppression: none
+4d9520c	55f3d3250df32b85	[%d] < Overlaps allowed
+4d95222	02fa12b5061e55aa	[%d] < Neighbors allowed
+4d95238	5fbdf8a258966d03	[%0.3f] < Overlap multiplier
+4d95254	6840e33e19db7747	[%0.1f] < Neighbor add distance
+4d95272	8f576ddb89465bd6	Decals used≪%d≫ Decals unused≪%d≫
+4d952a0	29767221e7b934ff	Delete all decals (□+○)
+4d95428	eaaef1de8027388e	Strength
+4d9542e	53380114a78bd8fa	Agility
+4d95434	d80dd3fc125b2b21	Magic
+4d9543a	83e9d6ae350a1f1f	Faith
+4d9620e	a9f0b4b29c43efed	≪%s≫ < Dungeon
+4d96234	70631f0c73389ab4	≪%s/%s≫ < Creator NetOid / chr name
+4d9626c	32c09d59150e8fe1	Menu
+4d96290	862e450c669b2a5b	Suspend/resume (DEBUG)
+4d962e4	42055ad2792215c9	Suspend & resume (□+○)
+4d9630a	672a5dfbe212aee4	Set my Chalice
+4d96368	1d2ddcad752c8e36	(%03d/%03d)[%d:%s] < HolygrailExParam (Chalice)
+4d963bc	9f1e2096d9492150	(000/%03d)[---] < HolygrailExParam (Chalice)
+4d9640a	33f8be7545a643a6	≪%d:%s≫ < Main feature
+4d9643e	4791638b8e4e2429	≪%s≫ < Fixed sub-feature slot (%d)
+4d96480	9a26b8012aa488ce	≪---≫ < Fixed sub-feature slot (%d)
+4d964c4	cd074bf4b155b4d5	≪%s≫ < Free sub-feature slot (%d)
+4d96506	9749070a25d2d40e	≪---≫ < Free sub-feature slot (%d)
+4d9654a	8704305ff4144345	≪%s≫ < Group sub-feature slot (%d)
+4d96590	b4ce354903f968de	≪---≫ < Group sub-feature slot (%d)
+4d965d8	d7fcd946bfb0e7b2	%c(%d/%d)[%d:%s(%0.2f%%)]≪%d:%s≫ < Fixed slot candidate (%d)
+4d9662c	d25fb5321c212168	%c(0/0)[---]≪%d:%s≫ < Fixed slot candidate (%d)
+4d96668	8935681c6612fdd3	×≪---≫ < Fixed slot candidate (%d)
+4d9668a	3714f84911cb1bb8	%c(%d/%d)[%d:%s(%0.2f%%)]≪%d:%s≫ < Free slot candidate (%d)
+4d966e0	5df38cbb6f480346	%c(0/0)[---]≪%d:%s≫ < Free slot candidate (%d)
+4d9671e	e8d66fd4c7f972f9	×≪---≫ < Free slot candidate (%d)
+4d96742	db9250a7e68f8527	%c(%d/%d)[%d:%s(%0.2f%%)]≪%d:%s≫ < Group slot candidate (%d)
+4d9679a	fbcf38c5868353a9	%c(0/0)[---]≪%d:%s≫ < Group slot candidate (%d)
+4d967da	7100dd524c3e04de	×≪---≫ < Group slot candidate (%d)
+4d96800	4b724fdeca1fc580	←→: Change fixed slot roll
+4d9681e	837b9ea5097359d1	←→: Change free slot roll ○: Select on/off
+4d96854	0a4f3cbba6a48fe6	←→: Change group slot roll ○: Select on/off
+4d9688c	b710a77cdc2d88bb	[%d](0~%d) < Dungeon layout variant no.
+4d968c4	7034d738c6095c32	Start ritual with these settings (□+○)
+4d968e8	563f25372a82b55a	※Unavailable※Start ritual with these settings (□+○)
+4d96918	070685ce4294eb3e	Release dungeon
+4d96970	2ebf4195bd7e2cf7	Release dungeon (□+○)
+4d96990	b78a6a23d77286af	※Unavailable※Release dungeon (□+○)
+4d969bc	b1cf166f7c6332a3	Perform ritual
+4d969fa	65ffd9e6d3d07121	≪%d:%s≫ < HolygrailParam (Chalice)
+4d96a34	b89b5a9f59bac211	≪---≫ < HolygrailParam (Chalice)
+4d96a6a	96e3e94c63defbca	≪%d≫ < Main feature
+4d96a98	1e123cbe16fe6b56	≪---≫ < Main feature
+4d96ac8	4dace9097dfcff8e	≪%s≫ < Expected map UID
+4d96ae8	a81ecb8c04c75dc2	≪%s≫ < Expected dungeon name
+4d96b08	82de4d162a348502	Offer materials (□+○)
+4d96b22	e7d9ce24c33ea0da	※Unavailable※Offer materials (□+○)
+4d96b48	5d56ac970521f020	Conditional search
+4d96ba4	2a34681b74815714	[%d] < First result index
+4d96c26	abd961ed20c3e459	[%c] < Ritual complete
+4d96c5a	9b8979fad338d7a8	[%d] < Chalice type ID
+4d96c94	8f5f544e896b3afc	[%d] < Sub-feature flag
+4d96ccc	5a6922115a1b98ab	[%s] < Generic Chalice
+4d96d02	58ee80784343bc5a	※Unavailable offline※Search (□+○)
+4d96d64	f826660617043337	(Complete)
+4d96d6e	b2ae4ce35773036c	(Incomplete)
+4d96d7a	8fdf5eb2e476c93d	[%03d:※No results※](*)
+4d96da0	ebda610a589728bc	[%03d:※Search incomplete※](*)
+4d96dc4	453524295f55baec	Glyph search
+4d96e18	f545dc1b2cbcf028	Search ≪%s≫ (□+○)
+4d96e36	3f0b230e4ec55ee9	≪%I64u(%s)≫ < Channel ID
+4d96e74	17b486e5f829644c	≪---≫ < Channel ID
+4d96e8e	2d65d6dc0d10b304	≪%s≫ < Dungeon map ID
+4d96eb0	be0826798b3fb7da	≪%d≫ < Ritual level
+4d96ec6	6ef7db40f36659eb	≪%d≫ < Dungeon attribute
+4d96ee0	28f068f50bc3a778	≪%s≫ < Channel state
+4d96efa	1fddd3cd63dc8d46	Complete
+4d96f00	bf5c513de3c0b9e9	≪0[%s] 1[%s] 2[%s] 3[%s] 4[%s]≫ < Fixed sub-feature slots
+4d96f50	e284e940ae7edba0	≪0[%s] 1[%s] 2[%s]≫ < Free sub-feature slots
+4d96f8a	20d3d8b14e92120c	≪0[%s]≫ < Group sub-feature slot
+4d96fae	6672a580ff6bea24	≪%s≫ < Dungeon name
+4d96fc6	931ae60f0b6fa9de	≪%s≫ < Glyph
+4d96fdc	7e824929757f5db1	≪---≫ < Glyph
+4d96ff4	972cff7d09494696	≪---≫ < Creator user ID / chr ID
+4d97022	1d14edd2d65aa417	≪%d.%d.%d %02d:%02d:%02d≫ < Created
+4d97060	f59786abf84c36a0	≪---≫ < Created
+4d97076	c6f2513e47290bb9	≪%d.%d.%d %02d:%02d:%02d≫ < Last play confirmed
+4d970be	8dfb123d2f23e72a	≪---≫ < Last play confirmed
+4d970de	a40529c47964524a	≪%s≫ < Share level
+4d970f4	0cf0cd58ebb60bc9	≪---≫ < Share level
+4d9710c	7bc223767caa3c6a	≪%s≫ < Main material
+4d97122	938086d634ffa17b	≪%s≫ < Sub material
+4d97136	e2b571a6e5e8212c	≪%s≫ < Soul material
+4d9714c	1a628175f5149516	Join (□+○)
+4d97160	4ffe04481e0de03a	※Can't join※Join (□+○)
+4d97180	556fb552b300d0b8	Random search
+4d971c8	9def9ff6dc9b21bf	[%d] < Ritual level
+4d971f0	759c982e512f7ec1	Search (□+○)
+4d97204	3c044ea90d6cecd9	※Unavailable※Search (□+○)
+4d97224	9515e69fd269ff7a	Share level settings
+4d97266	1059b6fa7286c440	Closed
+4d97272	326040eb4e4eece2	Private
+4d97280	5b82ed67c8ce05ec	Public
+4d9728c	46036604c1ff11f4	Unknown share level
+4d9729e	ace5bd8cbe3ab011	≪%s≫ < Share level
+4d972ca	884e595d15e88ecb	Set share level to private (□+○)
+4d972f4	afe80770a4c62943	※Unavailable※Set share level to private (□+○)
+4d9732a	a01a7cc0b4b750f9	Set share level to public (□+○)
+4d97352	87993d7efff1afd1	※Unavailable※Set share level to public (□+○)
+4d97386	f5d974d68231369b	Show error
+4d973c0	b0efc8dc189c2cea	Wrong image data size
+4d973e0	2989246882b389a1	Wrong image data version
+4d97404	9631d1ceb07d09d5	Wrong image data size (head ver.)
+4d97432	ea7216c8929067ca	No image data
+4d97448	283686dd60823181	Server error
+4d97456	32813b2bf14796d1	Unknown error
+4d97464	227eb7ba200321fc	≪%d:%s≫ < Error
+4d97488	a5d31175c8affde8	Close (□+○)
+4d97e18	868f813f0b081568	Restart ritual system (□+○)
+4d97e40	f0722e2f4f0a14c2	Chalice
+4d97e96	9aeb80ae83d4f614	Unknown dev name (%s)
+4d9849c	08329807b4eb8b1d	  
+4d98772	b9888478f7c3c644	Weapon
+4d98778	9a302d2c3ae12138	Altar top
+4d98784	6124332b79cfef38	Altar warp
+4d98790	2781811a0ee7473f	Quick altar top
+4d987a4	a0ca9829af96044f	Quick altar warp
+4d987b8	8a4bc07dec823e6c	Search result sort
+4d987c8	0a1a3f982b883cb3	: one-line help
+4d9889e	624cf58a043047dc	Notice\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\nLast line
+4d98c8c	08b3a472f9e71aa3	GamesCom build
+4d98ca0	e38d6d5001404720	Messenger
+4d98cb0	67bbf0283bff447f	Equip weapon gems
+4d98cbe	87045fabf6fb3ef6	Equip body gems
+4d98cd0	d7ac12a72f27671d	Equip magic
+4d98cda	06c7ed8b4b9bf98d	Level up
+4d98ce8	ed6aaa084b84b2c1	Title flow
+4d98cf8	6536ce4b848bfe33	Character creation (NewGame)
+4d98d18	596483ce0b9c0b57	Timer dialog
+4d98d2c	2b3d9aec52f1f35d	Vileblood ranking
+4d98d3c	adc7d087fa3ae02b	League ranking
+4d98d4c	351ec7ca85d4a190	Kick out
+4d98d5a	711a439d15b00313	Messenger debug
+4d98d74	084ffd066fb25c57	Soul offering test
+4d98d86	09b28cdd86f10e56	Message box test
+4d98da0	84850b3c683128b6	Movie
+4d98daa	e8edb85768dcc2ab	Beta test survey
+4d98dc0	0e6e12b90eccbdb1	Storage
+4d98dc6	10194ef30b7c9693	Buy items
+4d98dd4	3c2f2ea92a03e641	Insight (SAN) shop
+4d98de6	2b8dd0e5f88c095e	Sell items
+4d98df4	8ddf0ba430540dbc	Upgrade items
+4d98e02	626cf68255ac08a0	Repair items
+4d98e10	f585ab5dd4ce1dbe	Crush ritual materials
+4d98e20	fffb68cd18d1fdb1	Pick first right weapon
+4d98e30	ebf6774419e7dc0e	Pick first left weapon
+4d98e40	22a0e22947463747	Break all weapons
+4d98e4e	ff98e42eebb0c928	Upgrade all weapons
+4d98e5c	4e867ccde7f2acd1	View own messages
+4d98e6e	58241079d2258460	View others' messages
+4d98e80	01d889ca429bfcb9	View map-placed messages
+4d98e96	c2b43e38e9c6bfcc	List written messages
+4d98ea8	9fd5f37f22ee29cd	List read messages
+4d98eba	ad52f9f821b03be0	View own grave
+4d98ec8	126801141702029d	View others' graves
+4d98ed6	9d3781941944f8ab	List own graves
+4d98ee4	aafbd9a7ea186a1e	List others' graves
+4d98ef2	206713b303a4b21d	Notice text (placeholder)\nLine  2\nLine  3\nLine  4\nLine  5\nLine  6\nLine  7\nLine  8\nLine  9\nLine 10\n9 lines left\n8 lines left\n7 lines left\n6 lines left\n5 lines left\n4 lines left\n3 lines left\n2 lines left\n1 line left\nThe end
+4d98fc8	a2e4631f85f14703	Boot logos
+4d98fd2	058eb84198cf133e	Title screen
+4d98fe0	f1264b8294aff759	Terms of use screen
+4d98fee	a2adb4ba20ae2ab2	Notice screen
+4d98ffc	6efd035ca241bf5a	Options (title)
+4d99014	eee9990af44f41e8	Options (NewGame)
+4d99032	ec5a261a112e58f5	Title
+4d9903c	62ddc9096d9ad2f2	Character select
+4d990e6	ad8f08894b53ba59	Message line %d
+4d990fa	efe7c2bd83a3db56	Offered %d souls!
+4d991c4	dbfdf089bdad076f	Starting the debug menu.
+4d99270	ca0625111b68d23e	Item 2
+4d9927c	ca0225111b64e967	Item 3
+4d99288	c9f225111b582934	Item 4
+4d99294	4248b4a549c47f48	Talk message
+4d992a4	4631603dec12e0d7	All weapons will be broken.
+4d992bc	e670572eb6be23a0	All weapons will be upgraded.
+4d9930c	d06241b04df1fdb7	Profile %d
+4d9931e	6cdc4efda1bfd493	Options
+4d9932a	c881b9d8da647467	Save data loaded? (provisional)
+4d9934c	2bd8e8fe25e4bb2e	Corrupted? (provisional)
+4d9935e	f14c86ba01fb3356	Unsupported version? (provisional)
+4d99384	181afb0eef597447	Other error
+4d99392	3c7e1b2828569645	Insufficient API permission
+4d993a6	af012b696db01f50	Banned user
+4d993b6	8424b9b4d500df73	Invalid session
+4d993c8	da7f50afd3b9b8fe	Under maintenance
+4d993d8	055fcb6de085157a	No connection
+4d993e2	91586df0a4d8f4d4	Offline
+4d993f2	0df36b26219b25df	Age restricted
+4d99400	c4e980b23b4b8814	New system software available
+4d99426	b739adb5390a5604	New patch available
+4d9943e	108206a82a138f7d	Signed out
+4d99454	473695caf7157058	Not in service
+4d99468	5bba24ccf501c6ea	Get auth code: signed out
+4d99486	fb4012160452374e	Get auth code: other error
+4d994a4	b175ebbc47fdad8d	Login user status invalid
+4d994c8	faa88567628bbedf	App version not allowed to connect
+4d994f4	030e33a818fdb9b5	Can't open sign-up dialog
+4d9950e	53de9ca3e997285c	Did not sign up
+4d9952c	28c3c2dc857bdb85	%2d (unknown error code)
+4d99552	bab996ba1e2c8f73	No notice message
+4d99566	ad8639d0e42c9ade	Notice message 1
+4d99578	ad7c39d0e4244659	Notice message 2
+4d9958a	4f45866991150783	Plus member? (provisional)
+4d995a4	0b366fa69fcf9c6a	%s: success
+4d995b0	78ceca83b7601717	Notice message %d
+4d995ca	c7f0cadf6093b249	Error of unknown cause
+4d995dc	782d2ffda95f28f5	Returning to the title screen.
+4d995f4	c313ae5fba74c87f	DLC check failed.\nReturning to the title screen.
+4d99622	e337d5e04c8da2a2	Network error
+4d9962e	230999e0c864fbe6	Network state check failed
+4d99648	3baa710bb83506ec	Sign-in check failed.
+4d9966c	613df5132e247b02	You are offline.
+4d99680	a8cbc379933edeac	Online state check failed.
+4d996a6	c5b2f7b6bb8e93d6	Network feature availability check failed.
+4d996d8	132224a943bcea4a	Failed to get parental control info
+4d996fc	37d02eb1d00925af	Failed to get server info. Retry?
+4d99726	9885a736c3a6cb68	Server state check failed.
+4d9974c	7f4d7de2765ccd51	You are signed out.
+4d99764	fb51415dc014f039	Failed to get auth code.\nRetry?
+4d9978c	d3503246f0bcc219	Server use has been suspended.
+4d997ac	a63fdca986d23cd8	Login is not allowed with this version.
+4d997da	afa5da233cfc2249	Login failed.\nRetry?
+4d997fc	010d2f188c01ad66	Can't play due to age restriction.
+4d9981e	230ce201501a66f6	Please update the system software.
+4d9984e	d098d05c1845aed2	Please download the latest update.
+4d9987c	1e9e2b226e9ca60f	Please sign in.
+4d99894	f862c9a2fa3b1414	Plus check failed
+4d998c8	45efb228925227c7	Failed to confirm server info.
+4d998ea	ae3645064d2a6daa	Save data check
+4d99900	7f07bbf8375556c4	DLC check
+4d99910	09c8eee24fb3a8c1	Network state check
+4d9992a	e5ae5e18f04d072a	Sign-in check
+4d9993e	75daf27b1c7db004	Online state check
+4d99956	2378d01505a062bc	Network feature availability check
+4d99978	e2c84b8692c3c4e4	Get parental control info
+4d99998	32c9086185c39efa	Get ssinfo
+4d999aa	39f61026233e1b18	Get ssinfo again
+4d999be	1649c09b0e01a67a	Server state check
+4d999d4	7ca80b172fa931c7	Login
+4d999de	27e3cec6d21cf3dd	Plus check
+4d999f0	b56aa1305a7da323	Plus sign-up
+4d999fe	2fd92ed85ebb562c	Get service notices
+4d99a0c	b259f85fe909053f	Sync character ID
+4d99a1e	9dc9afadf8b45c50	User asset transfer count check
+4d99a3a	18514e67600b4280	Sync message/messenger data
+4d99a58	e5207b154959f223	Re-upload completed channels
+4d99a78	b30254f7b91a8628	The fixed altar menu has been removed.
+4d99b36	fdb9ba1bf0865da8	None
+4d99b40	8c1b470d22db42ba	By quantity
+4d99b4a	9933d4cf82736f25	Gems attached
+4d99b56	3508f22909ad1a88	Rank
+4d99b5e	c8a592e4b35c5fd5	Default
+4d99c02	d755e1fc11be8591	Magic
+4d99c54	67b56c73580515e7	Self: died, cause unknown
+4d99c6a	7303634682e93eba	Other: died, cause unknown
+4d99c80	33d36cd2d7646cd2	Died of cause %d
+4d99cee	d500c561b5323207	[%s] < Use body model draw sort info
+4d99d1c	73bec0709eb2bd00	[%s] < Hair: translucency with depth
+4d99d48	84d82b723b0fdb3d	[%.2f] < Z offset added to hair model
+4d99d78	a9374dae5f0a932e	[%.2f] < Z offset added to all models
+4d9a120	8360d7ac408c10fd	MESSENGER INS [%s]
+4d9a144	ee4cfb2f5af62619	%d < Rating level
+4d9a156	b8a366a2722f4bb3	%d < Good rating level
+4d9a168	82b8c4cd647aa943	%d < Bad rating level
+4d9a17a	b40db2dd26ec1495	%d < Update level 0:none 1:update 2:deleting
+4d9a1c8	bd3b98e9c78071c8	[%s] < Debug draw
+4d9a1e0	ecfb1509c0586e3e	%d < StepNo (missed-delete check) @ookei
+4d9a588	82a92c95ebb48274	[%d] < Anim ID
+4d9a67c	e45e61426ea4c494	[%s] < Head count
+4d9a68c	dbe21181c340b34e	[%s] < Skin type
+4d9a6a0	99bd29416080c8fb	[%s] < Clothing type
+4d9a6b6	87c261a6e6eb30a1	[%s] < Decoration type
+4d9a6cc	00a056e6ec21d29a	[%s] < Summon tool type
+4d9a6e8	72177150bd232278	[%s] < Message tool type
+4d9a706	5fdab735d67a8843	[%s] < Gravestone tool type
+4d9a722	810c506829ee36d5	[%s] < Acting type
+4d9b95a	e47bcce5f989214c	4
+4d9b960	6c9f150acabdc4ab	3
+4d9b966	41f20d1613fef602	2
+4d9b96c	1314c4fe06a6e149	1
+4d9b972	4c16e5b58d76b1f2	Color 0 (default)
+4d9b980	4877a71e09ee02e9	Color 1
+4d9b986	4881a71e09f6576e	Color 2
+4d9b98c	487da71e09f26e97	Color 3
+4d9b992	486ba71e09e24864	Color 4
+4d9b998	4869a71e09e1c58d	Color 5
+4d9b99e	4873a71e09ea1a12	Color 6
+4d9b9a4	486fa71e09e6313b	Color 7
+4d9b9aa	2d1a30a9820e58aa	No. 00 (default)
+4d9b9ba	6dadff485739f285	No. 01
+4d9b9c2	4dc6016159fc76e6	No. 02
+4d9b9ca	af48b759050b65eb	No. 03
+4d9b9d2	8df3f92f54c648dc	No. 04
+4d9b9da	ee9ca726ff1b8689	No. 05
+4d9b9e2	ceb5b94001dfd91a	No. 06
+4d9b9ea	2cd14f37aa09b5bf	No. 07
+4d9b9f2	0eaca10dfc7a4d70	No. 08
+4d9b9fa	6fc15f05a72ac52d	No. 09
+4d9ba02	3377450832f5f7cd	No. 10
+4d9ba0a	d26187108843cd10	No. 11
+4d9ba12	71abdd18dde40bd3	No. 12
+4d9ba1a	13fc472136154e0e	No. 13
+4d9ba22	b465ece6dad78bd1	No. 14
+4d9ba2a	53503eef30257c44	No. 15
+4d9ba32	493bad8d1abe7b1e	Grade +1
+4d9ba40	4931ad8d1ab62699	Grade +2
+4d9ba4e	4935ad8d1aba0f70	Grade +3
+4d9ba5c	492bad8d1ab1baeb	Grade +4
+4d9ba6a	492dad8d1ab23dc2	Grade +5
+4d9ba78	c53f6b3db7fc4d1e	Normal
+4d9ba7e	74f68249340e1d13	Lively
+4d9bd1c	46ce0145324185d8	Own message
+4d9bd2a	cef09deb6450d361	Others' message
+4d9bd38	0a1f2607b68dd62e	Grave
+4d9bd3c	c0f6fb1cca123327	Resonance magic
+4d9bd46	668ad3d853913ad9	Summon
+4d9bd4c	db43c92ce90ff1c5	Own chair
+4d9bd58	e6f3b29c47ca161c	Others' chair
+4d9bd64	c0d4bd7ba6202152	[%s] < Type
+4d9bf0e	1a8d93ede1e5f8f1	ActionButtonMan: priority control
+4d9bf3a	ca7af38088c96477	ENABLE: active entries
+4d9bf54	58f99d9f3098dd8f	DISABLE: off after running
+4d9bf76	9ebe2070e16720f7	NEW: newly registered
+4d9bf8c	f4805ec133a21cc0	Manager class state
+4d9bf9c	f65fdb2943439975	Display allowed<%s>
+4d9bfae	e291a1dd5df0424a	Run allowed<%s>
+4d9bfc0	7784f7d1060754b8	Change allowed<%s>
+4d9bfd2	780058cb4dab37f0	Grayed out<%s>
+4d9bfe4	e721a9afdc0d0c70	Waiting for load<%s>
+4d9bffc	487bf317bcc895e6	Forced action request ON<%s>
+4d9c07e	de663425ccd7ff2b	ActionButtonMan priorities
+4d9c0aa	b473db8d788f94f5	Region debug draw<%s>:Color(White,Blue:React)
+4d9c0f4	eeb2251ea2a3a97e	Draw target ID<%d>:(-1 for all)
+4d9c11a	3386f53d530e7b4e	Show region direction<%s>:drawn slightly raised
+4d9c14a	3792e165b179d2d6	Show search radius correction<%s>:Color(Gray),cylinders only
+4d9caec	69bacdd4897a3114	Loop: [%s]
+4d9d6e8	fc96066970e6392b	[%s] < Serial capture
+4d9d72e	c0dacf29b7843af1	[%s@%s] < Push ○ to play
+4d9d756	48f1baba1ab60f25	[%02d] < AreaNo(△:%02d)
+4d9d782	b81cb2f6e415bb47	[%02d] < BlockNo(△:%02d)
+4d9d7b0	b545db5c9beff8c6	[%02d] < MapNo(△:%02d)
+4d9d7da	9cf727365af56a3f	[%02d] < AltNo(△:%02d)
+4d9d9b4	f269ee9026b4a538	[%s] < Wind debug draw
+4d9d9ce	172cf5b8a5b488e8	[%s] < SFX wind debug draw
+4d9d9ee	9a69f784e4cdd037	[%s] < Cloth wind debug draw
+4d9da38	d38626c96de7e963	[%s] < All winds debug draw
+4d9da54	ebd85d988bc1d7c7	[%s] < All SFX winds debug draw
+4d9da76	454a719c3ceb4a3c	[%s] < All cloth winds debug draw
+4d9dcac	22c8844770b4cc54	[%s] < Show cloth
+4d9ddd6	466b58b3a1753713	[R:%0.2f] < CurrentColor
+4d9de04	17ba920a98ce669e	[G:%0.2f] < CurrentColor
+4d9de32	762a4e4b17823f63	[B:%0.2f] < CurrentColor
+4d9de60	fcb9b15b6bf882a8	[A:%0.2f] < CurrentColor
+4d9de8e	af8056ea3d8eda43	[R:%0.2f] < TargetColor
+4d9deba	cf31e71423db2526	[G:%0.2f] < TargetColor
+4d9dee6	2946f98b1e8e34b3	[B:%0.2f] < TargetColor
+4d9df12	45d09c31238c90e0	[A:%0.2f] < TargetColor
+4d9df3e	4de2f640bb3a5073	[%0.2f[s]] < RemainTiem
+4d9ebe4	c8a5152b434b216f	[%d] < DispAabb
+4d9ed86	6bcb7a99a003326e	[%s] < LOD reflection test
+4d9f7d4	00c9473e9c52ec72	][%d/%d items][%0.1fMB
+4d9f8e0	7f955044bbb3bdd9	Menus
+4d9f8ec	0830157d733a50ac	GI
+4d9f8f4	219edcff2edb225f	SFX
+4d9f8fe	c13bcc7c019d6fc0	Maps
+4d9f964	9fe4f908534bcd1a	《2D》
+4d9f96e	baff86bac6a386b5	《CUBE》
+4d9f97c	1934bc2f5078ff1c	《VOLUME》
+4d9f98e	6a0f937910e31ad6	《none》
+4d9f99c	efe46637c6938134	《OVERRIDED》
+4d9f9fe	69907912e467a4da	Scene draw params
+4d9fa2e	f25720896a9b434c	DOF glare quality
+4d9fa60	1f870545aebac028	Tone map
+4d9fa7e	cb4df4ac2a14445c	Depth of field
+4d9fa92	e80373e5147cf00b	Bloom
+4d9faa8	f6cd8f196d2b478d	Color grading
+4d9fad8	159fb2d74595a1bd	Feedback blur(
+4d9fb0a	05970792be7eacf0	Motion blur(
+4d9fb34	983c77795a1889a0	Antialiasing
+4d9fb6e	ce317dd59cf7024b	Light shafts
+4d9fb94	874bfb0480dbb3cc	Shadows
+4d9ff02	7f194970ee3e1c75	[%s] < GPU markers
+4da0c4e	c303623f332c224a	[Deferred]
+4da0c5e	bd2e906651688001	[Paint]
+4da0dde	5b46a95f914ee49c	Preview
+4da179c	0934ed3c87c9098c	Capture(□+○)<%dx%d.%s%s
+4da17c8	013b38560ce35df1	(Hi-res)
+4da17e4	127817063a59e4db	[%d[pix]] < Hi-res capture overlap
+4da181c	44e708d869b4e828	[%d%%] < Scale
+4da1832	ff43992d265d4e64	[%d%% (Hi-res)] < Scale
+4da1862	6fe6b0d27e7d1f13	[%s] < Format
+4da187a	edd7638ec252b9af	[In-game] < Capture scope
+4da189a	2801159bd430b259	[Menus] < Capture scope
+4da18b8	85d1a5827c3dc10d	[Debug menu] < Capture scope
+4da18de	90a3f96e90cc628f	Full-size BMP(□+○)
+4da18fa	983e7d646d613de5	Full-size JPG(□+○)
+4da1916	cdc195336f78c87d	Half-size JPG(□+○)
+4da1934	02d78c706b8779c9	Quarter-size JPG(□+○)
+4da19c6	9409f968a060194c	Searching path
+4da19d2	0e153f50abc26000	Following path
+4da19de	9ab61748dffe19dc	Near goal
+4da19ea	ae1badb3edaef885	Reached goal
+4da19f6	e32240dae0db4681	Path search failed
+4da1a04	507a0452b89972bd	Off the path
+4da1a48	69e87b80ddb14484	Manual
+4da1a54	7c8b1906cf9f205e	Success
+4da1a5a	babff7f0386a7ae7	Failed
+4da1a60	6cae355b2263c949	Normal
+4da1a66	6bca4e6ed532f9b1	Avoiding
+4da1a6e	2fb068113f38d1d7	Waiting
+4da1ab0	1af7dce5e69aabd4	≪Unknown(%d)≫ < State
+4da1af8	28ce8d1297ad5b80	≪Unknown(%d)≫ < Avoidance State
+4da1bae	d3bce6bd6d089ee2	≪%d≫ < Current segment index
+4da1bea	75e231bef5dec043	≪%.2f, %.2f, %.2f, %.2f≫ < AI chr position
+4da1c40	ce3844452f3cae3d	≪%.2f, %.2f, %.2f, %.2f≫ < AI chr velocity
+4da1c96	452661888f00a077	≪%.2f, %.2f, %.2f, %.2f≫ < AI chr forward vector
+4da1cf4	8e0005ba3f4cd6f8	[%.2f] < AI chr radius
+4da1d22	e4d3efb09272c0fa	[%.2f] < AI chr height
+4da1d50	a680d49a5d506ccb	[%.2f] < Sensor size
+4da1d88	bd35a2e50efd1b72	[%.2f] < Collision Penalty
+4da1dba	3076c1babd7952a1	[%.2f] < Penetration Penalty
+4da1df0	717e711f0685d9f1	[%.2f] < Wall Following Angle
+4da1e28	c505e4ee9157e26c	[%.2f] < Dodging Penalty
+4da1e56	883cda315d4821bd	[%.2f] < Velocity Hysteresis
+4da1e8c	7166457870847473	[%.2f] < Sidedness Changing Penalty
+4da1ed0	4e8df9127cd9f244	[%d] < Repath segments (re-search when this many remain on a path short of the goal)
+4da1f42	9e5124c100c48c05	[%s] < Repair Paths
+4da1f6e	b4fd92787ca823e7	[%.2f] < Path Limit
+4da1f92	e2c24f1f42452d25	[%.2f] < Repath distance: re-search beyond this distance from the segment
+4da1fe6	e66dfb97be7a018a	≪%.2f≫ < Current speed
+4da200c	740e60fad1d8a3ff	≪%d≫ < Current buffer count
+4da2236	4152802b8ca4eb57	[%s] < Draw silhouettes
+4da2250	52b4cf339ed8c3c7	[%.2f] < Silhouette expansion
+4da226e	0814b53df3abdd6a	Regenerate silhouettes
+4da2280	48e39efb4123225a	[%d] < Show costly path searches
+4da229e	2ace9340bb57ebc4	  No data
+4da22ac	68c615e608ed63ed	  Search time:%.5f, start:( %.2f, %.2f, %.2f ), goal:( %.2f, %.2f, %.2f ) radius:%.2f
+4da2514	6223241c125d8984	%s %s [unsupported](pointer)
+4da253e	6df40d4473dedbbd	%s %s [unsupported](vector3)
+4da25ba	4c9ed47d77eb15df	%s %s [unsupported](quaternion)
+4da25ea	812e2c53fd830825	%s %s [unsupported](none)
+4da260e	cd714c7ce46ce952	Failed to get Variable info
+4da27f8	e91340b84cca0fb6	Fired Event History{frames lasted: fired event}
+4da28a2	fd0345d070ba5082	Active State Change History{frames since last change: -deactivated state / +activated state}
+4da292c	d61ad45ab879dbcc	Active State History{frames lasted: active state}
+4da2998	159082a0174fca20	Variable(Vector4) Change History{frames since last change: variable(old=>new)}
+4da2a0e	c870288afe7732fc	Variable(Float32) Change History{frames since last change: variable(old=>new)}
+4da2a84	c4654d0c5da13478	Variable(Int8 Int16 Int32) Change History{frames since last change: variable(old=>new)}
+4da303a	f97ad0d9f25582a8	[%s] < Havok Behavior multithreaded update
+4da3084	7b36f107e291deed	[%s] < Show FootIK raycasts
+4da30b6	7ee322f0ca8209bd	<Update level that skips LookAtTwistModfier
+4da30f2	9d43ba32e75dcc05	[All]
+4da30fc	c41158f2d5adbdd1	[None]
+4da3106	75c0614f406dbb4f	[Lv%d]
+4da3114	5a68af4d67bb6692	<Update level that skips FootIkModfier
+4da344e	cf19dbf6c2b88b63	[%s] < Draw this part
+4da3470	b01432b2678f07fe	Dummy
+4da3478	828d38d1ef86b440	No mesh
+4da3486	69537393394edf76	Warp to this part
+4da349a	fa7a3fe6d9b3de57	≪%s≫< Navmesh type
+4da34ba	f655e71993b85344	≪%s≫< Linked hit part
+4da34d8	4504a0c51aa9d62e	Enable/disable(□+○)
+4da35b0	856d98db688116c4	Node bank list
+4da35c2	e0d0c073bc48ed48	  BankIdx:%d>[EntityID:%d][FaceNum:%d]\n
+4da3892	68d206bc74a70848	00:Impassable
+4da38a2	4c331ee3828740e5	01:Exit
+4da38ae	1976e33e2b6d2541	02:Block exit
+4da38c2	05537c31528aac4b	03:Obstacle
+4da38d0	4ec124dd6134f13a	04:Wall
+4da38da	61d4f0929da3ff7e	05:Floor by a wall
+4da38ee	89d541171e84ed58	06:Cliff
+4da38f8	9393f16be603c479	07:Wide
+4da3904	53ef45effe23ae88	08:Narrow
+4da3910	fee5ece981fc733c	09:Hole
+4da391a	70f465c8fc38bf68	10:In wall
+4da3926	18a4a1b0dee65bb3	11:Water
+4da3932	0066287fd7cd35d8	12:Pass under
+4da3940	459bb3a73e15b9ef	13:Return home
+4da394c	7617834b8fc67e3e	14:Ladder
+4da395a	e95b09bb9f0c9c8c	15:Door
+4da3964	36b793c977639ab9	16:Closed door
+4da3970	f75ff2e0b196a9e7	17:Impassable candidate
+4da3984	413593b7f743ed9c	18:Someone on it
+4da399a	06b99a43c70a6b17	19:High cost
+4da39aa	f3375f9d16daf198	Add
+4da39ba	ecffebdb05a2c535	Remove
+4da39ca	cc1aa7e90c8025ac	Path search test
+4da3a46	baf1757b65efb7e7	Set start pos[push enter]
+4da3a90	48c1d750d700d3cf	Set goal pos[push enter]
+4da3ad8	47cf507499654612	Radius : %.2f
+4da3aec	f02c2214e2196642	Path search time : %.5f[s]
+4da3b18	5e613da1b26f9536	Collect nearby faces[push enter]
+4da3b6a	20d9c34a3dc1542f	Collect nearby navmesh parts[push enter]
+4da3bcc	9f370b747668272d	  Nearby part range : %.2f
+4da3bf0	d212c706c6bcbef2	Test line of sight on navmesh[push enter]
+4da3c54	551d17b3807747d5	Test find direct path[push enter]
+4da3cb8	010ed6049ef31403	===== Debug draw control =====
+4da3ce2	bad78321bbba6940	[%s] < Draw all navmeshes
+4da3d06	225a95ec438a0917	[%s] < Draw the player's navmesh
+4da3d2e	7279a6b4142fd681	[%s] < Also draw nearby navmeshes
+4da3d54	1b899394ac34628e	[%s] < Draw map
+4da3d6a	c470903b10b260a3	[%s] < Draw objects
+4da3d82	a8c117a1b7b1fe47	[%s] < Draw characters
+4da3d98	e681ee6ba770be35	[%s] < Draw SFX
+4da3dae	1aa6d4dda45c9009	Debug draw details
+4da3dc4	301b7f46ac99a636	[%s] < Draw face indices
+4da3de2	aa9a559da7ecb892	[%s] < Draw edge indices
+4da3e04	a307b68f8522af6d	[%s] < Draw opposite face indices
+4da3e28	0a071cf9432311d5	[%s] < Draw opposite edge indices
+4da3e50	2e9e0bd431e786b3	[%s] < Draw vertices
+4da3e64	d7086c3902d5d807	[%s] < Draw distances between parts
+4da3ea0	aabd9670ea177a64	Navmesh flag control
+4da3eb8	900566ee4ffc33e8	===== Navmesh flag control =====
+4da3ee8	d1abf03e32ae7780	[%s] < SelectFlag (navmesh flag to add)
+4da3f26	e67868158a12c5b8	[%s] < CalcType (operation)
+4da3f4e	17f6656f99c94d35	Toggle navmesh flag underfoot[push enter]
+4da3f8e	31e5af4350de4251	[%s] < Entity ID of the node bank to change
+4da3fc2	ac19dd09d2447417	Toggle navmesh flags in node bank[push enter]
+4da4008	47d526d0c540354d	Background loading
+4da4018	f36ea83253d061c6	[%s] < Draw loading navmeshes
+4da4044	b7a34b0fb66ebc12	  Part display distance : %.2f
+4da4064	4f5771f81240b1fd	Tests
+4da4070	0ad740ecc9665407	Activation test
+4da4086	7bf74c7351ebe4cf	===== Area activation test =====
+4da40bc	f2fed58994432128	[%d] < Target World Area Idx
+4da4186	01f207c195707940	===== Block activation test =====
+4da41be	b831351e458da4ce	[%d] < Target World Block Idx
+4da42e2	a1d8e7f5bbce3f11	[%s] < Build connection info at runtime
+4da4308	5772bf0cd1de7bf5	[%s] < Enable physics listener
+4da432e	3a49e3b17917f97e	[%s] < Fast navmesh part collection
+4da4396	064c507f1aee4fc8	Current part[%s(%d)]
+4da43b4	9a5e020122841c8d	Current part[unknown]
+4da43ca	e3aa635f59da6cf6	Node draw mask:
+4da43e6	780b0adb74189e40	(unflagged floors drawn only if all ON)
+4da4436	a7a48050f5458e2f	World navmesh manager
+4da46be	cf00c12aeda77b69	Update cloth only for update Lv1 chrs : %s 
+4da46f2	6b274890de5a7408	Disable all cloth instances : %s 
+4da4724	aff3aca64dcea1e4	No collision with static rigid bodies (re-enter the map) : %s
+4da476a	3d10867cc363a55b	No collision with dynamic rigid bodies (re-enter the map) : %s
+4da47b0	cc96e9e28bd6474f	Show cloth update skipping [%s]Green:Normal Blue:SkinAnim Red:OnlyPos White:NoUpdate
+4da483e	1198452b8b7ef91d	Max chrs with cloth updates %d
+4da4860	702eecae22570f1a	Idle updates to settle cloth %d
+4da488e	76e54bb365a9ccbe	Cloth update distance %0.1f[m]
+4da48b6	d0b347b49bea9d76	Corpse cloth priority offset %0.1f[m]
+4da48e6	00d015903241e74a	Cloth update chrs Update[ %d ]/SkinAnim[ %d ]/OnlyPos[ %d ]/NoUpdate[ %d ]
+4da49b8	f84931c7cb04999b	Failed to get NodePath
+4da49d2	4a1b2d07e148f7f4	][%d items][%0.1fMB
+4da4a12	d9a46be56fa8f7da	Other
+4da4a1a	29c46dc9b2c35f3b	Parts
+4da4a24	8e4db1ea36140a99	Objects
+4da4a30	7adf26269106c50d	Characters
+4da4a3a	64c0010d81dcd1f8	High hits
+4da4a48	86cb1e19e870d6a8	Low hits
+4da57ec	39627ec02209dfe5	%d:Summon requests
+4da5a4e	d61f933874fdcae2	Materials offered:%d
+4da5a62	431d89d7a47c2663	Channel to get %s A:up X:down Y:reset
+4da5a9c	5a06870708f30dde	Random-join ritual level (Pthumeru) %d
+4da5ace	513fa5a807044af1	Random-join ritual level (Hintertomb) %d
+4da5afc	6cc8940c552ac5fa	Random-join ritual level (Loran) %d
+4da5b2e	8eab64bab5954157	Random-join ritual level (Isz) %d
+4da5b74	2d79f92ccd78aafa	Test: create unfinished channel(□+○)
+4da5ba0	ceebbdbd1d698ff3	Test: create finished channel(□+○)
+4da5bcc	59bc6bcb7797b67b	Get channel ID:%d(□+○)
+4da5bf2	f538fdca95f4308f	Join at random(□+○)
+4da5c0e	734e7aea6abb125f	Channel DB
+4da5c42	f0fd57455389bbd4	Invalid time
+4da5c52	faedaa432385967f	Not joined
+4da5c62	9c5dab3d1556007b	Join request pending
+4da5c74	b53aec3debbeef26	Join failed
+4da5c7e	575226cd49f9c5d6	Joined
+4da5c86	256f8041210247e5	No get request
+4da5c9a	327e1759411d8a4b	Get request pending
+4da5cac	ee30315c84953b6a	Get request failed
+4da5cc0	4447aa5c1b3bc60b	Get request succeeded
+4da5cd4	f83b53593b67d80f	No completion request
+4da5ce8	5d29f74156f55db1	Completion request pending
+4da5cfa	ff2d1e2449e66558	Completion request failed
+4da5d0e	c96a45128b7a9ac9	Completion request succeeded
+4da5d22	9b2ade77756da432	No upload request
+4da5d3e	33d1b6e1029258f0	Upload request pending
+4da5d58	dc7484daaaffc985	Upload request failed
+4da5d74	73580bd5f01f7124	Upload request succeeded
+4da5d90	d4ccf12cad692aa6	No share request
+4da5da4	2c5435d50cdc5a7c	Share request pending
+4da5db6	9a84aa565393c091	Share request failed
+4da5dca	db865956813cb878	Share request succeeded
+4da5dde	632c3158676ca4ff	No material submit request
+4da5df6	78adae8eb933a8c1	Material submit request pending
+4da5e0c	944d9b19e87a4a48	Material submit request failed
+4da5e24	c6da0203dc2dfdb9	Material submit request succeeded
+4da5e3c	f9d0d05e7ecfdd82	No sync request
+4da5e50	c23fbed68a817ca0	Sync request pending
+4da5e62	e9b0d1895ecbc2d5	Sync request failed
+4da5e76	96fb1a9ad0848c74	Sync request succeeded
+4da5e8a	15fe09f1887febf5	Unfinished
+4da5e92	95a95b3eb566319b	Finished
+4da5e9c	18b7d5586cd09330	Creation failed
+4da5ea6	f31aa1975e14e370	Not needed
+4da5eac	3d42d913d67e7431	Private
+4da5eb4	0f85b79b75b2abf2	Public via keyword search only
+4da5ecc	720003ed718f8d01	Public
+4da5ed4	9ebd7283de564db1	Channel
+4da5ef8	fb43ff8b03edafe8	Not uploaded
+4da5f08	54eb0117c6a653a2	Uploaded
+4da5f1a	0a233a5f07bfebf8	Difficulty %d
+4da5f28	b10f0c6605d32a23	Dungeon attribute ID %d
+4da5f42	12463283e65719d9	Main feature ID %d
+4da5f58	5c5e216e0f9101bb	State %s
+4da5f64	43b47c00727abbf6	Dungeon data size %I64u
+4da5f8a	fb130704d447b600	Keyword %s
+4da5f9c	8ac817a5fcc84ad4	Last play check time %s
+4da5fb6	733240bfd99a091f	Playable until %s
+4da5fcc	042705baea285a26	Channel join state %s
+4da5fe4	ad73f697e0d6e8ca	Channel get request state %s
+4da6006	fecbb46db0cfd8dc	Channel completion request state %s
+4da6028	0d463fb61fe1de3e	Created %s
+4da6038	5d43f07c1bab48ef	Share level %s
+4da604a	306c6edf78228e09	Channel upload request state %s
+4da6074	794ebad7d65eb6c5	Channel share request state %s
+4da6096	d4ba342212f6d8f4	Channel material submit request state %s
+4da60bc	bb8e3a4d813036e1	Channel sync request state %s
+4da60de	f98a3eec1af3080c	Creator user ID %s
+4da60f8	3ce6e74a3c86120b	Creator character ID %s
+4da6110	dfa0b1e2be82115c	Activity level %d
+4da6124	a217a93eb0952f03	Deleted from server %s
+4da6144	6044491dc5bcbfeb	Yes
+4da614c	732cf20658b0a9d4	No
+4da6158	873a78b705e56029	Chalice type ID %d
+4da616e	e3c8096ca565cbaa	Root Chalice %s
+4da617e	cb2da559beb7eda4	Upload(□+○)
+4da6196	94ba70654c49c36b	Join(□+○)
+4da61a6	dd0831856a2c1ee0	Mark finished(□+○)
+4da7748	e718bf3a4d2c7a1d	 Difficulty(-1:off):%d
+4da776c	807df29e0f162ffd	 Chalice type ID(-1:off):%d
+4da7798	eede34593c2bff1d	 Sub feature flags(-1:off):%d
+4da77c4	474086ea689478c6	 Channels to get:%d
+4da7844	4bcbdc2d854c1099	Test: search unfinished dungeons(□+○)
+4da7870	6441c0e9f69d0f24	Test: search finished dungeons(□+○)
+4da789c	1e22f54ba577a17f	Keyword search(□+○)
+4da78b6	335dfbc359250ba3	Search with ↑ conditions(□+○)
+4da78d0	2a134c07235c5fe9	 Chalice kind:%s
+4da78e4	6eed0b303abaa2a1	Channel search DB
+4da78f8	d2d4dc0cd11bdc18	Not searched
+4da7908	c246608a4fbf0a50	Search request pending
+4da791a	d0de7d39f41b6171	Search failed
+4da7924	9687ae4c0588ce18	Search succeeded
+4da792e	74f6cdd8a81e9a88	Unknown value
+4da7938	044fd6a2b331cf39	Channel search results
+4da794a	22f76a593bcab371	Fetch start index:%d
+4da795e	a5d6d971ee0368db	Difficulty:%d
+4da796c	4ccc184b72d9c5be	Chalice type ID:%lu
+4da7984	ac113daccddcc021	Root Chalice:%s
+4da7994	bfca4f00d01a5a9f	Generic Chalice
+4da799c	bb2e2e7b25278716	Fixed Chalice
+4da79a6	a6ff280ca2985682	Sub feature flags on:%s value:%lu
+4da79d0	8cb26bb95547f116	On
+4da79d6	2d7b2c6c389fe5f8	Off
+4da79dc	2adda5c3313b130f	State:%d
+4da79e8	d82a22dc17e2ede4	Search word:%s
+4da79fa	c40fb07bdda428b5	Channel search state %s
+4da7a12	f68e8614c14e7e06	Next page(□+○)
+4da7a28	24055a7c68b2486c	No next page
+4da7a40	806e6a2421f7c990	Unknown if searchable
+4da7b00	ec9a93d5bcba8aea	Awaiting check request
+4da7b12	a8be6ca202e54480	Check requested
+4da7b22	6a30f97c3f8b71b2	Cannot check
+4da7b40	9931a096f45c68e9	Run PS PLUS member check (□+○)[%s]
+4da898e	2088e0ab986948a5	Operator notice
+4da8998	c789623d62ce93cd	Operator emergency notice
+4da89a6	0cefd0da0b013650	[%d] Summon sign fetch distance[m]
+4da89d0	617b6676283faa52	[%s] Simulate network errors
+4da8a3c	02ecb2a36d65e6f6	ss.info message %s
+4da8a5c	41cb6775dadf90a7	No ss.info
+4da8a78	4de0e8d4bc359ef7	Server status:%d
+4da8a92	c8cc2eff0aacfddc	Server status:no ss.info
+4da8ac2	d7731b7eedce52d8	Client version:%d
+4da8ae0	3a300b24ff0da998	Game server version:%d
+4da8b00	4cebb0b38a535554	Get ss.info API Next:%.1f(□+○ run)
+4da8b40	d9b309bada05d48a	Issue character ID(□+○ issue)
+4da8b62	295e0814c6d3a44e	Character ID %d
+4da8b74	616e9ecbae82d3a2	Get messages API Next:%.1f(□+○ run)
+4da8bac	234196a57bb0adc1	Get message ratings API Next:%.1f(□+○ run)
+4da8be8	7012a8806c0ebe21	Get summon messengers API Next:%.1f(□+○ run)
+4da8c2c	9d34b5546c054855	Get normal summon messengers API Next:%lu(□+○ run)
+4da8c72	7aa5a528e998054b	Get sun summon messengers API Next:%lu(□+○ run)
+4da8cb8	07461e34d3359323	Get normal invasion summon messengers API Next:%lu(□+○ run)
+4da8d02	91f0daa95b945e27	Get betrayal invasion summon messengers API Next:%lu(□+○ run)
+4da8d4e	71bbfc579e0a04b5	Get nemesis summon messengers API Next:%lu(□+○ run)
+4da8d94	4c90a4312e4d424f	Get wandering phantoms API Next:%.1f(□+○ run)
+4da8dce	e963e7ef2e92f842	Get chair messengers API Next:%.1f(□+○ run)
+4da8e12	06f8a88c22ce3ee2	Get grave messengers API Next:%.1f(□+○ run)
+4da8e54	917a953e6c9fa501	Get grave messenger ratings API Next:%.1f(□+○ run)
+4da8e9a	11f3eff2cf51b254	Get channel summary API Next:%.1f(□+○ run)
+4da8edc	a09a3b58c077a3d6	Get emergency notices API Next:%.1f(□+○ run)
+4da8f16	0c21d65d3dc865df	Get summon messengers (on crossing play regions) API Next:%.1f(□+○ run)
+4da8f74	778682a5a949fa62	Asset move count match check API(□+○ run)
+4da8fa8	fee27efaf20ba184	Create wide-area summon(□+○ run)
+4da8fc6	37d427072b5fcd7a	Get wide-area summons(□+○ run)
+4dac9ea	e1d188b57eede7d0	Invitation
+4dac9fc	6e1724883b3cb3fb	Test invitation\nOK?
+4daca1e	cbcd8bb32765a8ce	Yes
+4daca24	b15fcca71b6e9515	No
+4daca2c	a71e1138039ac392	--------Network emulation (PS4 only)--------
+4daca74	6035e1b261db30d9	Packet loss rate[%lu%%]
+4daca90	18f4f21c0932f79d	Packet reorder rate[%lu%%]
+4dacab4	decf7c7efe2c6c0b	Latency[%lums]
+4dacacc	372b5a5efcad4dab	Bandwidth cap[%dbps]
+4dacb3a	638ed22b3275b8c2	Receive buffer info
+4dacb92	5af0ee3479c3d092	RecvBufferSize Threshold: [%u][byte]
+4dacc16	c6349a2c371447dd	RecvBufferOver MaxTime: [%.0f][sec]
+4dacc5c	7f10094ceda9fa42	Add played-with player(□+○)
+4dacc82	d8fdd8977aef275a	Network emulation is disabled.
+4dacfa0	40be5515831758cc	[%s] < DisableMenuRend
+4dad51a	35601694005af25d	[%d] < LodLvBias
+4dad538	ca9c482b707fdfa5	[%s] < LodLvDisp
+4dad556	c0da36964193f935	[%s] < OcclusionCulling
+4dad5d6	2bca3d38546259cf	[%s] < Show param decal spawn points
+4dad60a	18bd716c391b5465	Param test[%09d](□+○:apply)
+4dad63c	f556ba2767aa7dbb	Param test material[None]
+4dad65c	57178cfa387fedef	Param test material[%d]
+4dad67c	823e7cc59585a375	Param test watched SpEffect[%s]
+4dad6a4	2d1db4a6c47cd4bd	Yes
+4dad6aa	ed0a25dcd795f6d0	No
+4dad6c4	9d205b9f1790352a	ANIBND][%d items][%0.1fMB
+4dad724	ac348507aa8ab24a	%s][%d items][%0.1fMB
+4dad8d2	e6c2698bab47ef1f	※Push [□+○] to SAVE[*.param]
+4db25aa	18fe88633d67b1fd	Test buffer
+4db26bc	c73dcb9b04441e91	%03d:<?%s?>→[%s](%d)%s
+4db282a	8d0f3e4d985dc78f	: [
+4db2830	381df2fcfa0a2f78	] < 
+4db29ac	20e9ef94a63ba62b	[%3d] < BaseFaceRangeMin
+4db29da	220c5bd759048065	[%3d] < BaseFaceRangeMax
+4db2a08	279a855ddd462f05	[%0.3f] < FaceCoordGeoMin
+4db2a38	260b591b2a20efab	[%0.3f] < FaceCoordGeoMax
+4db2a68	b9ebf06e563b4ea1	[%0.3f] < FaceCoordTexMin
+4db2a98	bbddf42ba610518f	[%0.3f] < FaceCoordTexMax
+4db3554	87f4150ae2e56bf0	[Forbidden character found] "%s"(%hS) is used.\n%hS
+4db4e8e	c1899e30c1f3ec0b	[DisplayObject]
+4db4eae	c7b29b53b1ad3ec5	[Array]
+4db4ebe	c1851851df66ff95	[String:%s]
+4db4ed6	dc49c9b0ce7b74ea	[StringW:%s]
+4db4ef0	6490ea6874da8535	[Text:%s]
+4db4f04	2d9e4581e81d1288	[TextHTML:%s]
+4db53aa	b23a8f619ad7a0a0	BoxID(%d) debug draw[%s]
+4db53e2	f38a568a89552317	%s|box:%d occlusion(%.0f/%.0f)
+4db5418	870333a62636f767	[%s] < Debug
+4db5438	9da7d1fd8d4b47b1	[%s] < Show IDs
+4db545a	018ae15f662b8e12	[%s] < Show details
+4db5484	13bd982b77237c45	[%s] < Collect statistics
+4db54ba	492e0af58077182a	[%0.2f] < IdScaleX
+4db54dc	493170f58079fb53	[%0.2f] < IdScaleY
+4db54fe	827dde64a4655fbd	□+○: clear list|Per item □+○: delete/△: reset/○: toggle ID/□+△: change color
+4db557a	e14625783a7b2a75	≪Color %d≫
+4db5bd6	2033e1cb1489d4b4	○Resident bank(□+○)
+4db5bee	0bf7abef2243bb77	○%s bank(□+○)
+4db5c06	515a36edf1488b7f	×Resident bank(□+○)
+4db5c1e	7d9c4bfdcb3ac968	×%s bank(□+○)
+4db61ec	bcb84c271e842d4f	???
+4db61f4	2a3fc7bd73c7eb39	News
+4db61fe	59ca790fabc9b0b2	Known issues
+4db620a	0879c907b527e103	?
+4db620e	0b102e07b75a6667	High
+4db6212	07d03807b4981da2	Mid
+4db6216	09203907b5b5367a	Low
+4db628a	cc395b3f20f3ee8f	Caption 0
+4db629a	cc35f53f20f10b66	Caption 1
+4db62aa	cc328f3f20ee283d	Caption 2
+4db62ba	cc2f293f20eb4514	Caption 3
+4db62ca	cc2bc33f20e861eb	Caption 4
+4db62da	cc285d3f20e57ec2	Caption 5
+4db62ea	fac165cc54d9eded	Line 1\nLine 2\nLine 3\nLine 4\nLine 5
+4db6338	6170ae26326d0eef	Reset(□+○)
+4db634c	e4c87b2d3718deef	Reload(□+○)
+4db6360	7071feaa055920ff	Add for testing(□+○)
+4db64a2	2acb2b39a98ca410	Failed to connect to the news server
+4db64bc	54aa41b2a4a15188	How to connect to the news server
+4db64d6	e6086c4c0084bad7	In system.properties\nset\nDebug.Report.Funnel.SendServer=true\nDebug.Report.Funnel.ServerUrl=http://sprj-master:3001/funnel/\nto enable it.\n
+4db6776	4b83de162176cc33	Unknown dev name
+4db695a	85d4c495447eceed	Show dialog  ※Push[○] to run
+4db6984	ba8f10a278aef65e	Dialog display time  [%.1fs]
+4db69a8	4fb21b6883335842	Show talk  ※Push[○] to run
+4db69cc	6c0cb0858e023989	Talk display time  [%.1fs]
+4db69ea	9219ada31832c2a6	Stop all  ※Push[○] to run
+4db6a0e	ed2385f79c27298b	Dialog: wait for stdin input %s  ※Push[○] to run
+4db6a50	556cf312ea907114	Talk: wait for stdin input %s  ※Push[○] to run
+4db6a8c	563eccc033b74109	[Waiting]
+4db6a98	c0fc521790d72c3f	[Aborted]
+4db75b6	054245da97a5013a	Apply (□+○)
+4db75d4	774446c673b3dd9f	[Default]
+4db75e8	b238a82412117ac6	[Locked]
+4db75fa	a611173f92ceef75	[Unlocked]
+4db7b80	c4fef06b6a1c9906	jpnJP:Japanese
+4db7b94	1094ab424fb04e68	engGB:British English
+4db7bae	003eed506bb18b98	fraFR:French
+4db7bc6	3cd1933a30aa52b9	itaIT:Italian
+4db7bde	161541891a8407b7	deuDE:German
+4db7bf4	2cd7f26adcb0f24b	spaES:Spanish
+4db7c0c	2f2c5dbaad5e9ef7	spaAR:South American Spanish
+4db7c28	dc6734dc717ccb9b	porBR:Brazilian Portuguese
+4db7c4a	0150f65adb3eb1d8	engUS:American English
+4db7c64	f951b890cbd7a0c7	nldNL:Dutch
+4db7c7c	48f4c6c09cca398a	polPL:Polish
+4db7c96	6cbb67ba7926359c	rusRU:Russian
+4db7cac	b6c04fd1a1112e3a	danDK:Danish
+4db7cc6	db47c6b827cb5861	norNO:Norwegian
+4db7ce0	67d286bf49e9e923	finFI:Finnish
+4db7cfc	bdf288b4f1d3f660	sweSE:Swedish
+4db7d18	8025080b91283432	turTR:Turkish
+4db7d2e	5030cb7c25769583	porPT:Portuguese
+4db7d48	213caff836f50ad2	zhoTW:Traditional Chinese
+4db7d62	9729a90127a0e4fd	korKR:Korean
+4db7d76	8aed9f7a8966da22	zhoCN:Simplified Chinese
+4db7d90	0568246460e1ae81	Default language
+4db7d9e	ae0ba7b441cb322e	Unknown language
+4db7eae	b0766fb443d924e0	Unknown edition
+4db7eb4	645ef5ec45376c80	NRM:Standard
+4db7ec4	c2ec362ca7a9689d	CMP:Complete
+4db7ef2	33046561f031a1dd	Unknown region
+4db7efa	7257bee939bf4452	JP:Japan
+4db7f06	5dc61f5f87c807d5	NA:North America
+4db7f12	8f8fff26d8094d68	EU:Europe
+4db7f1e	f50e8aa31ada18dd	AS:Asia
+4db7f2c	c9b41143f137c9b5	UK:United Kingdom
+4db7f38	6c69af8d14224316	WW:World (debug)
+4db8292	4b6b1581d803f4c4	Play multi-language opening test[audio stream:%d](□+○)
+4db82d6	a3e57627fdf734d6	Play advertise movie test(□+○)
+4db82f8	46bc39511cc2abe8	Play ending test(□+○)
+4db831a	7e5c4dca609b9355	Play opening test(□+○)
+4db8374	a4e8e4a1d388ef1a	Request stop (□+○)
+4db8388	5c74373439c625f3	[%d:%s] < Play movie by ID(□+○)
+4db83be	675fb87a1f24d3ea	[%d:%s] < Request stop (□+○)
+4db83e2	c778b0b5a758d3fc	No movie set in movtae
+4db840c	70d1696fb0616564	No movtae
+4db841e	ecadb382853a8a0f	Reload debug movtae(□+○)
+4db88b8	fd857cf246e2ca09	[%s]≪%s≫ < Package state on map entry
+4db88ea	62507b326b2b50f3	[Default]≪%s≫ < Package state on map entry
+4db8922	7b441676e59740cd	[%s]≪%s≫ < Realtime package state
+4db895a	05ff33a91d917b57	[Default]≪%s≫ < Realtime package state
+4db8cf2	78434186b381f1b2	Log server URL:%s
+4db8d0c	7cb85d45d154e22a	Flush log(□+○ run)
+4db9fcc	a4decdbad4f625a2	CollectLog: [%s]
+4db9fec	d0220ff6e7c28066	CollectIntervalTime: [%.1f]
+4dba022	143aec2eb00d97d2	OutputLocal: [%s]
+4dbd086	3321f7404823b678	《%s》 < IsForceSendServer forReportLocal
+4dbd340	50d60dcd3a4ea3c3	Rate Fine(□+○ to post)
+4dbd35c	e0b21ee7a362d7ba	Rate Foul(□+○ to post)
+4dbd378	49ae0fc85ab0e1c8	Fine
+4dbd380	2e07bee098339013	Foul...
+4dbdda2	499eb4f42e60c575	Failed to initialize the step debug menu %s.
+4dbde7e	21d374665d776c76	Forced next step no.[%%d]:(0~%d valid, -1 = no transition)
+4dbdec8	6d4c44af8e74cbb8	<※Debug: force step transition>(Press OK Button.) //Use with care: it may hang.
+4dbdf48	043fd527dd10808f	//<※Debug: force step transition>(Step has ended, cannot run now)
+4dbe42c	6efb7976986db84e	[%s] < DebugDisableIsReadyFlag
+4dbe724	961cd2d5e609b3ef	  ▼%s▼
+4dbe776	33a948aebbef23e5	---
+4dbe794	aeb0a3db66aaf549	---  < %s >
+4dbe91c	1a0e00531e11f713	[%d] < m_foregroundFrameSkipNumMax_forDebug
+4dbe970	2a6f909794718a36	[%d] < m_backgroundFrameSkipNumMax_forDebug
+4dbe9c4	3e884c33b57f71f3	[%s] < GXDrawSystem measurements
+4dbec26	6ebc13d84c584b98	≪%02.1f≫ < FPS [%s]
+4dbec48	ce3ebeb43a8eb33b	≪%02.1f≫ < FPS ≪%s≫ [%s]
+4dbed22	5fe85fa534752379	%c[%s] < FlipMode_forHeavyGame
+4dbf2d6	e2850714c2f76901	Current state:%d
+4dbf40a	f2f6197b4068ca02	Log output:%d
+4dbf430	58e416b7853df1b0	Line help state:%d
+4dbf466	ce061afc4718430c	Max no-talk time:%.1f
+4dbf4a2	54147f9236ac2411	Current no-talk time:%.1f
+4dbf4e0	d8763f686c122b88	Update distance:%.1f
+4dbf4f4	3cbb9e2e80ef077c	Draw last forward vector:%d
+4dbf536	4352ffd8b0063243	Forward vector turn correction:%.1f
+4dbf578	1b29d1bcc70996b0	Talkable angle range:%.1f
+4dbf5b6	aecef77fdb59a38b	Forward vector length:%.1f
+4dbf5f6	44396ce2fbe878a4	None
+4dbf600	632fe1d34d7cac51	Out of talk range
+4dbf60c	826b69173fb34d72	Player attacked
+4dbf626	a903d35e3b43f8c2	Player hit by an enemy
+4dbf642	6ce0de71e126ef7b	Enemy attacked
+4dbf654	78b5a5b03d046c13	Enemy entered search range
+4dbf66e	69697807e544dac4	End-talk button pressed
+4dbf838	fc306da9de95312b	End diff angle[deg]: %f
+4dbf872	a3cef9876df1bf8b	Motion ID offset:%d
+4dbf8b4	276027ab798e2956	Begin diff angle[deg]: %f
+4dbf8f2	03ad6ec6316499e9	Event animation force-stop request: %s
+4dbf9b0	9b7854f01df020a8	Activation state change request
+4dbfb5e	420768b9a3499cb7	Talking time : %.3f
+4dbfb92	841c6bf9e75961e6	Talk button pressed:%s
+4dbfbc6	7f519b90eaf6cc41	Talk ID of the button press:%d
+4dbfc08	00b9a36a84571757	At lamp (bonfire):%s
+4dbfc38	a0aab51450ad0859	Menu suppressed:%s
+4dbfe36	8fdbd6bebe9b3922	=====Emulate=====
+4dbfff0	47c6d5b768307204	Talk-exclusive menu open:%d
+4dc0c9c	c8d69fb20f659790	Burst run count exceeded the maximum.
+4dc0d20	8d32eac6fa46bc6e	Destination step undefined
+4dc0f9a	17cdbefc2a450a15	Main pad
+4dc0fa6	85f0e83cf12cf8c6	Priority %d
+4dc0fb4	a0f79d86b277b5c3	Lower pad suppression:partial
+4dc0fd0	8b3ef8929e876fd8	Input on release:reset input
+4dc103e	61d8bab7909fcc00	≪%d≫ < Bank ID
+4dc5348	ed6377eec20ce459	Gs Presents [Glare/Bloom]
+4dc537a	e336b55d3e0178e2	Gs Presents [Bloom] Enable
+4dca3c8	ac46bf8165df8eca	Light X rotation[deg]
+4dca3fa	0704c96b49379d5f	Light Y rotation[deg]
+4dca42c	c4a3ffd35196f73b	Distance mult[%]
+4dca43c	3fa57f2b8eaa9599	Ls-distance mult[%]
+4dca452	c2625da4df5462b3	Light color R
+4dca45c	c2362fa4df2ed99e	Light color G
+4dca466	c22bfda4df263023	Light color B
+4dca470	cd421820a0a87596	Light RGB mult[%]
+4dca486	9d99f676090e6d7c	Ls-light RGB mult[%]
+4dca4a2	6e5939e39ab1f495	Scatter dir coef
+4dca4b0	47b6322b52103d17	Ls-scatter dir coef
+4dca4c4	88719521a13ed650	Rayleigh scatter coef
+4dca4d6	e9ac5d1806d010ae	Ls-Rayleigh scatter coef
+4dca4ee	abba953e2d18e5b1	Mie scatter coef
+4dca4fc	bb609be88326b19f	Ls-Mie scatter coef
+4dca510	b5c7e19a495859de	Blend coef[%]
+4dca524	ef82c6e81b810a1c	Ls-blend coef[%]
+4dca53e	cafa1e26908bbf1d	Ground diffuse color R
+4dca552	483baa881ad78cad	Ls-light color R
+4dca562	cab2c026904f1cc0	Ground diffuse color G
+4dca576	48610c881af74f70	Ls-light color G
+4dca586	cac3be26905d8c8d	Ground diffuse color B
+4dca59a	48720a881b05bf3d	Ls-light color B
+4dca5aa	83d5e2877d9e4a4c	Ground diffuse RGB mult[%]
+4dca5ca	be3597a104f5d2b6	Ls-ground diffuse RGB mult[%]
+4dca6ba	9226ad855920a0c7	UseMemory:OcTree  [KB]
+4dcdcf0	fc20b0d4ad5c687f	Texture
+4dd432c	c7b0dd9a4707e50a	?Unknown?
+4dd8610	0cf6f09392715672	Out of memory reserving the info buffer for deferred-serialization objects

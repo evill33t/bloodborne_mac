@@ -1,0 +1,111 @@
+#include "engine/player_data.h"
+
+#include "core/elf.h"
+#include "core/portable.h"
+#include "engine/addr.h"
+#include "log.h"
+
+#include <cstring>
+
+namespace {
+
+constexpr std::uint64_t kGameDataMan = 0x593b130;  // GameDataMan*; the local record at +0x08
+
+struct Stat {
+    const char* name;
+    bool manager;  // GameDataMan's own field, else the local player's record
+    std::uint32_t offset;
+    bool is_signed;
+};
+// The record: GameDataManPlayerRecord, 32-bit. The manager's counters (from
+// the saturating add helpers 0x18eb5c0..0x18eb660 and the save reader):
+// unsigned 32-bit but ClearCount.
+constexpr Stat kStats[] = {
+    {"hp", false, 0x14, true},          {"max_hp", false, 0x18, true},   {"stamina", false, 0x30, true},
+    {"max_stamina", false, 0x34, true}, {"vitality", false, 0x40, true}, {"endurance", false, 0x48, true},
+    {"strength", false, 0x58, true},    {"skill", false, 0x60, true},    {"bloodtinge", false, 0x68, true},
+    {"arcane", false, 0x70, true},      {"insight", false, 0x84, true},  {"level", false, 0x90, true},
+    {"echoes", false, 0x94, true},
+    {"ng_cycle", true, 0x68, true},     {"coop_helps", true, 0x78, false}, {"invader_kills", true, 0x7c, false},
+    {"true_deaths", true, 0x84, false}, {"deaths", true, 0x88, false},     {"play_time_ms", true, 0x94, false},
+};
+
+std::uint64_t g_slide = 0;
+bool g_ok = false, g_said = false;
+
+std::uint64_t manager() {
+    std::uint64_t man = 0;
+    const auto at = g_slide + (kGameDataMan - kPreferredGuestSlide);
+    if (!g_ok || !host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(at)), &man, 8)) return 0;
+    return man;
+}
+
+std::uint64_t record() {
+    const std::uint64_t man = manager();
+    std::uint64_t rec = 0;
+    if (!man || !host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(man + 8)), &rec, 8)) return 0;
+    return rec;
+}
+
+// Where a stat lives, or 0 when no character is loaded (the manager's
+// counters are read only while there is a record, so both mean the same).
+std::uint64_t base_of(const Stat& s) {
+    const std::uint64_t rec = record();
+    return rec ? (s.manager ? manager() : rec) : 0;
+}
+
+const Stat* find(const char* name) {
+    if (!name) return nullptr;
+    for (const Stat& s : kStats) {
+        if (std::strcmp(s.name, name) == 0) return &s;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+void player_data_install(ElfImage* image) {
+    g_slide = image->mem.slide;
+    g_ok = engine_eboot_supported(image->sha256);
+}
+
+bool player_stat_get(const char* name, std::int64_t* value) {
+    const Stat* s = find(name);
+    const std::uint64_t base = s ? base_of(*s) : 0;
+    std::uint32_t v = 0;
+    if (!base || !host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(base + s->offset)), &v, 4)) return false;
+    if (value) *value = s->is_signed ? static_cast<std::int64_t>(static_cast<std::int32_t>(v)) : static_cast<std::int64_t>(v);
+    return true;
+}
+
+bool player_stat_set(const char* name, std::int64_t value) {
+    const Stat* s = find(name);
+    const std::uint64_t base = s ? base_of(*s) : 0;
+    if (!base) return false;
+    const std::uint32_t v = static_cast<std::uint32_t>(value);
+    std::memcpy(reinterpret_cast<void*>(static_cast<std::uintptr_t>(base + s->offset)), &v, 4);
+    return true;
+}
+
+bool player_origin(int* origin) {
+    const std::uint64_t rec = record();
+    std::uint8_t v = 0;
+    if (!rec || !host_read_safe(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(rec + 0xce)), &v, 1)) return false;
+    if (origin) *origin = v;
+    return true;
+}
+
+void player_data_tick() {
+    if (g_said || !g_ok) return;
+    std::int64_t level = 0;
+    if (!player_stat_get("level", &level) || level <= 0) return;  // no character yet
+    g_said = true;
+    char line[512];
+    std::size_t n = 0;
+    for (const Stat& s : kStats) {
+        std::int64_t v = 0;
+        if (player_stat_get(s.name, &v)) n += static_cast<std::size_t>(std::snprintf(line + n, sizeof(line) - n, " %s %lld", s.name, static_cast<long long>(v)));
+        if (n >= sizeof(line)) break;
+    }
+    host_log("player data: the loaded character:%s", line);
+}

@@ -1,6 +1,8 @@
 from paths import ROOT
 import importlib.util
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -23,6 +25,9 @@ class TrophyTests(unittest.TestCase):
         self.assertEqual(trophies.BY_ID[0][3], trophies.PLATINUM)
         self.assertEqual(len(trophies.PLATINUM_NEEDS), 33)
         self.assertEqual(sum(t[4] == trophies.DLC for t in trophies.TROPHIES), 6)
+
+    def test_mac_runtime_catalog_matches_the_launcher(self):
+        subprocess.run([sys.executable, str(ROOT / 'scripts/macos_trophy_catalog.py'), '--check'], check=True)
 
     def test_read_log_keeps_earliest_and_skips_garbage(self):
         (self.user / 'trophies.log').write_text('14 200\n14 100\nbroken\n21 300 extra\n\n', encoding='utf-8')

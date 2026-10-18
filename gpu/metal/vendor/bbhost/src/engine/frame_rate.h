@@ -1,0 +1,64 @@
+#pragma once
+
+#include <string>
+
+// The game's own frame pace: 30, 60, 90, 120 or uncapped.
+//
+// FD4's frame-time manager (0x2434770, called once a frame from the main
+// loop) picks an interval by mode - the int at +8, or +0xc while the one-shot
+// flag +0x276 is set - through a switch at 0x24347f5. Modes 0, 1, 3 and 4 wait
+// out 1/30 s; mode 2 waits 1/60 with a vblank interval of 1. The engine has a
+// 60 fps mode; the game never selects it. The wait is a usleep to within 5 ms
+// of the deadline and then a spin on gettimeofday - which is why the main
+// thread reads ~90% busy at 30 fps while half of that is waiting. Ours
+// replaces it (SprjFlipper::Update, BBHOST_FRAME_SOURCE).
+//
+// The Frame rate option (or BBHOST_GAME_FPS=30/60/90/120/0) when the game starts:
+//  - 30: the game's own.
+//  - 60, 90, 120: mode 2 with a 1/fps target, the game's fixed steps converted
+//    (frame_rate.cpp's tables, from Kyo's FPS++ lists and yogesh1239's high-FPS
+//    fixes, each checked against the eboot): the task step and every step that
+//    used a fixed 1/30 read the measured frame time clamped to [target, 1/30]
+//    (the FPS++ cave's slot, engine/sixty_fps_sites.inc and kFrameTimeSites);
+//    per-frame amounts, weights and rates in .rodata are written from that
+//    frame time every frame; code immediates and frame counts take the rate's
+//    value. Above 60 the cloth's six constraint caves (ninety_fps_sites.inc)
+//    scale its stiffness by (60 dt)^2. The play time adds each frame's
+//    milliseconds with the remainder carried (the game truncates them). The
+//    follow camera keeps Kyo's 60 fps retune (Camera tuning FPS++, the
+//    default) or runs the game's own values (Original), either converted to
+//    each frame's length.
+//  - uncapped: the same, with a target of the display's refresh rate with
+//    V-Sync on and 1/240 s with it off (BBHOST_UNCAPPED_FPS=N sets it); code
+//    immediates and counts at 120's values.
+// Above 60 and uncapped flips complete as soon as they are recorded (the game
+// paces itself; hle/video.cpp). The one-shot overrides (+0x2bc, +0x2c0,
+// +0x271, +0x272, +0x2c4) are cleared so nothing drops the game back to 30.
+//
+// The choice is made when the game starts: the game's fixed 1/30 s steps are
+// constants in its code, and a rate needs them all changed together.
+
+// The frame time and the camera's flag code on the game's side reads:
+// engine/frame_rate_step.h.
+
+struct ElfImage;
+
+void frame_rate_install(ElfImage* image);
+
+// The pace the game was started at: 30, 60, 90, 120, or 0 for uncapped.
+int frame_rate_game_fps();
+
+// Game time against real time (plugins' set_time_scale): 0.5 is half speed,
+// 2 double, clamped to 0.1-4. At 30 the game steps a fixed amount a frame, so
+// this is the frame pacing's interval (as far as the machine keeps up). At a
+// converted rate every step follows the frame's time, so it scales the task
+// step instead (at most 1/30 s a frame) and the frames keep their pace;
+// what still counts frames (frame_rate.cpp's kCounts and the rate's code
+// immediates) keeps real time.
+void frame_rate_set_time_scale(float scale);
+
+// The limiter since the last call, for the 300-flip report's timing line:
+// its margin (learnt from its own sleeps' lateness, or
+// BBHOST_LIMITER_MARGIN_US), how late its sleeps woke, and how long it spun
+// a frame.
+std::string frame_rate_limiter_window();

@@ -8,6 +8,10 @@
 #include <stdatomic.h>
 #include <sched.h>
 #include <pthread.h>
+#ifdef BB_CHECKPOINT_RUNTIME
+#include <sys/mman.h>
+#include <errno.h>
+#endif
 
 typedef struct {
     union { GuestCallback plain; void (ABI *with_arg)(void *); } callback;
@@ -19,6 +23,21 @@ static size_t handler_count, handler_capacity, calls_init, calls_atexit, calls_c
 static uint64_t capabilities;
 static _Atomic size_t guards_acquired, guards_released;
 static uint64_t stack_canary;
+#ifdef BB_CHECKPOINT_RUNTIME
+typedef struct {uint64_t canary;int32_t need_libc_internal;uint32_t reserved;} CheckpointGlobals;
+static CheckpointGlobals *checkpoint_globals;
+static pthread_mutex_t checkpoint_globals_lock=PTHREAD_MUTEX_INITIALIZER;
+static CheckpointGlobals *guest_globals(void) {
+    pthread_mutex_lock(&checkpoint_globals_lock);
+    if (!checkpoint_globals) {
+        checkpoint_globals=runtime_low_map(16384,PROT_READ|PROT_WRITE);
+        if (!checkpoint_globals) {pthread_mutex_unlock(&checkpoint_globals_lock);fputs("Cannot allocate stable guest import data\n",stderr);abort();}
+        *checkpoint_globals=(CheckpointGlobals){.canary=stack_canary,.need_libc_internal=1};
+    }
+    CheckpointGlobals *result=checkpoint_globals;
+    pthread_mutex_unlock(&checkpoint_globals_lock);return result;
+}
+#endif
 static _Atomic size_t memory_calls;
 /* Dynamic TLS of linked modules: module IDs 2..7 (1 is the eboot's static TLS). */
 #define TLS_MODULES 8
@@ -43,13 +62,36 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
         fputs("STOP: unsupported TLS module/offset\n",stderr); exit(21);
     }
     unsigned char **block=&tls_blocks[index[0]];
+#ifdef BB_CHECKPOINT_RUNTIME
+    BbCheckpointThreadLocal *local=NULL;
+    if (bb_checkpoint_runtime_enabled()) {
+        local=runtime_thread_checkpoint_local();
+        tls_blocks[index[0]]=(unsigned char *)(uintptr_t)local->module_tls[index[0]];
+    }
+#endif
     if (!*block) {
+#ifdef BB_CHECKPOINT_RUNTIME
+        if (local) *block=runtime_low_map(tls_modules[index[0]].memsz,PROT_READ|PROT_WRITE);
+        else
+#endif
         *block=calloc(1,tls_modules[index[0]].memsz);
         if (!*block) { fputs("Cannot allocate module TLS\n",stderr); exit(1); }
         memcpy(*block,tls_modules[index[0]].data,tls_modules[index[0]].filesz);
+#ifdef BB_CHECKPOINT_RUNTIME
+        if (local) {
+            local->module_tls[index[0]]=(uintptr_t)*block;
+            local->module_tls_size[index[0]]=tls_modules[index[0]].memsz;
+        }
+#endif
     }
     return *block+index[1];
 }
+#ifdef BB_CHECKPOINT_RUNTIME
+void runtime_checkpoint_bind_module_tls(const BbCheckpointThreadLocal *local) {
+    for (unsigned i=0;i<TLS_MODULES;++i) tls_blocks[i]=(unsigned char *)(uintptr_t)local->module_tls[i];
+}
+uint64_t runtime_checkpoint_module_tls_size(unsigned module) {return module<TLS_MODULES?tls_modules[module].memsz:0;}
+#endif
 
 void runtime_start(uint64_t flags) {
     capabilities = flags;
@@ -133,14 +175,18 @@ static ABI int guard_acquire(uint64_t *guard) {
     _Atomic uint64_t *state = (_Atomic uint64_t *)guard;
     /* Dump libc uses the low byte for completion and the dword at +4 as lock.
        The lock word holds a per-thread owner tag so recursion is detectable. */
-    if (!guard_owner) guard_owner = atomic_fetch_add(&next_guard_owner, 1);
+    uint32_t *owner=&guard_owner;
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) owner=&runtime_thread_checkpoint_local()->guard_owner;
+#endif
+    if (!*owner) *owner = atomic_fetch_add(&next_guard_owner, 1);
     for (;;) {
         uint64_t expected = 0;
         if (atomic_load_explicit(state, memory_order_acquire) & 1) return 0;
-        if (atomic_compare_exchange_strong_explicit(state, &expected, (uint64_t)guard_owner << 32,
+        if (atomic_compare_exchange_strong_explicit(state, &expected, (uint64_t)*owner << 32,
                                                     memory_order_acq_rel, memory_order_acquire)) break;
         if (expected & 1) return 0;
-        if ((uint32_t)(expected >> 32) == guard_owner) {
+        if ((uint32_t)(expected >> 32) == *owner) {
             fputs("STOP: recursive/concurrent static initialization is not supported yet\n", stderr);
             exit(21);
         }
@@ -183,6 +229,12 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (!(capabilities & 1)) return 0;
     if (is_data) {
         static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
+#ifdef BB_CHECKPOINT_RUNTIME
+        if (bb_checkpoint_runtime_enabled()) {
+            if (!strcmp(name,"f7uOxY9mM1U#p#J")) return (uintptr_t)&guest_globals()->canary;
+            if (!strcmp(name,"ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&guest_globals()->need_libc_internal;
+        }
+#endif
         if (!strcmp(name, "f7uOxY9mM1U#p#J")) return (uintptr_t)&stack_canary;
         if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
         return 0;
@@ -259,3 +311,73 @@ const char *runtime_import_name(const char *name) {
     const char *symbol=runtime_symbol(name);
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
 }
+
+#ifdef BB_CHECKPOINT_RUNTIME
+_Static_assert(sizeof(BbCheckpointProcessRecord)==72,"checkpoint process record size");
+_Static_assert(sizeof(BbCheckpointExitRecord)==32,"checkpoint exit record size");
+int runtime_checkpoint_process_bind_globals(uint64_t address) {
+    if (!bb_checkpoint_runtime_enabled() || address<UINT64_C(0x7000000000) ||
+        address>=UINT64_C(0x8000000000) || address%16384) return EINVAL;
+    pthread_mutex_lock(&checkpoint_globals_lock);
+    int result=0;
+    if (checkpoint_globals) result=(uintptr_t)checkpoint_globals==address?0:EBUSY;
+    else {
+        checkpoint_globals=runtime_low_map_at(address,16384,PROT_READ|PROT_WRITE);
+        if (!checkpoint_globals) result=ENOMEM;
+        else *checkpoint_globals=(CheckpointGlobals){.canary=stack_canary,.need_libc_internal=1};
+    }
+    pthread_mutex_unlock(&checkpoint_globals_lock);return result;
+}
+int runtime_checkpoint_process_export(BbCheckpointProcessRecord *record,BbCheckpointExitRecord *entries,size_t capacity) {
+    if (!record || !bb_checkpoint_runtime_enabled()) return EINVAL;
+    pthread_mutex_lock(&handler_lock);
+    if (handler_count>1024*1024) {pthread_mutex_unlock(&handler_lock);return EOVERFLOW;}
+    BbCheckpointProcessRecord saved={.version=1,.capabilities=capabilities,.globals=(uintptr_t)checkpoint_globals,
+        .canary=checkpoint_globals?checkpoint_globals->canary:stack_canary,.process_param=(uintptr_t)process_param,
+        .heap_api=(uintptr_t)application_heap_api,.need_libc_internal=checkpoint_globals?checkpoint_globals->need_libc_internal:1,
+        .handlers=(uint32_t)handler_count};
+    if (saved.process_param>=UINT64_C(1)<<40 || saved.heap_api>=UINT64_C(1)<<40) {pthread_mutex_unlock(&handler_lock);return EINVAL;}
+    if (entries && capacity<handler_count) {pthread_mutex_unlock(&handler_lock);return ENOSPC;}
+    if (entries) for (size_t i=0;i<handler_count;++i) {
+        const ExitHandler *h=handlers+i;BbCheckpointExitRecord e={0};
+        if (h->active) {
+            e.callback=h->with_arg?(uintptr_t)h->callback.with_arg:(uintptr_t)h->callback.plain;
+            e.argument=(uintptr_t)h->argument;e.dso=(uintptr_t)h->dso;e.flags=2u|(h->with_arg?1u:0u);
+            if (!e.callback || e.callback>=UINT64_C(1)<<40 || e.dso>=UINT64_C(1)<<40) {pthread_mutex_unlock(&handler_lock);return EINVAL;}
+        }
+        entries[i]=e;
+    }
+    *record=saved;pthread_mutex_unlock(&handler_lock);return 0;
+}
+int runtime_checkpoint_process_restore(const BbCheckpointProcessRecord *saved,const BbCheckpointExitRecord *entries) {
+    if (!saved || !bb_checkpoint_runtime_enabled() || saved->version!=1 || saved->reserved ||
+        saved->reserved2[0] || saved->reserved2[1] || saved->capabilities!=capabilities || saved->handlers>1024*1024 ||
+        (saved->handlers && !entries) || saved->process_param>=UINT64_C(1)<<40 || saved->heap_api>=UINT64_C(1)<<40 ||
+        (saved->globals && (saved->globals<UINT64_C(0x7000000000) || saved->globals>=UINT64_C(0x8000000000) || saved->globals%16384))) return EINVAL;
+    for (size_t i=0;i<saved->handlers;++i) {
+        const BbCheckpointExitRecord *e=entries+i;
+        if (e->reserved || e->flags&~3u || (!(e->flags&2) && (e->callback || e->argument || e->dso || e->flags)) ||
+            ((e->flags&2) && (!e->callback || e->callback>=UINT64_C(1)<<40 || e->dso>=UINT64_C(1)<<40))) return EINVAL;
+    }
+    ExitHandler *rebuilt=saved->handlers?calloc(saved->handlers,sizeof(*rebuilt)):NULL;
+    if (saved->handlers && !rebuilt) return ENOMEM;
+    for (size_t i=0;i<saved->handlers;++i) {
+        const BbCheckpointExitRecord *e=entries+i;
+        if (e->flags&1) rebuilt[i].callback.with_arg=(void (ABI *)(void *))(uintptr_t)e->callback;
+        else rebuilt[i].callback.plain=(GuestCallback)(uintptr_t)e->callback;
+        rebuilt[i].argument=(void *)(uintptr_t)e->argument;rebuilt[i].dso=(void *)(uintptr_t)e->dso;
+        rebuilt[i].with_arg=(e->flags&1)!=0;rebuilt[i].active=(e->flags&2)!=0;
+    }
+    pthread_mutex_lock(&handler_lock);
+    if (handler_count || application_heap_api) {pthread_mutex_unlock(&handler_lock);free(rebuilt);return EBUSY;}
+    if (saved->globals) {
+        int error=runtime_checkpoint_process_bind_globals(saved->globals);
+        if (error) {pthread_mutex_unlock(&handler_lock);free(rebuilt);return error;}
+    } else if (checkpoint_globals) {pthread_mutex_unlock(&handler_lock);free(rebuilt);return EINVAL;}
+    free(handlers);handlers=rebuilt;handler_count=handler_capacity=saved->handlers;
+    process_param=(void *)(uintptr_t)saved->process_param;application_heap_api=(void **)(uintptr_t)saved->heap_api;
+    stack_canary=saved->canary;
+    if (checkpoint_globals) {checkpoint_globals->canary=saved->canary;checkpoint_globals->need_libc_internal=saved->need_libc_internal;}
+    pthread_mutex_unlock(&handler_lock);return 0;
+}
+#endif

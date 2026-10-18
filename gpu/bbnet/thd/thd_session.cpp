@@ -2,7 +2,11 @@
 // The Hunter's Dream backend: settings, the account, the session service client, the dispatcher,
 // the peer table, the event poller and the keepalive. Adapted from droogie/bbhost
 // src/net/{http,account,session}.cpp and src/engine/summon_invite.cpp (566184a).
+#ifndef __APPLE__
 #include "httplib.h"
+#else
+#include "gpu/metal/bbhost/network.h"
+#endif
 
 #include "thd.h"
 #include "thd_internal.h"
@@ -101,11 +105,17 @@ std::string g_name, g_token;
 bool g_refused = false;
 // Read on first use: the game may ask for its NP state before the online start.
 void LoadAccountLocked() {
+#ifdef __APPLE__
+    const auto next_token=MacNetwork::AccountToken();
+    if (g_token!=next_token) g_refused=false;
+    g_name=MacNetwork::AccountName(); g_token=next_token; return;
+#else
     static bool loaded = false;
     if (loaded) return;
     loaded = true;
     g_name = Env("BB_THD_ONLINE_ID").substr(0, 16);
     g_token = Env("BB_THD_TOKEN");
+#endif
 }
 } // namespace
 
@@ -189,6 +199,13 @@ struct HttpResult {
 // One keep-alive connection per thread and server: the poller asks four times a second.
 HttpResult Perform(const std::string& base, const std::string& path, const std::string* post,
                    int timeout_ms) {
+#ifdef __APPLE__
+    const auto result=MacNetwork::Request(base+path,post,timeout_ms,Cfg().verify_tls,
+        {{"Accept","application/json"},{"Content-Type","application/json"},
+         {"User-Agent",Cfg().client},{"X-BBHost-Ruleset",MacNetwork::Ruleset()},
+         {"X-BB-Token",AccountToken()}});
+    return {result.status,result.body,result.error};
+#else
     thread_local std::map<std::string, std::unique_ptr<httplib::Client>> clients;
     auto& cli = clients[base];
     const auto timeout = std::chrono::milliseconds(timeout_ms);
@@ -230,6 +247,7 @@ HttpResult Perform(const std::string& base, const std::string& path, const std::
     r.status = res->status;
     r.body = res->body;
     return r;
+#endif
 }
 
 bool ParseReply(const std::string& what, const HttpResult& r, Json& out, std::string& error) {

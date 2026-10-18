@@ -122,6 +122,8 @@ void runtime_file_configure(const char *app0,const char *user) {
     }
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
+static int (*file_overlay)(const char *,char *,size_t);
+void runtime_file_set_overlay(int (*resolve)(const char *,char *,size_t)) { file_overlay=resolve; }
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
@@ -139,6 +141,10 @@ static int translate(const char *guest,char *out,size_t size) {
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
+    if (!result && file_overlay) {
+        int found=file_overlay(buffer,out,size);
+        if (found<0) return ENAMETOOLONG;
+    }
     if (!result && strstr(out,"/dvdroot_ps4/")) {
         const char *language=getenv("BB_LANGUAGE");
         if (language && !strcmp(language,"17")) {
@@ -248,9 +254,15 @@ static void convert_stat(const HostStat *s,GuestStat *g) {
 #else
     g->mode=(uint16_t)s->st_mode;
     g->blocks=s->st_blocks; g->blksize=(uint32_t)s->st_blksize;
+#ifdef __APPLE__
+    g->atime=(GuestTimespec){s->st_atimespec.tv_sec,s->st_atimespec.tv_nsec};
+    g->mtime=(GuestTimespec){s->st_mtimespec.tv_sec,s->st_mtimespec.tv_nsec};
+    g->ctime=(GuestTimespec){s->st_ctimespec.tv_sec,s->st_ctimespec.tv_nsec};
+#else
     g->atime=(GuestTimespec){s->st_atim.tv_sec,s->st_atim.tv_nsec};
     g->mtime=(GuestTimespec){s->st_mtim.tv_sec,s->st_mtim.tv_nsec};
     g->ctime=(GuestTimespec){s->st_ctim.tv_sec,s->st_ctim.tv_nsec};
+#endif
 #endif
     g->birthtime=g->ctime;
 }

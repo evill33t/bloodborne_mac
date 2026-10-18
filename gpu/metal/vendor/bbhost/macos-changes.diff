@@ -1,0 +1,489 @@
+--- /dev/null
++++ b/include/bbhost/fixed_tick.hpp
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// Mac adaptation: bundled plugins used 60-frame timers. Keep their clock at
++// 60 Hz while leaving the public on_frame API at once per rendered frame.
++#pragma once
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++
++namespace bb {
++class FixedTicks {
++    std::chrono::steady_clock::time_point previous=std::chrono::steady_clock::now();
++    double remainder=0;
++public:
++    int advance(double seconds) {
++        if (!std::isfinite(seconds) || seconds<=0) return 0;
++        // Match the engine's maximum 1/30 second simulation step after stalls.
++        remainder+=std::min(seconds,1.0/30.0)*60.0;
++        const auto ticks=int(remainder+1e-9);
++        remainder=std::max(0.0,remainder-ticks);
++        return ticks;
++    }
++    int update() {
++        const auto now=std::chrono::steady_clock::now();
++        const auto elapsed=std::chrono::duration<double>(now-previous).count();
++        previous=now; return advance(elapsed);
++    }
++};
++}
+--- a/plugins/boss_rush/boss_rush.cpp
++++ b/plugins/boss_rush/boss_rush.cpp
+@@ -33,6 +33,7 @@
+ // the lamps each defeat lights (tools/mapval_lamps.py's "requires" column);
+ // the fog walls from the same scripts and the maps' layouts.
+ #include "bbhost/sdk.hpp"
++#include "bbhost/fixed_tick.hpp"
+ #include "bbhost/engine/sprj/camera.hpp"
+ #include "bbhost/engine/sprj/game_data_man.hpp"
+ 
+@@ -185,7 +186,7 @@
+ int g_quiet_frames = 0;
+ bool g_skip_intro = true;
+ 
+-constexpr int kFps = 60;  // on_frame runs once a game frame; the clock is in frames at the game's target
++constexpr int kFps = 60;  // FixedTicks keeps the timers at 60 Hz at every render rate.
+ 
+ std::string clock_text(std::uint64_t frames) {
+     const std::uint64_t s = frames / kFps;
+@@ -734,7 +735,7 @@
+         else if (a == "stop") stop("stopped");
+         else if (a == "skip") skip();
+     }, nullptr);
+-    g.every_frame(tick);
++    g.every_frame([] { static bb::FixedTicks clock; for (int n=clock.update();n>0;--n) tick(); });
+     g.on_world_load([](std::uint32_t block) {
+         if (g_state == State::Waiting) {
+             if (!g_restored) {
+--- a/plugins/mutators/mutators.cpp
++++ b/plugins/mutators/mutators.cpp
+@@ -17,6 +17,7 @@
+ // Everything is in memory (enemy_hp is NpcParam's hp, as the game reads it):
+ // turn a mutator off and the next start plays as the game does. Echoes and HP it changed stay in the save, as play would.
+ #include "bbhost/sdk.hpp"
++#include "bbhost/fixed_tick.hpp"
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -189,10 +190,13 @@
+           static_cast<double>(g_gravity), static_cast<double>(g_speed), g_bullet_time ? "on" : "off", g_one_hit ? "on" : "off", static_cast<double>(g_drain),
+           static_cast<double>(g_enemy_hp), static_cast<double>(g_echoes), g_chaos);
+     g.every_frame([] {
++        static bb::FixedTicks clock;
++        for (int n=clock.update();n>0;--n) {
+         if (g_chaos > 0 && g_chaos_pool.empty() && g_frame % kFps == 0 && !g.param_ids<bb::params::EquipParamGoods>().empty())
+             build_chaos_pool();
+         if (g_enemy_hp != 1.0f && g_frame % 30 == 0) scale_enemy_hp();
+         tick();
++        }
+     });
+     // A change in the in-game menu: read them all again (enemy_hp waits for
+     // the next start - the table is scaled once).
+--- a/plugins/randomizer/randomizer.cpp
++++ b/plugins/randomizer/randomizer.cpp
+@@ -27,6 +27,7 @@
+ // <data>/plugins/randomizer/spoiler.txt lists where everything went, and
+ // enemies.txt what each area's enemies became.
+ #include "bbhost/sdk.hpp"
++#include "bbhost/fixed_tick.hpp"
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -1540,7 +1541,9 @@
+         }
+     });
+     g.every_frame([] {
+-        if (countdown > 0 && --countdown == 0) g.message(banner, 6.0f);
++        static bb::FixedTicks clock;
++        for (int n=clock.update();n>0;--n)
++            if (countdown > 0 && --countdown == 0) g.message(banner, 6.0f);
+     });
+     return 0;
+ }
+--- a/src/core/config.cpp
++++ b/src/core/config.cpp
+@@ -1,4 +1,5 @@
+ #include "core/config.h"
++#include <mach-o/dyld.h>
+ #include "core/sfo.h"
+ #include "log.h"
+ #include "bbhost_version.h"
+@@ -10,6 +11,7 @@
+ #include <filesystem>
+ #include <fstream>
+ #include <map>
++#include <mutex>
+ #include <sstream>
+ #include <string>
+ #include <vector>
+@@ -25,6 +27,7 @@
+ #define BBHOST_CONFIG_VERSION BBHOST_VERSION
+ 
+ namespace {
++std::mutex values_mutex,file_mutex;
+ 
+ HostConfig g_cfg;
+ 
+@@ -218,7 +221,8 @@
+     return slash == std::string::npos ? "." : p.substr(0, slash);
+ #else
+     char buf[4096];
+-    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
++    uint32_t size = sizeof(buf);
++    ssize_t n = _NSGetExecutablePath(buf, &size) == 0 ? std::strlen(buf) : -1;
+     if (n <= 0) {
+         return ".";
+     }
+@@ -630,7 +634,7 @@
+     c.setup_always = true;  // a player's build opens the setup window at every start unless told not to
+ #endif
+     apply_values(merged, &c);
+-    g_values = merged;
++    { std::lock_guard lock(values_mutex); g_values = merged; }
+     // The file a player edits: the user config, once there is one.
+     c.config_path = file_exists(user_cfg) ? user_cfg : !explicit_cfg.empty() ? explicit_cfg : local_cfg;
+     c.config_layers = layers;
+@@ -1014,6 +1018,7 @@
+ std::string config_default_data_dir() { return user_data_dir(); }
+ 
+ bool config_set_values(const std::string& path, const std::vector<ConfigEdit>& edits) {
++    std::lock_guard lock(file_mutex);
+     std::vector<std::string> lines;
+     {
+         std::ifstream in(path);
+@@ -1064,9 +1069,12 @@
+     return parse_file(path, kv, err);
+ }
+ 
+-void config_value_set(const std::string& key, const std::string& raw) { g_values[key] = raw; }
++void config_value_set(const std::string& key, const std::string& raw) {
++    std::lock_guard lock(values_mutex); g_values[key] = raw;
++}
+ 
+ std::string config_value(const std::string& key) {
++    std::lock_guard lock(values_mutex);
+     auto it = g_values.find(key);
+     return it == g_values.end() ? std::string() : unquote(it->second);
+ }
+--- a/src/engine/addr.h
++++ b/src/engine/addr.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <string_view>
+ 
+ // Bloodborne 1.09 address spaces. Ghidra uses the
+ // 0x800000000 image base; bbhost maps the ELF at GuestMemory::slide
+@@ -25,3 +26,8 @@
+ inline constexpr std::uint64_t guest_from_ghidra(std::uint64_t ghidra_va, std::uint64_t slide) {
+     return guest_from_elf(elf_from_ghidra(ghidra_va), slide);
+ }
++
++// The supported decrypted retail ELF in this port; all code sites also check their bytes.
++inline bool engine_eboot_supported(std::string_view hash) {
++    return hash == kEboot109Sha256 || hash == "cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86";
++}
+--- a/src/engine/event_flags.cpp
++++ b/src/engine/event_flags.cpp
+@@ -42,7 +42,7 @@
+ 
+ void event_flags_install(ElfImage* image) {
+     g_slide = image->mem.slide;
+-    g_ok = image->sha256 == kEboot109Sha256;
++    g_ok = engine_eboot_supported(image->sha256);
+     if (const char* e = std::getenv("BBHOST_EVENT_FLAG_LOG"); g_ok && e && e[0] == '1') {
+         g_log = true;
+         event_flag_watch(true);
+--- a/src/engine/frame_rate.cpp
++++ b/src/engine/frame_rate.cpp
+@@ -1,17 +1,14 @@
+ #include "guest_abi.h"
+ #include "engine/frame_rate.h"
++#include "gpu/metal/bbhost/features.h"
+ #include "engine/frame_rate_step.h"
+ #include "engine/frame_tick.h"
+-#include "engine/np_test.h"
+ #include "engine/event_flags.h"
+ #include "engine/player_data.h"
+ #include "engine/lua_events.h"
+ #include "engine/world_chr.h"
+ #include "engine/params.h"
+ #include "engine/sprj_flipper.h"
+-#include "engine/loading.h"
+-#include "engine/change_appearance.h"
+-#include "engine/rebirth.h"
+ 
+ #include "core/elf.h"
+ #include "core/memory.h"
+@@ -21,7 +18,7 @@
+ #include "engine/graphics_patch.h"
+ #include "hle/hle.h"
+ #include "hle/modules.h"
+-#include "host/frame_stats.h"
++
+ #include "host/plugins.h"
+ #include "host/options.h"
+ #include "host/settings.h"
+@@ -1100,14 +1097,7 @@
+ // BBHOST_FRAME_STATS: the main loop's work in the frame that is ending. The
+ // manager's +0x28 still holds the time (gettimeofday, us) it released the last
+ // frame at, until the update about to run replaces it.
+-void note_main_frame_work(std::uint64_t m) {
+-    if (!frame_stats_enabled()) return;
+-    // The same clock the guest's gettimeofday reads (hle/libc.cpp), on both
+-    // platforms.
+-    const std::int64_t now = host_clock_realtime_us();
+-    const std::int64_t last = get<std::int64_t>(m + 0x28);
+-    if (last > 0 && now >= last && now - last < 10000000) frame_stats_main_frame(static_cast<std::uint64_t>(now - last), hle_video_flip_count());
+-}
++
+ 
+ // The uncapped mode's frame limit: BBHOST_UNCAPPED_FPS=N (30..240) if set;
+ // else, with V-Sync on, the display's refresh rate (a PC game's V-Sync: no
+@@ -1292,22 +1282,18 @@
+ 
+ // rdi: the frame-time manager.
+ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* saved) {
+-    np_test_tick();  // the online test hook wants the main thread, once a frame
++    MacFeatures::PollMenu();
+     params_tick();   // the param repository walk (engine/params.h)
+     lua_events_tick();  // named Lua events queued from any thread (engine/lua_events.h)
+     event_flags_tick(); // the one-time check of our flag reader against the game's (engine/event_flags.h)
+     player_data_tick(); // the loaded character's numbers, once (engine/player_data.h)
+     plugins_frame();    // the plugins' on_frame callbacks (include/bbhost_plugin.h, version 2)
+-    change_appearance_tick();  // the mirror's editor in character creation's frame (engine/change_appearance.h)
+-    rebirth_tick();     // the altar's rebirth: the host's half of its talk script (engine/rebirth.h)
+     world_chr_tick();   // a test warp a plugin queued this frame (BBHOST_TEST_WARP, engine/world_chr.h)
+-    loading_tick(hle_video_flip_count());  // the loading screens' lengths and the first in-game frame (engine/loading.h)
+     auto* f = reinterpret_cast<SprjFlipper*>(static_cast<std::uintptr_t>(saved[5]));
+     const bool converted = g_game_fps != 30;
+     if (g_source == Source::Ours) {
+-        note_main_frame_work(saved[5]);
+         RealClock clock;
+-        g_fast_target = converted && (g_bench_uncapped || loading_fast_now());
++        g_fast_target = converted && (g_bench_uncapped || false);
+         sprj_flipper_update(f, clock, pace_target());
+         g_fast_target = false;
+         if (converted) each_frame(f);
+@@ -1330,7 +1316,6 @@
+         return 0;
+     }
+     const std::uint64_t m = saved[5];
+-    note_main_frame_work(m);
+     if (g_frames.fetch_add(1, std::memory_order_relaxed) == 0) {
+         host_log("frame rate: the frame-time manager is 0x%llx, mode %u (one-shot %u), interval %g s",
+                  static_cast<unsigned long long>(m), get<std::uint32_t>(m + 8), get<std::uint32_t>(m + 0xc), get<float>(m + 0x18));
+@@ -1652,13 +1637,13 @@
+     return p.ret;
+ }
+ extern "C" void* g_frame_after_thunk = nullptr;
+-#if defined(_WIN32)
++#if defined(_WIN32) || defined(__APPLE__)
+ #define FR_TYPE_(n)
+ #else
+ #define FR_TYPE_(n) ".type " #n ", @function\n"
+ #endif
+-asm(".text\n.globl frame_ret\n" FR_TYPE_(frame_ret) "frame_ret:\n"
+-    "push %rax\n push %rdx\n call *g_frame_after_thunk(%rip)\n"
++asm(".text\n .globl _frame_ret\n" FR_TYPE_(frame_ret) "_frame_ret:\n"
++    "push %rax\n push %rdx\n call *_g_frame_after_thunk(%rip)\n"
+     "mov %rax, %r11\n pop %rdx\n pop %rax\n jmp *%r11\n");
+ 
+ int frame_rate_game_fps() { return g_game_fps; }
+@@ -1666,7 +1651,6 @@
+ void frame_rate_install(ElfImage* image) {
+     const std::uint64_t at = image->mem.slide + (kFrameManager - kPreferredGuestSlide);
+     g_slide = image->mem.slide;
+-    loading_bind(image->mem.slide);
+     // BBHOST_FRAME_SOURCE: 1 (default) SprjFlipper::Update is ours; 0 the
+     // guest's runs with the mode hook; 2 compare, the guest's runs and ours
+     // replays each frame beside it.
+--- a/src/engine/lua_events.cpp
++++ b/src/engine/lua_events.cpp
+@@ -29,7 +29,7 @@
+ 
+ void lua_events_install(ElfImage* image) {
+     g_slide = image->mem.slide;
+-    g_ok = image->sha256 == kEboot109Sha256;
++    g_ok = engine_eboot_supported(image->sha256);
+ }
+ 
+ bool lua_event_queue(const char* name) {
+--- a/src/engine/player_data.cpp
++++ b/src/engine/player_data.cpp
+@@ -66,7 +66,7 @@
+ 
+ void player_data_install(ElfImage* image) {
+     g_slide = image->mem.slide;
+-    g_ok = image->sha256 == kEboot109Sha256;
++    g_ok = engine_eboot_supported(image->sha256);
+ }
+ 
+ bool player_stat_get(const char* name, std::int64_t* value) {
+--- a/src/engine/world_chr.cpp
++++ b/src/engine/world_chr.cpp
+@@ -39,7 +39,7 @@
+ 
+ void world_chr_install(ElfImage* image) {
+     g_slide = image->mem.slide;
+-    g_ok = image->sha256 == kEboot109Sha256;
++    g_ok = engine_eboot_supported(image->sha256);
+     if (const char* e = std::getenv("BBHOST_TEST_WARP"); e && e[0] == '1') {
+         g_warp_enabled = true;
+         host_log("world: BBHOST_TEST_WARP=1 - plugins may move the player (a test switch)");
+--- a/src/host/plugins.cpp
++++ b/src/host/plugins.cpp
+@@ -64,7 +64,7 @@
+ ElfImage* g_image = nullptr;
+ bool g_early = true;  // register_hle allowed
+ bool g_in_image = false;  // the plugins' image phase: replace_text allowed
+-std::string g_config_value;
++thread_local std::string g_config_value;
+ 
+ struct Hook {
+     BbHookFn fn;
+@@ -128,7 +128,7 @@
+ }
+ 
+ const char* api_eboot_sha256() { return g_image ? g_image->sha256.c_str() : ""; }
+-int api_eboot_is_109() { return g_image && g_image->sha256 == kEboot109Sha256; }
++int api_eboot_is_109() { return g_image && engine_eboot_supported(g_image->sha256); }
+ 
+ // A Binary Ninja address inside the image, else (above the image's own
+ // range) a runtime address as given.
+@@ -857,7 +857,7 @@
+ #if defined(_WIN32)
+     return n.size() > 4 && n.compare(n.size() - 4, 4, ".dll") == 0;
+ #else
+-    return n.size() > 3 && n.compare(n.size() - 3, 3, ".so") == 0;
++    return n.size() > 6 && n.compare(n.size() - 6, 6, ".dylib") == 0;
+ #endif
+ }
+ 
+@@ -1032,7 +1032,6 @@
+         }
+         const std::string raw = toml_value(r.value);
+         config_value_set(r.name + "." + r.key, raw);
+-        config_set_values(config_user_file(), {{r.name, r.key, raw}});
+         for (const OptionCallback& c : options) {
+             if (c.name == r.name) c.fn(r.key.c_str(), r.value.c_str(), c.user);
+         }
+@@ -1132,11 +1131,12 @@
+ }
+ 
+ void plugins_set_option(const std::string& name, const std::string& key, const std::string& value) {
++    // Save before queuing the live callback: Apply & restart can replace the
++    // process before the next guest frame, and must not lose the edit.
++    const std::string raw = toml_value(value);
++    config_set_values(config_user_file(), {{name, key, raw}});
++    config_value_set(name + "." + key, raw);
+     if (g_plugins.empty()) {
+-        // The launcher: nothing runs yet, so the file and the loaded values are all.
+-        const std::string raw = toml_value(value);
+-        config_set_values(config_user_file(), {{name, key, raw}});
+-        config_value_set(name + "." + key, raw);
+         return;
+     }
+     std::lock_guard<std::mutex> lk(g_frame_mu);
+--- a/tools/pc_option_messages.tsv
++++ b/tools/pc_option_messages.tsv
+@@ -25,13 +25,13 @@
+ # A "\n" in the text is a line break.
+ #
+ # id	menu text (group 0xc8)	line help (group 0xc9)
+-110006	PC Settings	Options added by the PC port.
+-110007	PC Graphics	Graphics options added by the PC port.
+-110008	PC Controls	The mouse: camera, sensitivity and the pointer.
++110006	Mac Display	Display and frame pacing. Frame rate changes need a restart.
++110007	Mac Graphics	Game effects. Changes take effect after a restart.
++110008	Mac Mods	Plugins, sharpening and render resolution. Plugin and resolution changes need a restart.
+ 110009	Key Bindings	Keyboard and mouse bindings.
+ 110010	PC Effects	Post-processing: blur, bloom, vignette and lens effects.
+ 110011	PC Camera	The follow camera: field of view, distance, height, auto-rotation with the mouse, and its tuning above 30 fps.
+-110012	Steam Deck	Frame rate and model detail for the Steam Deck.
++110012	Mac Performance	Live light-grid batching and model detail.
+ 110013	PC Enhancements	Additions to the game: the mirror, rebirth, five players. Each needs a restart.
+ 116000	Vertical Sync	Wait for the display. Off can tear.
+ 116001	Fullscreen	Borderless, at the desktop resolution.
+@@ -40,7 +40,7 @@
+ 116004	Skip Company Logos	Skips the logos and the Exit Game warning at startup. Applies on the next run.
+ 116005	Frame Rate	30 is the game's own pace; 60, 90 and 120 run its logic at that rate; Uncapped steps it by the frame time (the display's refresh rate with V-Sync on). Applies on the next run.
+ 116007	FPS Counter	Frames per second actually presented, in the top right corner.
+-116020	PC Settings	
++116020	Mac Display	
+ 116030	30	
+ 116031	60	
+ 116032	90
+@@ -50,7 +50,7 @@
+ 117005	Motion Blur	The blur on fast camera and character movement.
+ 117001	Anti-Aliasing	The game's own anti-aliasing pass.
+ 117002	Depth of Field	Blurs distant scenery. Off keeps far views sharp.
+-117020	PC Graphics	
++117020	Mac Graphics	
+ 117003	Chromatic Aberration	The colour fringing at the edges of the frame.
+ 117006	Shadow Distance	How far sun and moon shadows reach. 0 is the game's own.
+ 117007	AO Strength	How dark corners and contact get. 5 is the game's own.
+@@ -86,7 +86,7 @@
+ 118001	Camera Sensitivity	How fast the mouse turns the camera.
+ 118002	Mouse X-Axis	The mouse's horizontal camera direction.
+ 118003	Mouse Y-Axis	The mouse's vertical camera direction.
+-118020	PC Controls
++118020	Mac Mods	
+ # Key Bindings. The seven action rows' captions and line help are replaced by
+ # the port at runtime (engine/option_menu.cpp); these are what they stand in
+ # for until then.
+@@ -100,7 +100,7 @@
+ 119007	Action	
+ 119020	Key Bindings
+ 122000	Quit Game	Close the game and return to the desktop.
+-123020	Steam Deck	
++123020	Mac Performance	
+ 123000	Frame Rate	30 fps: the screen's own 1280x800. 60 fps: 960x600 upscaled by FSR 1, Model Detail Low. Frame rate: on restart.
+ 123001	Model Detail	Normal is the game's own. Low and Lowest swap in simpler models sooner and run faster; Full never swaps.
+ 123030	30 fps	
+@@ -120,3 +120,42 @@
+ 14000334	Too many Blood Echoes are held to be reborn.\nSpend some, then return to the altar.	
+ 14000335	Accept Rebirth	
+ 14000336	Undo Rebirth	
++126000	V-Sync	Synchronize presentation with your display.
++126001	Fullscreen	Use the whole display.
++126002	FPS counter	Show game frames per second in the window title.
++126003	MetalFX Spatial	Upscale the whole frame using MetalFX Spatial. Supported Macs only.
++126004	Apply and restart	Ask to restart the game. Your last game save will reload.
++126005	Frame rate	Restart to apply timing corrections for this rate. Rates above 120 are experimental.
++126064	Sharpening	Additional sharpening from 0 to 10.
++126065	Render resolution	Restart to resize scene and game UI buffers.
++126010	Anti-aliasing	Restart to apply this effect setting.
++126011	Motion blur	Restart to apply this effect setting.
++126012	Depth of field	Restart to apply this effect setting.
++126013	Chromatic aberration	Restart to apply this effect setting.
++126014	Ambient occlusion	Restart to apply this effect setting.
++126015	Dynamic light shadows	Restart to apply this effect setting.
++126030	30 FPS	
++126031	60 FPS	
++126032	90 FPS	
++126033	120 FPS	
++126034	144 FPS	
++126035	165 FPS	
++126036	240 FPS	
++126037	Uncapped	
++126040	960x540	
++126041	1280x720	
++126042	1440x810	
++126043	1600x900	
++126044	1920x1080	
++126045	2560x1440	
++126046	3840x2160	
++126060	Randomizer	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
++126061	Boss Rush	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
++126062	Gameplay Mutators	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
++126063	Developer Debug Menu	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
++126070	Optimize light grid	Experimental batching of local lights. Original occlusion and face culling stay in place.
++126071	Highest	
++126072	Original	
++126073	Lower	
++126074	Lowest	
++126075	Model detail	Change the engine model LOD bias live.

@@ -1,0 +1,161 @@
+# The PC port's own menu strings, and the one place they are written.
+#
+# Bloodborne's option screens own one thousand-id block each: 110000 System,
+# 111000 Environment, 112000 Brightness, 113000 Controls, 114000 Network,
+# 115000 Language. Inside a block, N is a row and N+20 is the screen title -
+# 110000..110005 are the System list's rows and 110020 is the word "System".
+# The port takes the next free blocks - 116000 PC Settings, 117000 PC
+# Graphics, 118000 PC Controls, 119000 Key Bindings, 120000 PC Effects, 121000
+# PC Camera, 122000 the title menu's Quit Game, 123000 Steam Deck (shown on a
+# Deck only), 124000 PC Enhancements - and 110006..110013 for the System rows
+# that open them. All are unused in the shipped menu.msgbnd. (Motion blur,
+# depth of field and chromatic aberration moved to PC Effects with their
+# 117000 ids.)
+#
+# bbhost builds this file in and writes these into menu.msgbnd.dcx at start
+# (src/engine/menu_assets.cpp); the ids
+# are what src/engine/option_menu.cpp asks the message repository for, so the
+# text lives here and nowhere else.
+#
+# Ids 920000..929999 are dialog text instead (group 78, the generic yes/no
+# dialog's - engine/live_resolution.cpp opens one); the help column is unused.
+# Ids 14000332..14000399 are event text (group 30): the talk menus' entries and
+# the messages their scripts show - the Altar of Despair's rebirth
+# (engine/rebirth_script.h); the help column is unused.
+# A "\n" in the text is a line break.
+#
+# id	menu text (group 0xc8)	line help (group 0xc9)
+110006	Mac Display	Display and frame pacing. Frame rate changes need a restart.
+110007	Mac Graphics	Game effects. Changes take effect after a restart.
+110008	Mac Mods	Plugins, sharpening and render resolution. Plugin and resolution changes need a restart.
+110009	Key Bindings	Keyboard and mouse bindings.
+110010	PC Effects	Post-processing: blur, bloom, vignette and lens effects.
+110011	PC Camera	The follow camera: field of view, distance, height, auto-rotation with the mouse, and its tuning above 30 fps.
+110012	Mac Performance	Live light-grid batching and model detail.
+110013	PC Enhancements	Additions to the game: the mirror, rebirth, five players. Each needs a restart.
+116000	Vertical Sync	Wait for the display. Off can tear.
+116001	Fullscreen	Borderless, at the desktop resolution.
+116002	Mouse in Menus	Move and click to select.
+116003	Draw the Pointer	Show the mouse pointer.
+116004	Skip Company Logos	Skips the logos and the Exit Game warning at startup. Applies on the next run.
+116005	Frame Rate	30 is the game's own pace; 60, 90 and 120 run its logic at that rate; Uncapped steps it by the frame time (the display's refresh rate with V-Sync on). Applies on the next run.
+116007	FPS Counter	Frames per second actually presented, in the top right corner.
+116020	Mac Display	
+116030	30	
+116031	60	
+116032	90
+116033	120
+116035	Uncapped
+117000	Ambient Occlusion	Screen-space ambient occlusion.
+117005	Motion Blur	The blur on fast camera and character movement.
+117001	Anti-Aliasing	The game's own anti-aliasing pass.
+117002	Depth of Field	Blurs distant scenery. Off keeps far views sharp.
+117020	Mac Graphics	
+117003	Chromatic Aberration	The colour fringing at the edges of the frame.
+117006	Shadow Distance	How far sun and moon shadows reach. 0 is the game's own.
+117007	AO Strength	How dark corners and contact get. 5 is the game's own.
+117008	Fog	How thick the haze over distant streets is. 10 is the game's own.
+120020	PC Effects	
+120000	Bloom	The glow around bright light. 10 is the game's own.
+120001	Vignette	The darkened frame edges some areas use.
+120002	Saturation	Colour. 5 is the game's own; 0 is black and white.
+121020	PC Camera	
+121000	Camera Distance	How far behind the character the camera sits. 5 is the game's own.
+121001	Camera Height	How high above the character the camera looks. 5 is the game's own.
+121002	Mouse Auto-Rotation	Off: while the mouse turns the camera, it stays where you put it instead of swinging behind you as you move. A controller always has the game's own camera.
+121003	Camera Tuning	Requires a restart. Above 30 fps: FPS++ is Kyo's retuned camera; Original is the game's own, as at 30.
+121030	FPS++ (Kyo)	
+121031	Original	
+117004	Resolution	What the game renders at (it shipped at 1920x1080). Wide and 16:10 screens are filled, the HUD kept 16:9 in the middle. Changes at once and asks to be kept - the largest may wait for the next start.
+117010	1280x720
+117011	1600x900
+117012	1920x1080
+117013	2560x1440
+117014	3200x1800
+117015	3840x2160
+117030	2560x1080 (21:9)
+117031	3440x1440 (21:9)
+117032	5120x2160 (21:9)
+117033	3840x1080 (32:9)
+117034	5120x1440 (32:9)
+117035	1280x800 (16:10)
+117036	960x600 (16:10, upscaled)
+117037	1024x640 (16:10, upscaled)
+118000	Mouse Camera	The mouse turns the camera outside menus.
+118004	Field of View	How wide the camera sees. 0 is the game's own; each step widens it 5%.
+118001	Camera Sensitivity	How fast the mouse turns the camera.
+118002	Mouse X-Axis	The mouse's horizontal camera direction.
+118003	Mouse Y-Axis	The mouse's vertical camera direction.
+118020	Mac Mods	
+# Key Bindings. The seven action rows' captions and line help are replaced by
+# the port at runtime (engine/option_menu.cpp); these are what they stand in
+# for until then.
+119000	Page	Left and right change the group of actions shown.
+119001	Action	
+119002	Action	
+119003	Action	
+119004	Action	
+119005	Action	
+119006	Action	
+119007	Action	
+119020	Key Bindings
+122000	Quit Game	Close the game and return to the desktop.
+123020	Mac Performance	
+123000	Frame Rate	30 fps: the screen's own 1280x800. 60 fps: 960x600 upscaled by FSR 1, Model Detail Low. Frame rate: on restart.
+123001	Model Detail	Normal is the game's own. Low and Lowest swap in simpler models sooner and run faster; Full never swaps.
+123030	30 fps	
+123031	60 fps	
+123040	Full	
+123041	Normal	
+123042	Low	
+123043	Lowest	
+124020	PC Enhancements	
+124001	Hunter's Dream Mirror	Requires a restart. The Dream's mirror opens the appearance editor (the unused "Put on Disguise").
+124002	Rebirth at the Altar	Requires a restart. With the Yharnam Stone, the Altar of Despair resets level and attributes.
+124003	Five Players	Requires a restart. Two invaders in Mensis, Mergo's Loft, the Frontier and the DLC; all players need it.
+920000	Keep this resolution?\nIt goes back in 10 seconds unless you choose YES.	
+920001	Quit the game and return to the desktop?	
+14000332	Rebirth in the Nightmare	
+14000333	The altar is silent.\nIt awaits one who bears a sacred heirloom,\na consciousness that is only asleep.	
+14000334	Too many Blood Echoes are held to be reborn.\nSpend some, then return to the altar.	
+14000335	Accept Rebirth	
+14000336	Undo Rebirth	
+126000	V-Sync	Synchronize presentation with your display.
+126001	Fullscreen	Use the whole display.
+126002	FPS counter	Show game frames per second in the window title.
+126003	MetalFX Spatial	Upscale the whole frame using MetalFX Spatial. Supported Macs only.
+126004	Apply and restart	Ask to restart the game. Your last game save will reload.
+126005	Frame rate	Restart to apply timing corrections for this rate. Rates above 120 are experimental.
+126064	Sharpening	Additional sharpening from 0 to 10.
+126065	Render resolution	Restart to resize scene and game UI buffers.
+126010	Anti-aliasing	Restart to apply this effect setting.
+126011	Motion blur	Restart to apply this effect setting.
+126012	Depth of field	Restart to apply this effect setting.
+126013	Chromatic aberration	Restart to apply this effect setting.
+126014	Ambient occlusion	Restart to apply this effect setting.
+126015	Dynamic light shadows	Restart to apply this effect setting.
+126030	30 FPS	
+126031	60 FPS	
+126032	90 FPS	
+126033	120 FPS	
+126034	144 FPS	
+126035	165 FPS	
+126036	240 FPS	
+126037	Uncapped	
+126040	960x540	
+126041	1280x720	
+126042	1440x810	
+126043	1600x900	
+126044	1920x1080	
+126045	2560x1440	
+126046	3840x2160	
+126060	Randomizer	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
+126061	Boss Rush	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
+126062	Gameplay Mutators	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
+126063	Developer Debug Menu	Restart to enable. Configure this plugin in the Mac settings panel. Gameplay plugins use a separate online ruleset.
+126070	Optimize light grid	Experimental batching of local lights. Original occlusion and face culling stay in place.
+126071	Highest	
+126072	Original	
+126073	Lower	
+126074	Lowest	
+126075	Model detail	Change the engine model LOD bias live.

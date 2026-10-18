@@ -14,7 +14,9 @@
 #include <sys/time.h>
 #include <x86intrin.h>
 #ifndef _WIN32
+#ifndef __APPLE__
 #include <sys/random.h>
+#endif
 #include <sys/resource.h>
 #endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
@@ -48,7 +50,13 @@ static int host_clock(uint32_t id,clockid_t *out) {
     switch (id) {
     case 0: case 9: case 10: *out=CLOCK_REALTIME; return 1;            /* REALTIME(_PRECISE/_FAST) */
     case 4: case 11: case 12: case 5: case 7: case 8: *out=CLOCK_MONOTONIC; return 1; /* MONOTONIC/UPTIME */
-    case 13: *out=CLOCK_REALTIME_COARSE; return 1;                    /* SECOND */
+    case 13:
+#ifdef __APPLE__
+        *out=CLOCK_REALTIME;
+#else
+        *out=CLOCK_REALTIME_COARSE;
+#endif
+        return 1;                    /* SECOND */
     case 14: *out=CLOCK_THREAD_CPUTIME_ID; return 1;
     case 2: case 15: *out=CLOCK_PROCESS_CPUTIME_ID; return 1;         /* PROF/PROCTIME */
     case 16: case 17: case 18: case 19: *out=CLOCK_MONOTONIC; return 1; /* PS4 network clocks */
@@ -181,12 +189,16 @@ static ABI uintptr_t guest_signal(int sig,uintptr_t handler) {
     return old;
 }
 static ABI int32_t guest_sigprocmask(int how,const GuestSigset *set,GuestSigset *old) {
-    if (old) *old=signal_mask;
+    uint32_t *bits=signal_mask.bits;
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) bits=runtime_thread_checkpoint_local()->signal_mask;
+#endif
+    if (old) memcpy(old->bits,bits,sizeof(old->bits));
     if (!set) return 0;
     for (int i=0;i<4;++i) {
-        if (how==1) signal_mask.bits[i]|=set->bits[i];        /* SIG_BLOCK */
-        else if (how==2) signal_mask.bits[i]&=~set->bits[i];  /* SIG_UNBLOCK */
-        else if (how==3) signal_mask.bits[i]=set->bits[i];    /* SIG_SETMASK */
+        if (how==1) bits[i]|=set->bits[i];        /* SIG_BLOCK */
+        else if (how==2) bits[i]&=~set->bits[i];  /* SIG_UNBLOCK */
+        else if (how==3) bits[i]=set->bits[i];    /* SIG_SETMASK */
         else return fail_posix(EINVAL);
     }
     return 0;
@@ -204,7 +216,12 @@ static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     out->stime=(GuestTimeval){kernel/1000000,kernel%1000000};
 #else
     struct rusage r;
+#ifdef __APPLE__
+    if (who==0) getrusage(RUSAGE_SELF,&r);
+    else if (bb_macos_thread_rusage(&r)) return fail_posix(EIO);
+#else
     getrusage(who==0 ? RUSAGE_SELF : RUSAGE_THREAD,&r);
+#endif
     out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
     out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
 #endif
@@ -217,6 +234,8 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
         if (!old || !oldlen) return fail_posix(EINVAL);
 #ifdef _WIN32
         if (compat_random(old,(size_t)*oldlen)) return fail_posix(EIO);
+#elif defined(__APPLE__)
+        arc4random_buf(old,(size_t)*oldlen);
 #else
         if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);
 #endif
@@ -254,6 +273,18 @@ typedef void (ABI *KeyDestructor)(void *);
 static struct { int used; KeyDestructor destructor; } keys[KEYS];
 static pthread_mutex_t key_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local void *key_values[KEYS];
+static void *key_value(uint32_t key) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return (void *)(uintptr_t)runtime_thread_checkpoint_local()->keys[key];
+#endif
+    return key_values[key];
+}
+static void key_store(uint32_t key,void *value) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) {runtime_thread_checkpoint_local()->keys[key]=(uintptr_t)value;return;}
+#endif
+    key_values[key]=value;
+}
 static ABI int32_t key_create(uint32_t *key,KeyDestructor destructor) {
     if (!key) return ERR(22);
     pthread_mutex_lock(&key_lock);
@@ -275,16 +306,16 @@ static ABI int32_t key_delete(uint32_t key) {
 }
 static ABI int32_t key_set(uint32_t key,void *value) {
     if (!key || key>=KEYS || !keys[key].used) return ERR(22);
-    key_values[key]=value; return 0;
+    key_store(key,value); return 0;
 }
-static ABI void *key_get(uint32_t key) { return key && key<KEYS ? key_values[key] : NULL; }
+static ABI void *key_get(uint32_t key) { return key && key<KEYS ? key_value(key) : NULL; }
 void runtime_thread_keys_cleanup(void) {
     for (int round=0;round<4;++round) {
         int any=0;
         for (uint32_t i=1;i<KEYS;++i) {
-            void *value=key_values[i];
+            void *value=key_value(i);
             if (!value || !keys[i].used || !keys[i].destructor) continue;
-            key_values[i]=NULL; any=1;
+            key_store(i,NULL); any=1;
             keys[i].destructor(value);
         }
         if (!any) break;

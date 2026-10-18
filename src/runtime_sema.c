@@ -36,7 +36,7 @@ static void host_check(int e) {
 }
 /* Waits use this clock for their deadlines. winpthreads condition variables accept only
  * CLOCK_REALTIME (pthread_condattr_setclock(CLOCK_MONOTONIC) fails with EINVAL). */
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
 #define WAIT_CLOCK CLOCK_REALTIME
 #else
 #define WAIT_CLOCK CLOCK_MONOTONIC
@@ -50,6 +50,9 @@ static ABI int32_t sem_create(uint32_t *out,const char *name,uint32_t attr,
                               int32_t initial,int32_t maximum,const void *options) {
     if (!out || !name || attr>2 || initial<0 || maximum<=0 || initial>maximum) return ERR(22);
     if (options) { fputs("STOP: semaphore options are not implemented\n",stderr); exit(21); }
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_sema_create(out,attr,initial,maximum);
+#endif
     Sema *s=calloc(1,sizeof(*s));
     if (!s) return ERR(12);
     pthread_mutex_lock(&lock);
@@ -61,6 +64,9 @@ static ABI int32_t sem_create(uint32_t *out,const char *name,uint32_t attr,
     return 0;
 }
 static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return block ? bb_checkpoint_sema_wait(id,need,timeout) : bb_checkpoint_sema_poll(id,need);
+#endif
     pthread_mutex_lock(&lock);
     Sema *s=find(id);
     int32_t result=0;
@@ -76,7 +82,9 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         Waiter w={.need=need};
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
+#ifndef __APPLE__
         host_check(pthread_condattr_setclock(&attr,WAIT_CLOCK));
+#endif
         host_check(pthread_cond_init(&w.event,&attr));
         host_check(pthread_condattr_destroy(&attr));
         Waiter **tail=&s->first;
@@ -107,6 +115,9 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
 static ABI int32_t sem_wait(uint32_t id,int32_t need,uint32_t *timeout) { return wait_count(id,need,timeout,1); }
 static ABI int32_t sem_poll(uint32_t id,int32_t need) { return wait_count(id,need,NULL,0); }
 static ABI int32_t sem_signal(uint32_t id,int32_t count) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_sema_signal(id,count);
+#endif
     pthread_mutex_lock(&lock);
     Sema *s=find(id);
     int32_t result=0;
@@ -135,6 +146,9 @@ static int32_t wake_all(Sema *s,int32_t result) {
     return count;
 }
 static ABI int32_t sem_cancel(uint32_t id,int32_t count,int32_t *waiters) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_sema_cancel(id,count,waiters);
+#endif
     pthread_mutex_lock(&lock);
     Sema *s=find(id);
     int32_t result=0;
@@ -149,6 +163,9 @@ static ABI int32_t sem_cancel(uint32_t id,int32_t count,int32_t *waiters) {
     return result;
 }
 static ABI int32_t sem_delete(uint32_t id) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_sema_delete(id);
+#endif
     pthread_mutex_lock(&lock);
     Sema **p=&registry;
     while (*p && (*p)->id!=id) p=&(*p)->next;
@@ -161,6 +178,9 @@ static ABI int32_t sem_delete(uint32_t id) {
 }
 /* Read-only test/diagnostic snapshot, not exposed to guest code. */
 unsigned runtime_sema_waiters(uint32_t id) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_sema_waiters(id);
+#endif
     pthread_mutex_lock(&lock);
     Sema *s=find(id); unsigned n=0;
     if (s) for (Waiter *w=s->first;w;w=w->next) ++n;

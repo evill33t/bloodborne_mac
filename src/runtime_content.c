@@ -58,7 +58,9 @@ static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
     /* Only the reserved-zero init profile is implemented. */
     for (unsigned i=0;i<32;++i) if (init[i]) return PARAMETER;
     memset(boot,0,40); initialized=1;
-    puts("Runtime: AppContent initialized; offline base-game profile, no mounted add-ons");
+    const char *dlc=getenv("BB_DLC_DIR");
+    printf("Runtime: AppContent initialized; offline profile; DLC directory: %s\n",
+           dlc && *dlc ? dlc : "none configured");
     return 0;
 }
 static void require_initialized(void) {
@@ -125,7 +127,11 @@ static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint
     }
     if (hits) *hits=count;
     static uint32_t reported=0;
-    if (found!=reported) printf("Runtime: AppContent add-ons reported installed: %u\n",(unsigned)(reported=found));
+    if (found!=reported) {
+        printf("Runtime: AppContent add-ons reported installed: %u\n",(unsigned)(reported=found));
+        for (uint32_t i=0;i<found;++i) printf("Runtime: installed add-on %s\n",labels[i]);
+        fflush(stdout);
+    }
     ++lists; return 0;
 }
 uintptr_t runtime_content_resolve(const char *name) {

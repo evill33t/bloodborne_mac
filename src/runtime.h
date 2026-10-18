@@ -2,6 +2,15 @@
 #define BB_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
+#ifdef BB_CHECKPOINT_RUNTIME
+#include "checkpoint/runtime.h"
+#include "checkpoint/thread.h"
+#include "checkpoint/process.h"
+uint64_t runtime_thread_run_guest(void *entry,void *arg0,void *arg1,size_t stack_size);
+#endif
+#ifdef __APPLE__
+#include "compat_macos.h"
+#endif
 #ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in bb_longjmp
@@ -20,7 +29,13 @@ void runtime_restart(void);
 void runtime_quit_on_open(const char *guest);
 void runtime_quit_on_save_done(void);
 int runtime_savedata_mounted(void);
+/* ARM64 builds currently compile host components only. Executing the original
+ * x86-64 image still requires an x86-64 process (enforced by probe.c). */
+#if defined(__x86_64__) || defined(_M_X64)
 #define ABI __attribute__((sysv_abi))
+#else
+#define ABI
+#endif
 typedef void (ABI *GuestCallback)(void);
 void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
@@ -75,7 +90,10 @@ void runtime_thread_keys_cleanup(void);
 /* Guest-visible errno values are FreeBSD's. */
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
-/* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
+/* Restore-owned low allocations only. Fails if any mapping already occupies
+ * the range; never replaces live host or guest memory. */
+void *runtime_low_map_at(uintptr_t address,size_t size,int prot);
+/* Windows/macOS: reserves the guest address range before fixed mappings replace it. */
 void runtime_memory_reserve(void);
 uintptr_t runtime_ajm_resolve(const char *name);
 void runtime_ajm_report(void);

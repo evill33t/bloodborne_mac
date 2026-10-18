@@ -49,6 +49,9 @@ static void libc_support(void) {
     assert(tls(last)==p+31 && tls(index)==p);
     p[0]=23;
     main_identity=GET(ThreadSelf,"aI+OeCz8xrQ#p#J")();
+#ifdef __APPLE__
+    assert((uintptr_t)main_identity<(UINT64_C(1)<<40));
+#endif
     pthread_t worker;
     assert(pthread_create(&worker,NULL,tls_worker,NULL)==0);
     assert(pthread_join(worker,NULL)==0);
@@ -111,9 +114,10 @@ static void guards(void) {
     uint64_t state=0;
     Acquire acquire=GET(Acquire,"3GPpjQdAMTw#q#q");
     Guard release=GET(Guard,"9rAeANT2tyE#q#q"), abort_guard=GET(Guard,"2emaaluWzUw#q#q");
-    assert(acquire(&state)==1 && state==(UINT64_C(1)<<32));
+    assert(acquire(&state)==1 && (state>>32)!=0 && !(uint32_t)state);
+    const uint64_t owner=state; /* opaque, stable per-thread ownership tag */
     abort_guard(&state); assert(state==0);
-    assert(acquire(&state)==1);
+    assert(acquire(&state)==1 && state==owner);
     release(&state); assert(state==1);
     assert(acquire(&state)==0);
 }

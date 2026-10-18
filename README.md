@@ -1,3 +1,26 @@
+# Bloodborne: macOS and direct Metal port (in development)
+
+This fork targets Apple Silicon with a **direct Metal renderer**. The experimental
+macOS runtime runs the original x86-64 game under Rosetta and has reached the
+starting clinic with a controllable hunter, audio and controller input.
+**This is an experimental build with remaining rendering limitations.**
+`bash build.sh --test` builds both the native Metal tools and the game runtime; see
+[macOS build instructions and port status](packaging/macos/README.md) for tested
+functionality, launch commands, and current limitations.
+
+The Mac runtime also includes bbhost engine timing through 240 FPS/uncapped,
+native System-menu settings alongside the Mac menu, replacement/param/patch mods,
+four bundled plugins and The Hunter's Dream client integration. See
+[bbhost integration, controls and validation limits](docs/BBHOST_MAC_INTEGRATION.md).
+Live gameplay and multiplayer validation of these additions is still pending.
+
+A native [Achievements window](packaging/macos/README.md#achievements) tracks all
+40 trophies and shows PS4-style unlock banners in the game, without PlayStation
+branding. Open it from the Mac menu, Settings, or F2.
+
+The upstream Windows project's documentation follows. Its playable builds and
+feature list describe Windows, not the current macOS port.
+
 # Bloodborne for Windows
 <a href="https://trendshift.io/repositories/286547?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-286547" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/286547/daily?language=C%2B%2B" alt="Supermedo%2Fbloodborne_pc | Trendshift" width="250" height="55"/></a>
 
@@ -161,3 +184,5 @@ artwork.
 
 GNU GPL v2 or later ([LICENSE](LICENSE)). Third-party components keep their own licenses
 (see `licenses\` in the download).
+The combined macOS runtime incorporating bbhost is **GPL v3 or later**; see its
+[source and dependency notices](gpu/metal/vendor/bbhost/UPSTREAM.md).

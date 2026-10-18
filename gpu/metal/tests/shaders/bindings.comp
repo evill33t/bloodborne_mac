@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#version 450
+layout(local_size_x=1) in;
+layout(set=0,binding=9) uniform sampler2D images[3];
+layout(set=1,binding=9,std140) uniform Parameters { uint value; } params;
+layout(set=2,binding=9,std430) writeonly buffer Output { uint value; } output_data;
+layout(push_constant) uniform Push { uint index; } push;
+void main() {
+    output_data.value = params.value + uint(texelFetch(images[push.index], ivec2(0), 0).r);
+}

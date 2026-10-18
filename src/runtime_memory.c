@@ -8,6 +8,8 @@
  * encode 40-bit addresses, so host-default 0x7f... addresses would not fit. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_gpu_memory.h"
+#include "checkpoint/memory.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,11 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/stat.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
  * patches above 1080p need about 4 GiB more; run.sh sets it). */
@@ -38,7 +45,13 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+#ifdef __APPLE__
+/* Darwin reserves [64,448) GiB even under Rosetta. Keep guest mappings above
+ * that aperture and the host allocator, while retaining 40-bit GPU pointers. */
+#define USER_MIN UINT64_C(0x8000000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
+#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
@@ -269,26 +282,94 @@ static int pool(void) {
 }
 #else
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
+#ifdef __APPLE__
+/* Darwin has no memfd_create. An immediately unlinked, sparse temporary file
+ * provides the same aliasing semantics; only committed guest pages consume
+ * storage. Never create anything in the game or save directories. */
+static int darwin_pool_fd(void) {
+    const char *directory=getenv("TMPDIR");
+    if (!directory || !*directory) directory="/tmp";
+    char path[PATH_MAX];
+    if (snprintf(path,sizeof(path),"%s/bbport-memory-XXXXXX",directory)>=(int)sizeof(path)) {
+        errno=ENAMETOOLONG; return -1;
+    }
+    int fd=mkstemp(path);
+    if (fd<0) return -1;
+    int error=0;
+    if (unlink(path)) error=errno;
+    if (!error && fcntl(fd,F_SETFD,FD_CLOEXEC)<0) error=errno;
+    if (error) { close(fd); errno=error; return -1; }
+    return fd;
+}
+static pthread_once_t darwin_reserve_once=PTHREAD_ONCE_INIT;
+static void darwin_reserve_range(void) {
+    /* A hint never replaces an existing host mapping. MAP_FIXED is used only
+     * inside this owned reservation when guest mappings are installed. */
+    const uint64_t size=USER_MAX-USER_MIN;
+    void *p=mmap((void *)USER_MIN,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0);
+    if (p!=(void *)USER_MIN) {
+        if (p!=MAP_FAILED) munmap(p,size);
+        fprintf(stderr,"STOP: the PS4 virtual address range is unavailable on this macOS process (mapping=%p, errno=%d)\n",p,errno);
+        exit(21);
+    }
+}
+void runtime_memory_reserve(void) {
+    pthread_once(&darwin_reserve_once,darwin_reserve_range);
+}
+#endif
 static int pool(void) {
     if (pool_fd>=0) return 0;
+#ifdef __APPLE__
+    runtime_memory_reserve();
+    pool_fd=darwin_pool_fd();
+#else
     pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
-    if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
+#endif
+    if (pool_fd<0) return -1;
+    if (ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) {
+        close(pool_fd); pool_fd=-1; return -1;
+    }
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
-    if (view==MAP_FAILED) return -1;
+    if (view==MAP_FAILED) { close(pool_fd); pool_fd=-1; return -1; }
     backing_base=view;
     return 0;
 }
+#ifndef __APPLE__
 void runtime_memory_reserve(void) {}
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+#ifdef __APPLE__
+    runtime_memory_reserve();
+    if (address<USER_MIN || address>=USER_MAX || size>USER_MAX-address) return -1;
+#endif
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
-static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
+static int host_unmap(uintptr_t address, uint64_t size) {
+#ifdef __APPLE__
+    if (address<USER_MIN || address>=USER_MAX || size>USER_MAX-address) return -1;
+    /* Keep ownership after unmapping so a host allocation cannot enter the
+     * address range before the next fixed guest mapping. */
+    return mmap((void *)address,size,PROT_NONE,
+        MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED ? -1 : 0;
+#else
+    return munmap((void *)address,size);
+#endif
+}
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
+#ifdef __APPLE__
+    struct fpunchhole hole={.fp_offset=(off_t)phys,.fp_length=(off_t)size};
+    if (fcntl(pool_fd,F_PUNCHHOLE,&hole)) {
+        /* A non-APFS temporary volume may not implement hole punching. Reuse
+         * must still return zeroed pages, including through every alias. */
+        memset(backing_base+phys,0,size);
+    }
+#else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
+#endif
 }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -350,7 +431,10 @@ static int split_at(uintptr_t a) {
     if (i==vma_count || vmas[i].start>=a) return 0;
     Vma right=vmas[i];
     right.start=a;
-    if (right.kind==KIND_DIRECT) right.phys+=a-vmas[i].start;
+    /* Flexible mappings also occupy distinct physical pages in the backing
+     * pool. Losing this offset makes a later partial unmap discard/reuse the
+     * first page of the original allocation while it is still live. */
+    if (right.kind!=KIND_RESERVED) right.phys+=a-vmas[i].start;
     vmas[i].end=a;
     return vma_insert(i+1,right);
 }
@@ -560,6 +644,49 @@ static ABI int32_t map_flexible_named(void **inout, uint64_t size, int prot, int
     (void)name; return map_flexible(inout,size,prot,flags);
 }
 static ABI int32_t release_flexible(void *address, uint64_t size) { return direct_unmap(address,size); }
+/* FreeBSD/PS4 flags are guest constants, not Darwin or Linux MAP_* values.
+ * libc uses anonymous mmap for heap growth. Keep these allocations in the
+ * tracked guest flexible pool so munmap, protection and GPU queries agree. */
+static int32_t map_anonymous(void **out, uint64_t size, int prot, int flags,
+                             int fd, int64_t offset) {
+    const unsigned shared=1, private_map=2, anonymous=0x1000, no_core=0x20000;
+    const unsigned allowed=shared|private_map|anonymous|no_core|MAP_FIXED_FLAG|MAP_NO_OVERWRITE;
+    const uintptr_t address=out ? (uintptr_t)*out : 0;
+    if (!out || !size || size>USER_MAX-USER_MIN || (prot&~7) ||
+        ((unsigned)flags&~allowed) ||
+        ((flags&(shared|private_map))!=shared && (flags&(shared|private_map))!=private_map))
+        return INVALID;
+    if (!(flags&anonymous)) return (int32_t)UINT32_C(0x80020013); /* ENODEV: file mappings */
+    if (fd!=-1 || offset) return INVALID;
+    size=align_up(size,PAGE);
+    if ((flags&MAP_FIXED_FLAG) &&
+        (address<USER_MIN || address%PAGE || address>=USER_MAX || size>USER_MAX-address))
+        return INVALID;
+    return map_flexible(out,size,prot,flags&(MAP_FIXED_FLAG|MAP_NO_OVERWRITE));
+}
+static ABI int32_t kernel_mmap(void *address, uint64_t size, int prot, int flags,
+                              int fd, int64_t offset, void **out) {
+    if (!out) return INVALID;
+    void *mapped=address;
+    int32_t result=map_anonymous(&mapped,size,prot,flags,fd,offset);
+    if (!result) *out=mapped;
+    return result;
+}
+static ABI void *posix_mmap(void *address, uint64_t size, int prot, int flags,
+                           int fd, int64_t offset) {
+    int32_t result=map_anonymous(&address,size,prot,flags,fd,offset);
+    if (!result) return address;
+    *runtime_errno()=(uint32_t)result&0xffff;
+    return (void *)(uintptr_t)UINTPTR_MAX;
+}
+static ABI int32_t posix_munmap(void *address, uint64_t size) {
+    const uintptr_t start=(uintptr_t)address;
+    int32_t result=start<USER_MIN || start>=USER_MAX || !size || size>USER_MAX-start
+        ? INVALID : direct_unmap(address,size);
+    if (!result) return 0;
+    *runtime_errno()=(uint32_t)result&0xffff;
+    return -1;
+}
 static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
@@ -662,7 +789,8 @@ static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
 static const RuntimeExport exports[]={
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
-    {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},
+    {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",posix_munmap},
+    {"sceKernelMmap",kernel_mmap}, {"mmap",posix_mmap},
     {"sceKernelMapFlexibleMemory",map_flexible}, {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
     {"sceKernelReleaseFlexibleMemory",release_flexible}, {"sceKernelReserveVirtualRange",reserve_range},
     {"sceKernelMprotect",kernel_mprotect}, {"sceKernelQueryMemoryProtection",query_protection},
@@ -676,13 +804,198 @@ uintptr_t runtime_memory_resolve(const char *name) {
     if (!strcmp(name, "L-Q3LEjIbgA#p#J")) return (uintptr_t)direct_map;
     if (!strcmp(name, "MBuItvba6z8#p#J")) return (uintptr_t)direct_release;
     if (!strcmp(name, "cQke9UuBQOk#p#J")) return (uintptr_t)direct_unmap;
+    if (!strcmp(name, "BPE9s9vQQXo#p#J")) return (uintptr_t)posix_mmap;
     return RUNTIME_LOOKUP(exports,name);
 }
+uint64_t runtime_gpu_memory_size(void) { return POOL_SIZE; }
+void *runtime_gpu_memory_backing(void) {
+    write_lock();
+    int failed=pool();
+    void *view=failed ? NULL : backing_base;
+    write_unlock();
+    return view;
+}
+uint64_t runtime_gpu_memory_generation(void) {
+    return __atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
+}
+size_t runtime_gpu_memory_mappings(BbDirectMapping *out,size_t capacity) {
+    read_lock();
+    size_t count=0;
+    for (size_t i=0;i<vma_count;++i) if (vmas[i].kind==KIND_DIRECT) {
+        if (out && count<capacity) out[count]=(BbDirectMapping){vmas[i].start,vmas[i].end-vmas[i].start,vmas[i].phys};
+        ++count;
+    }
+    read_unlock();
+    return count;
+}
+
+_Static_assert(sizeof(BbCheckpointMemoryLayout)==32,"memory checkpoint header size");
+_Static_assert(sizeof(BbCheckpointMemoryBlock)==32,"memory checkpoint block size");
+_Static_assert(sizeof(BbCheckpointMemoryVma)==40,"memory checkpoint VMA size");
+int runtime_memory_checkpoint_export(BbCheckpointMemoryLayout *layout,
+    BbCheckpointMemoryBlock *out_blocks,size_t blocks_capacity,
+    BbCheckpointMemoryVma *out_vmas,size_t vmas_capacity) {
+    if (!layout) return EINVAL;
+    read_lock();
+    size_t block_count=0;
+    for (unsigned i=0;i<LIMIT;++i) if (blocks[i].used) ++block_count;
+    if (vma_count>65536) { read_unlock(); return EOVERFLOW; }
+    *layout=(BbCheckpointMemoryLayout){1,PAGE,POOL_SIZE,(uint32_t)block_count,(uint32_t)vma_count,0};
+    if ((!out_blocks && blocks_capacity) || (!out_vmas && vmas_capacity) ||
+        (out_blocks && blocks_capacity<block_count) || (out_vmas && vmas_capacity<vma_count)) {
+        read_unlock(); return EOVERFLOW;
+    }
+    size_t at=0;
+    if (out_blocks) for (unsigned i=0;i<LIMIT;++i) if (blocks[i].used) {
+        const Block *b=&blocks[i];
+        out_blocks[at++]=(BbCheckpointMemoryBlock){b->start,b->size,i,b->type,0};
+    }
+    if (out_vmas) for (size_t i=0;i<vma_count;++i) {
+        const Vma *v=&vmas[i];
+        out_vmas[i]=(BbCheckpointMemoryVma){v->start,v->end-v->start,v->phys,(uint32_t)v->kind,v->prot,v->type,0};
+    }
+    read_unlock(); return 0;
+}
+static int checkpoint_block_range(const BbCheckpointMemoryLayout *layout,
+    const BbCheckpointMemoryBlock *saved,uint64_t physical,uint64_t size) {
+    const uint64_t end=physical+size;
+    for (uint64_t at=physical;at<end;) {
+        uint64_t next=at;
+        for (unsigned i=0;i<layout->block_count;++i)
+            if (saved[i].physical<=at && at-saved[i].physical<saved[i].size) {
+                next=saved[i].physical+saved[i].size;break;
+            }
+        if (next==at) return 0;
+        at=next;
+    }
+    return 1;
+}
+int runtime_memory_checkpoint_restore(const BbCheckpointMemoryLayout *layout,
+    const BbCheckpointMemoryBlock *saved_blocks,const BbCheckpointMemoryVma *saved_vmas) {
+    if (!layout || layout->version!=1 || layout->page_size!=PAGE || layout->pool_size!=POOL_SIZE ||
+        layout->reserved || layout->block_count>LIMIT || layout->vma_count>65536 ||
+        (layout->block_count && !saved_blocks) || (layout->vma_count && !saved_vmas)) return EINVAL;
+    Block new_blocks[LIMIT]={0};
+    uint64_t new_flex_bitmap[FLEX_SPAN/PAGE/64]={0},new_live=0,new_flexible=0;
+    for (unsigned i=0;i<layout->block_count;++i) {
+        const BbCheckpointMemoryBlock *b=&saved_blocks[i];
+        if (b->reserved || b->slot>=LIMIT || new_blocks[b->slot].used || !b->size || b->size%PAGE ||
+            b->physical%PAGE || b->physical>=POOL_SIZE || b->size>POOL_SIZE-b->physical || b->type<0 || b->type>10) return EINVAL;
+        for (unsigned j=0;j<i;++j)
+            if (b->physical<saved_blocks[j].physical+saved_blocks[j].size && saved_blocks[j].physical<b->physical+b->size)
+                return EINVAL;
+        new_blocks[b->slot]=(Block){b->physical,b->size,b->type,1};new_live+=b->size;
+    }
+    uint64_t previous_end=USER_MIN;
+    for (unsigned i=0;i<layout->vma_count;++i) {
+        const BbCheckpointMemoryVma *v=&saved_vmas[i];
+        if (v->reserved || v->start<previous_end || v->start%PAGE || v->start>=USER_MAX ||
+            !v->size || v->size%PAGE || v->size>USER_MAX-v->start || v->physical%PAGE ||
+            (v->protection&~0x37) || v->type<0 || v->kind<KIND_RESERVED || v->kind>KIND_FLEXIBLE) return EINVAL;
+        previous_end=v->start+v->size;
+        if (v->kind==KIND_RESERVED) {
+            if (v->physical || v->protection || v->type) return EINVAL;
+        } else if (v->kind==KIND_DIRECT) {
+            if (v->physical>=POOL_SIZE || v->size>POOL_SIZE-v->physical ||
+                !checkpoint_block_range(layout,saved_blocks,v->physical,v->size)) return EINVAL;
+        } else {
+            if (v->physical<POOL_SIZE || v->physical>=POOL_SIZE+FLEX_SPAN || v->size>POOL_SIZE+FLEX_SPAN-v->physical ||
+                v->size>FLEXIBLE_SIZE-new_flexible) return EINVAL;
+            new_flexible+=v->size;
+            const uint64_t first=(v->physical-POOL_SIZE)/PAGE,count=v->size/PAGE;
+            for (uint64_t p=first;p<first+count;++p) {
+                const uint64_t bit=UINT64_C(1)<<(p%64);
+                if (new_flex_bitmap[p/64]&bit) return EINVAL;
+                new_flex_bitmap[p/64]|=bit;
+            }
+        }
+    }
+    Vma *new_vmas=layout->vma_count ? calloc(layout->vma_count,sizeof(*new_vmas)) : NULL;
+    if (layout->vma_count && !new_vmas) return ENOMEM;
+    write_lock();
+    int busy=vma_count || flexible_bytes || live_bytes || pending_count || hook_map || hook_unmap || hook_invalidate;
+    for (unsigned i=0;i<LIMIT;++i) if (blocks[i].used) busy=1;
+    if (busy) { write_unlock(); free(new_vmas); return EBUSY; }
+    if (pool()) { write_unlock(); free(new_vmas); return ENOMEM; }
+    unsigned mapped=0;
+    for (;mapped<layout->vma_count;++mapped) {
+        const BbCheckpointMemoryVma *v=&saved_vmas[mapped];
+        if (host_map((uintptr_t)v->start,v->size,host_prot(v->protection),v->kind==KIND_RESERVED,v->physical)) break;
+        new_vmas[mapped]=(Vma){(uintptr_t)v->start,(uintptr_t)(v->start+v->size),(int)v->kind,v->protection,v->type,v->physical};
+    }
+    if (mapped!=layout->vma_count) {
+        for (unsigned i=0;i<mapped;++i) (void)host_unmap(new_vmas[i].start,new_vmas[i].end-new_vmas[i].start);
+        write_unlock(); free(new_vmas); return ENOMEM;
+    }
+    free(vmas);vmas=new_vmas;vma_count=vma_capacity=layout->vma_count;
+    memcpy(blocks,new_blocks,sizeof(blocks));memcpy(flex_bitmap,new_flex_bitmap,sizeof(flex_bitmap));
+    live_bytes=new_live;flexible_bytes=new_flexible;
+    write_unlock(); return 0;
+}
+static int checkpoint_physical_range(uint64_t physical,size_t size) {
+    if (!size || physical>=POOL_SIZE+FLEX_SPAN || size>POOL_SIZE+FLEX_SPAN-physical) return 0;
+    if (physical<POOL_SIZE) return size<=POOL_SIZE-physical && direct_range_allocated(physical,size);
+    const uint64_t last=(physical+size-1-POOL_SIZE)/PAGE;
+    for (uint64_t p=(physical-POOL_SIZE)/PAGE;p<=last;++p) if (!flex_test(p)) return 0;
+    return 1;
+}
+int runtime_memory_checkpoint_read(uint64_t physical,void *bytes,size_t size) {
+    if (!bytes) return EINVAL;
+    read_lock();
+    if (!backing_base || !checkpoint_physical_range(physical,size)) { read_unlock(); return EINVAL; }
+    memcpy(bytes,backing_base+physical,size);read_unlock();return 0;
+}
+int runtime_memory_checkpoint_write(uint64_t physical,const void *bytes,size_t size) {
+    if (!bytes) return EINVAL;
+    read_lock();
+    if (!backing_base || !checkpoint_physical_range(physical,size)) { read_unlock(); return EINVAL; }
+    memcpy(backing_base+physical,bytes,size);read_unlock();return 0;
+}
+int runtime_gpu_memory_allocate(uint64_t start,uint64_t end,uint64_t size,uint64_t alignment,int type,uint64_t *physical) {
+    if (!physical) return EINVAL;
+    int64_t offset=0;
+    int32_t result=direct_allocate((int64_t)start,(int64_t)end,size,alignment,type,&offset);
+    if (!result) *physical=(uint64_t)offset;
+    return result ? (int)((uint32_t)result&0xffff) : 0;
+}
+int runtime_gpu_memory_map(uintptr_t *address,uint64_t size,int prot,int flags,uint64_t physical,uint64_t alignment) {
+    if (!address) return EINVAL;
+    void *pointer=(void *)*address;
+    int32_t result=direct_map(&pointer,size,prot,flags,(int64_t)physical,alignment);
+    if (!result) *address=(uintptr_t)pointer;
+    return result ? (int)((uint32_t)result&0xffff) : 0;
+}
+void *bbmetal_guest_allocate(size_t size) { return runtime_low_map(size,PROT_READ|PROT_WRITE); }
 /* Host-owned memory the guest can see (image, stacks, trampolines) lives in
  * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
+#ifdef __APPLE__
+#define LOW_MIN UINT64_C(0x7000000000)
+#else
 #define LOW_MIN UINT64_C(0x0800000000)
+#endif
 static uintptr_t low_next=LOW_MIN;
+void *runtime_low_map_at(uintptr_t address,size_t size,int prot) {
+    if (!size || address<LOW_MIN || address>=USER_MIN || address%PAGE ||
+        size>USER_MIN-address || size>USER_MIN-LOW_MIN-PAGE || (prot&~7)) return NULL;
+    size=align_up(size,PAGE);
+    if (size>USER_MIN-address) return NULL;
+    write_lock();
+#ifdef _WIN32
+    void *p=VirtualAlloc((void *)address,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
+#elif defined(__APPLE__)
+    void *p=mmap((void *)address,size,prot,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if (p!=MAP_FAILED && p!=(void *)address) { munmap(p,size); p=MAP_FAILED; }
+    if (p==MAP_FAILED) p=NULL;
+#else
+    void *p=mmap((void *)address,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+    if (p==MAP_FAILED) p=NULL;
+#endif
+    if (p && address+size+PAGE>low_next) low_next=address+size+PAGE;
+    write_unlock();
+    return p;
+}
 void *runtime_low_map(size_t size, int prot) {
+    if (!size || size>USER_MIN-LOW_MIN-PAGE) return NULL;
     size=align_up(size,PAGE);
     write_lock();
 #ifdef _WIN32
@@ -696,8 +1009,32 @@ void *runtime_low_map(size_t size, int prot) {
 #else
     void *p=MAP_FAILED;
     while (low_next+size<=USER_MIN) {
+#ifdef __APPLE__
+        uintptr_t attempted=low_next;
+        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        if (p!=MAP_FAILED && p!=(void *)low_next) {
+            munmap(p,size); p=MAP_FAILED;
+        }
+#else
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+#endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
+#ifdef __APPLE__
+        if (p==MAP_FAILED) {
+            /* Darwin may put a multi-GiB host mapping in this band. Jump past
+             * it instead of retrying one 16-KiB page at a time. */
+            mach_vm_address_t region=attempted;
+            mach_vm_size_t length=0;
+            vm_region_basic_info_data_64_t info;
+            mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object=MACH_PORT_NULL;
+            kern_return_t result=mach_vm_region(mach_task_self(),&region,&length,
+                VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object);
+            if (object!=MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),object);
+            if (result==KERN_SUCCESS && region<attempted+size && region+length>low_next)
+                low_next=align_up(region+length,PAGE);
+        }
+#endif
         if (p!=MAP_FAILED) break;
     }
     write_unlock();

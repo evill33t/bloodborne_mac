@@ -17,7 +17,7 @@ class ModTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.game = self.root / 'CUSA03173'
         self.assets = self.game / 'dvdroot_ps4' / 'chr'
         self.assets.mkdir(parents=True)
@@ -190,7 +190,13 @@ class ModTests(unittest.TestCase):
         python = self.root / 'python'
         python.write_text(f'#!{sys.executable}\nimport subprocess,sys\n'
             'if sys.argv[1] == "scripts/mods.py" or sys.argv[1] == "-c":\n'
-            '    sys.exit(subprocess.call([sys.executable,*sys.argv[1:]]))\n')
+            '    sys.exit(subprocess.call([sys.executable,*sys.argv[1:]]))\n'
+            'if sys.argv[1] == "-":\n'
+            '    sys.exit(subprocess.call([sys.executable,*sys.argv[1:]],stdin=sys.stdin))\n'
+            'if sys.argv[1] == "scripts/macos_prepare.py":\n'
+            '    from pathlib import Path\n'
+            '    out=Path(sys.argv[sys.argv.index("--out")+1]); out.mkdir(parents=True,exist_ok=True)\n'
+            '    (out/"macos-runtime-options.json").write_text(\'{"direct_memory_mb":512,"elf_sha256":"fixture"}\')\n')
         python.chmod(0o755)
         probe = self.root / 'probe'
         probe.write_text(f'#!{sys.executable}\nimport json,sys,os\nfrom pathlib import Path\n'
@@ -199,9 +205,13 @@ class ModTests(unittest.TestCase):
             '"path":str(game),"content":(game/"dvdroot_ps4/chr/a.dcx").read_text()}))\n'
             'sys.exit(7)\n')
         probe.chmod(0o755)
+        runtime = self.root / 'bb-macos-game'
+        runtime.write_bytes(probe.read_bytes())
+        runtime.chmod(0o755)
         env = dict(os.environ, BB_PREBUILT='1', BB_PROBE=str(probe), PYTHON=str(python),
             BB_DATA_DIR=str(self.root), BB_GAME_DIR=str(self.game),
-            BB_MODS_DIR=str(self.moddir), BB_MODS_ENABLED='1', BB_MODS_CONFIG=str(self.root/'mods.json'))
+            BB_MODS_DIR=str(self.moddir), BB_MODS_ENABLED='1', BB_MODS_CONFIG=str(self.root/'mods.json'),
+            BB_MAC_RUNTIME_DIR=str(self.root))
         result = subprocess.run(['bash', 'run.sh'], cwd=ROOT, env=env, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 7, result.stderr)
         mounted = json.loads((self.root / 'mounted.json').read_text())

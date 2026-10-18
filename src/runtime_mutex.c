@@ -118,7 +118,11 @@ static ABI int32_t mutex_timedlock(GuestMutex **mutex, uint32_t usec) {
     if (e) return e;
     struct timespec end;
     if (deadline_after(&end, usec)) return orbis_error(EINVAL);
+#ifdef __APPLE__
+    e = timed_error(bb_macos_mutex_timedlock(&(*mutex)->native, &end));
+#else
     e = timed_error(pthread_mutex_timedlock(&(*mutex)->native, &end));
+#endif
     if (!e) ++locks;
     return e;
 }
@@ -208,6 +212,9 @@ static ABI int32_t posix_cond_timedwait(GuestCond **c, GuestMutex **m, const Gue
 static ABI int32_t posix_cond_signal(GuestCond **c) { return posix_result(cond_signal(c)); }
 static ABI int32_t posix_cond_broadcast(GuestCond **c) { return posix_result(cond_broadcast(c)); }
 uintptr_t runtime_mutex_resolve(const char *name) {
+#ifdef BB_CHECKPOINT_RUNTIME
+    if (bb_checkpoint_runtime_enabled()) return bb_checkpoint_mutex_resolve(name);
+#endif
     if (!strcmp(name,"0TyVk4MSLt0#I#J")) return (uintptr_t)posix_cond_init;
     if (!strcmp(name,"RXXqi4CtF8w#I#J")) return (uintptr_t)posix_cond_destroy;
     if (!strcmp(name,"Op8TBGY5KHg#I#J")) return (uintptr_t)posix_cond_wait;

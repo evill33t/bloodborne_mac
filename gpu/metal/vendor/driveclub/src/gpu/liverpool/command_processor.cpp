@@ -1,0 +1,789 @@
+#include "gpu/liverpool/command_processor.h"
+
+#include <atomic>
+#include <cstdio>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <set>
+
+#include <pthread.h>
+#include <sched.h>
+#include <x86intrin.h>
+
+#include "common/log.h"
+#include "core/memory.h"
+#include "gpu/renderer.h"
+#include "gpu/metal/command_validation.h"
+
+namespace Gpu::Liverpool {
+
+namespace {
+
+// EVENT_WRITE_EOP / RELEASE_MEM data and interrupt selects.
+enum DataSel : u32 { kDataNone = 0, kData32 = 1, kData64 = 2, kGpuClock = 3, kPerfCounter = 4 };
+// NOP payload markers the Gnm driver uses for flip requests.
+constexpr u32 kNopPrepareFlipLabel = 0x68750778;
+constexpr u32 kNopPrepareFlipInterrupt = 0x68750780;
+constexpr u32 kNopPrepareFlipInterruptLabel = 0x68750781;
+
+enum IntSel : u32 { kIntNone = 0, kIntOnly = 1, kIntWriteConfirm = 2, kIntUndocumented = 3 };
+
+u64 GpuClock() {
+    // The GPU clock runs at 100 MHz on PS4; derive it from the host clock.
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 10;
+}
+
+// True if [addr, addr + size) is guest memory (one mapping).
+bool Mapped(const void* p, u64 size) {
+    const u64 addr = reinterpret_cast<u64>(p);
+    Core::Memory::Vma vma;
+    return addr && Core::Memory::Query(addr, false, &vma) && vma.type != Core::Memory::VmaType::Free &&
+           addr>=vma.start && addr-vma.start<=vma.size && size<=vma.size-(addr-vma.start);
+}
+
+template <typename T>
+T* Ptr(u32 lo, u32 hi) {
+    return reinterpret_cast<T*>(u64(lo) | (u64(hi) << 32));
+}
+
+void WriteFence(u32 data_sel, u32 lo, u32 hi, u32 data_lo, u32 data_hi) {
+    switch (data_sel) {
+    case kData32:
+        *Ptr<u32>(lo, hi) = data_lo;
+        break;
+    case kData64:
+        *Ptr<u64>(lo, hi) = u64(data_lo) | (u64(data_hi) << 32);
+        break;
+    case kGpuClock:
+        *Ptr<u64>(lo, hi) = GpuClock();
+        break;
+    case kPerfCounter:
+        *Ptr<u64>(lo, hi) = __rdtsc();
+        break;
+    default:
+        break;
+    }
+}
+
+bool Compare(u32 func, u32 value, u32 ref) {
+    switch (func) {
+    case 0: return true;
+    case 1: return value < ref;
+    case 2: return value <= ref;
+    case 3: return value == ref;
+    case 4: return value != ref;
+    case 5: return value >= ref;
+    case 6: return value > ref;
+    default: return true;
+    }
+}
+
+} // namespace
+
+thread_local CommandProcessor::Ring* CommandProcessor::t_ring = nullptr;
+thread_local RegFile* CommandProcessor::t_regs = nullptr;
+
+CommandProcessor::CommandProcessor() {
+    trace = std::getenv("DC_CP_TRACE") != nullptr;
+    const char* validation=std::getenv("BB_METAL_CP_VALIDATE");
+    validate_registers=validation && !std::strcmp(validation,"1");
+    ClearState();
+}
+
+// CLEAR_STATE: context registers back to their power-on values. Most are 0;
+// these are the ones whose default matters (from AMD's CIK clear-state table).
+void CommandProcessor::ClearState() {
+    std::memset(regs.Data() + kContextRegBase, 0, 0x400 * 4);
+    regs[Reg::PA_SC_SCREEN_SCISSOR_BR] = 0x40004000;
+    regs[Reg::PA_SC_WINDOW_SCISSOR_TL] = 0x80000000;
+    regs[Reg::PA_SC_WINDOW_SCISSOR_BR] = 0x40004000;
+    regs[0xA083] = 0xFFFF; // PA_SC_CLIPRECT_RULE
+    for (u32 k = 0; k < 4; ++k) {
+        regs[0xA085 + 2 * k] = 0x20002000; // PA_SC_CLIPRECT_n_BR
+    }
+    regs[0xA08C] = 0xAA99AAAA; // PA_SC_EDGERULE
+    regs[Reg::PA_SC_GENERIC_SCISSOR_TL] = 0x80000000;
+    regs[Reg::PA_SC_GENERIC_SCISSOR_BR] = 0x40004000;
+    for (u32 k = 0; k < 16; ++k) {
+        regs[Reg::PA_SC_VPORT_SCISSOR_0_TL + 2 * k] = 0x80000000;
+        regs[Reg::PA_SC_VPORT_SCISSOR_0_TL + 2 * k + 1] = 0x40004000;
+        regs[Reg::PA_SC_VPORT_ZMIN_0 + 2 * k + 1] = 0x3F800000; // ZMAX = 1.0
+    }
+}
+
+CommandProcessor::~CommandProcessor() {
+    for (auto& r : rings) {
+        if (r) {
+            r->thread.request_stop();
+            r->cv.notify_all();
+        }
+    }
+}
+
+CommandProcessor::Ring& CommandProcessor::GetRing(u32 index) {
+    std::scoped_lock lk(rings_lock);
+    if (rings.size() <= index) {
+        rings.resize(index + 1);
+    }
+    if (!rings[index]) {
+        auto ring = std::make_unique<Ring>();
+        ring->index = index;
+        Ring* r = ring.get();
+        r->thread = std::jthread([this, r](std::stop_token st) { Run(*r, st); });
+        rings[index] = std::move(ring);
+    }
+    return *rings[index];
+}
+
+void CommandProcessor::Push(u32 index, Job job) {
+    std::unique_lock admission(admission_lock);
+    admission_changed.wait(admission,[&]{return !checkpoint_paused;});
+    Ring& r = GetRing(index);
+    {
+        std::scoped_lock lk(r.lock);
+        r.jobs.push_back(std::move(job));
+    }
+    r.cv.notify_one();
+}
+
+void CommandProcessor::SubmitGraphics(std::vector<CmdBuffers> bufs, std::function<void()> after) {
+    ++stats.submits;
+    Push(0, {std::move(bufs), std::move(after)});
+}
+
+void CommandProcessor::SubmitCompute(u32 queue, std::span<const u32> acb) {
+    Push(queue, {{CmdBuffers{acb, {}}}, {}});
+}
+
+void CommandProcessor::WaitIdle() {
+    std::vector<Ring*> all;
+    {
+        std::scoped_lock lk(rings_lock);
+        for (auto& r : rings) {
+            if (r) {
+                all.push_back(r.get());
+            }
+        }
+    }
+    for (Ring* r : all) {
+        std::unique_lock lk(r->lock);
+        r->idle_cv.wait(lk, [&] { return r->jobs.empty() && !r->busy; });
+    }
+}
+void CommandProcessor::ResumeAfterCheckpoint() {
+    std::lock_guard lock(admission_lock);checkpoint_paused=false;admission_changed.notify_all();
+}
+bool CommandProcessor::PauseForCheckpoint(CheckpointState& out,std::chrono::steady_clock::time_point deadline,std::string& error) {
+    {
+        std::lock_guard lock(admission_lock);
+        if(checkpoint_paused){error="GPU checkpoint is already paused.";return false;}
+        checkpoint_paused=true;
+    }
+    const auto fail=[&](const char* why){ResumeAfterCheckpoint();error=why;return false;};
+    try {
+        std::vector<Ring*> all;
+        {std::lock_guard lock(rings_lock);for(const auto& ring:rings)if(ring)all.push_back(ring.get());}
+        if(all.size()>4096 || std::any_of(all.begin(),all.end(),[](const auto* r){return r->index>65535;}))
+            return fail("Too many GPU rings for this checkpoint schema.");
+        for(auto* ring:all) {
+            std::unique_lock lock(ring->lock);
+            if(!ring->idle_cv.wait_until(lock,deadline,[&]{return ring->jobs.empty() && !ring->busy;}))
+                return fail("GPU ring did not finish before the checkpoint timeout.");
+        }
+        if(renderer && !renderer->WaitIdleUntil(deadline,error)){ResumeAfterCheckpoint();return false;}
+        {std::lock_guard lock(fence_lock);if(!pending_fences.empty())return fail("GPU fences are still active after draining.");}
+        if(!ce.stack.empty() || flip_label.addr || flip_label.interrupt)return fail("GPU command continuation is still active.");
+        CheckpointState state;state.index_base=index_base;state.index_size=index_size;state.num_instances=num_instances;
+        state.ce_counter=ce.ce_counter;state.de_counter=ce.de_counter;
+        state.registers.assign(regs.Data(),regs.Data()+RegFile::kSize);state.ce_ram=ce.ram;
+        for(const auto* ring:all) {
+            CheckpointRing saved;saved.index=ring->index;saved.indirect_base=ring->indirect_base;
+            saved.registers.assign(ring->regs.Data(),ring->regs.Data()+RegFile::kSize);state.rings.push_back(std::move(saved));
+        }
+        out=std::move(state);error.clear();return true;
+    } catch(const std::exception& e) {ResumeAfterCheckpoint();error=e.what();return false;}
+}
+bool CommandProcessor::RestoreCheckpoint(const CheckpointState& state,std::string& error) {
+    const auto fail=[&](const char* why){error=why;return false;};
+    if(state.version!=1 || (state.index_size!=2 && state.index_size!=4) || state.index_base>=1ull<<40 ||
+       state.registers.size()!=RegFile::kSize || state.ce_ram.size()!=0xc000/4 || state.rings.size()>4096)
+        return fail("Invalid GPU frontend checkpoint layout.");
+    std::set<u32> indices;
+    for(const auto& ring:state.rings)
+        if(ring.index>65535 || ring.indirect_base>=1ull<<40 || ring.registers.size()!=RegFile::kSize || !indices.insert(ring.index).second)
+            return fail("Invalid GPU checkpoint ring.");
+    std::lock_guard admission(admission_lock);
+    {std::lock_guard lock(rings_lock);if(checkpoint_paused || !rings.empty() || stats.submits.load())return fail("GPU frontend restore requires a fresh command processor.");}
+    checkpoint_paused=true;
+    // No caller may activate this fresh process if allocation/thread creation
+    // fails. Admission remains closed on an incomplete restore.
+    try {
+        std::copy(state.registers.begin(),state.registers.end(),regs.Data());ce.ram=state.ce_ram;
+        ce.ce_counter=state.ce_counter;ce.de_counter=state.de_counter;
+        index_base=state.index_base;index_size=state.index_size;num_instances=state.num_instances;
+        for(const auto& saved:state.rings) {
+            auto& ring=GetRing(saved.index);ring.indirect_base=saved.indirect_base;
+            std::copy(saved.registers.begin(),saved.registers.end(),ring.regs.Data());
+        }
+        error.clear();return true;
+    } catch(const std::exception& e){error=e.what();return false;}
+}
+
+void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
+    char name[32];
+    std::snprintf(name, sizeof(name), ring.index == 0 ? "GPU gfx" : "GPU compute %u", ring.index);
+    pthread_setname_np(name);
+    t_ring = &ring;
+    t_regs = ring.index == 0 ? &regs : &ring.regs;
+    for (;;) {
+        Job job;
+        {
+            std::unique_lock lk(ring.lock);
+            ring.cv.wait(lk, [&] { return !ring.jobs.empty() || stop.stop_requested(); });
+            if (stop.stop_requested()) {
+                return;
+            }
+            job = std::move(ring.jobs.front());
+            ring.jobs.pop_front();
+            ring.busy = true;
+        }
+        for (const auto& buf : job.buffers) {
+            if (ring.index == 0) {
+                ce.stack.clear();
+                if (!buf.ccb.empty()) {
+                    ce.stack.push_back(buf.ccb);
+                }
+                ce.ce_counter = ce.de_counter = 0;
+            }
+            Execute(buf.dcb, ring.index != 0, 0);
+            if (ring.index == 0) {
+                RunConstantEngine([] { return false; }); // whatever the CE has left
+            }
+        }
+        if (job.after) {
+            job.after();
+        }
+        if (flip_label.addr || flip_label.interrupt) {
+            const FlipLabel label = flip_label;
+            AfterGpu([label, this] {
+                if (label.addr) {
+                    *Ptr<u32>(static_cast<u32>(label.addr), static_cast<u32>(label.addr >> 32)) = label.value;
+                }
+                if (label.interrupt) {
+                    Interrupt(kIrqGfxEop);
+                }
+            });
+            flip_label = {};
+        }
+        if (renderer) {
+            renderer->OnSubmit(); // hand everything, signals included, to the host GPU
+        }
+        {
+            std::scoped_lock lk(ring.lock);
+            ring.busy = false;
+        }
+        ring.idle_cv.notify_all();
+    }
+}
+
+RegFile& CommandProcessor::CurRegs() {
+    return t_regs ? *t_regs : regs;
+}
+
+void CommandProcessor::SetRegs(u32 index, const u32* values, u32 count) {
+    if (index + count > RegFile::kSize) {
+        return;
+    }
+    std::memcpy(CurRegs().Data() + index, values, count * 4);
+}
+
+void CommandProcessor::AfterGpu(std::function<void()> fn) {
+    if (renderer) {
+        renderer->Signal(std::move(fn));
+    } else {
+        fn();
+    }
+}
+
+void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq) {
+    if (data_sel == kData32 || data_sel == kData64) {
+        std::scoped_lock lk(fence_lock);
+        pending_fences[addr] = lo;
+        if (data_sel == kData64) {
+            pending_fences[addr + 4] = hi;
+        }
+    }
+    AfterGpu([=, this] {
+        WriteFence(data_sel, static_cast<u32>(addr), static_cast<u32>(addr >> 32), lo, hi);
+        if (data_sel == kData32 || data_sel == kData64) {
+            std::scoped_lock lk(fence_lock);
+            // A later write to the same label may still be on its way.
+            auto it = pending_fences.find(addr);
+            if (it != pending_fences.end() && it->second == lo) {
+                pending_fences.erase(it);
+            }
+            if (data_sel == kData64) {
+                it = pending_fences.find(addr + 4);
+                if (it != pending_fences.end() && it->second == hi) {
+                    pending_fences.erase(it);
+                }
+            }
+        }
+        if (irq) {
+            Interrupt(irq);
+        }
+    });
+}
+
+bool CommandProcessor::PendingFence(u64 addr, u32* value) {
+    std::scoped_lock lk(fence_lock);
+    auto it = pending_fences.find(addr);
+    if (it == pending_fences.end()) {
+        return false;
+    }
+    *value = it->second;
+    return true;
+}
+
+void CommandProcessor::SyncRenderer() {
+    if (renderer) {
+        renderer->WaitIdle();
+    }
+}
+
+void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
+    while (!ce.stack.empty() && !done()) {
+        std::span<const u32>& cur = ce.stack.back();
+        if (cur.empty()) {
+            ce.stack.pop_back();
+            continue;
+        }
+        const u32 header = cur[0];
+        const u32 type = HeaderType(header);
+        if (header == 0 || type == 2) {
+            cur = cur.subspan(1);
+            continue;
+        }
+        if (type != 3) {
+            DC_WARN("gpu: CE: unsupported packet type %u", type);
+            ce.stack.clear();
+            return;
+        }
+        const u32 n = HeaderBodyDwords(header);
+        if (n + 1 > cur.size()) {
+            ce.stack.pop_back();
+            continue;
+        }
+        const u32* body = cur.data() + 1;
+        if (n<Metal::MinimumPacketBody(HeaderOpcode(header))) {
+            ++stats.malformed_packets; ce.stack.pop_back(); continue;
+        }
+        switch (HeaderOpcode(header)) {
+        case Op::WriteConstRam: {
+            const u32 off = (body[0] & 0xFFFF) / 4;
+            for (u32 k = 0; k + 1 < n && off + k < ce.ram.size(); ++k) {
+                ce.ram[off + k] = body[1 + k];
+            }
+            break;
+        }
+        case Op::LoadConstRam: {
+            const u32* src = Ptr<const u32>(body[0], body[1]);
+            const u32 count = body[2] & 0x7FFF;
+            const u32 off = (body[3] & 0xFFFF) / 4;
+            if (src && off + count <= ce.ram.size() && Mapped(src,u64(count)*4)) {
+                std::memcpy(ce.ram.data() + off, src, count * 4);
+            }
+            break;
+        }
+        case Op::DumpConstRam: {
+            const u32 off = (body[0] & 0xFFFF) / 4;
+            const u32 count = body[1] & 0x7FFF;
+            u32* dst = Ptr<u32>(body[2], body[3]);
+            if (!dst || off + count > ce.ram.size() || !Mapped(dst,u64(count)*4)) {
+                break;
+            }
+            std::memcpy(dst, ce.ram.data() + off, count * 4);
+            if (renderer) {
+                renderer->NoteConstDump(reinterpret_cast<u64>(dst), count * 4);
+            }
+            break;
+        }
+        case Op::IncrementCeCounter:
+            ++ce.ce_counter;
+            break;
+        case Op::WaitOnDeCounterDiff:
+            if (ce.ce_counter - ce.de_counter >= body[0]) {
+                return; // blocked until the DE catches up; retried later
+            }
+            break;
+        case Op::IndirectBufferConst: {
+            const u32* ib = Ptr<const u32>(body[0], body[1] & 0xFFFF);
+            const u32 size = body[2] & 0xFFFFF;
+            cur = cur.subspan(n + 1);
+            if (ib && size && ce.stack.size()<8 && Mapped(ib,u64(size)*4)) {
+                ce.stack.push_back({ib, size});
+            }
+            continue;
+        }
+        default:
+            break;
+        }
+        cur = cur.subspan(n + 1);
+    }
+}
+
+void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances) {
+    ++stats.draws;
+    if (!renderer || count == 0) {
+        return;
+    }
+    DrawCall dc;
+    dc.indexed = indexed;
+    dc.count = count;
+    dc.instances = instances ? instances : num_instances;
+    dc.index_base = index_base;
+    dc.index_offset = index_offset;
+    dc.index_size = index_size;
+    dc.first_vertex = first_vertex;
+    renderer->Draw(CurRegs(), dc);
+}
+
+// Indirect draw/dispatch arguments live at the SET_BASE address + offset.
+const u32* CommandProcessor::IndirectArgs(u32 offset, u32 dwords) {
+    const Ring* ring = t_ring;
+    const u64 addr = (ring ? ring->indirect_base : 0) + offset;
+    if (!addr || addr<offset || !Mapped(reinterpret_cast<const void*>(addr),u64(dwords)*4)) {
+        return nullptr;
+    }
+    return reinterpret_cast<const u32*>(addr);
+}
+
+void CommandProcessor::Interrupt(u32 irq) {
+    if (on_irq) {
+        on_irq(irq);
+    }
+}
+
+void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int depth) {
+    RegFile& regs = CurRegs();
+    const u32* p = cmds.data();
+    const u32* end = p + cmds.size();
+    std::unique_ptr<Metal::RegisterValidation> validation;
+    if (validate_registers) validation=std::make_unique<Metal::RegisterValidation>();
+
+    const u32* recent[4] = {}; // last packets, for desync reports
+    while (p < end) {
+        const u32 header = *p;
+        const u32 type = HeaderType(header);
+        if (type == 3) {
+            std::memmove(recent, recent + 1, sizeof(recent) - sizeof(recent[0]));
+            recent[3] = p;
+        }
+        if (header == 0 || type == 2) { // filler / trailing padding
+            ++p;
+            continue;
+        }
+        if (type == 0) {
+            const u32 base_reg = header & 0xFFFF;
+            const u32 count = ((header >> 16) & 0x3FFF) + 1;
+            if (size_t(end-p)<size_t(count)+1) {
+                ++stats.malformed_packets;
+                break;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                if (base_reg + i < RegFile::kSize) {
+                    regs[base_reg + i] = p[1 + i];
+                }
+            }
+            p += 1 + count;
+            continue;
+        }
+        if (type != 3) {
+            ++stats.malformed_packets;
+            DC_WARN("gpu: unsupported PM4 packet type %u (header %#x) at +%#zx of %#zx dwords", type, header,
+                    static_cast<size_t>(p - cmds.data()), cmds.size());
+            for (const u32* q : recent) {
+                if (q) {
+                    DC_WARN("gpu:   after +%#zx header %08x", static_cast<size_t>(q - cmds.data()),q[0]);
+                }
+            }
+            return;
+        }
+        const u32 op = HeaderOpcode(header);
+        const u32 body_n = HeaderBodyDwords(header);
+        const u32* body = p + 1;
+        if (size_t(end-p)<size_t(body_n)+1 || body_n<Metal::MinimumPacketBody(op)) {
+            ++stats.malformed_packets;
+            DC_WARN("gpu: truncated PM4 opcode %#x at +%#zx",op,size_t(p-cmds.data()));
+            return;
+        }
+        if (validation) validation->Prepare({p,size_t(body_n)+1});
+        ++stats.packets;
+
+        switch (op) {
+        case Op::Nop:
+            // The Gnm driver hides flip requests in NOPs: "when this frame is
+            // shown, write `value` to `label` and/or raise the EOP interrupt".
+            if (body_n >= 4 && (body[0] == kNopPrepareFlipLabel || body[0] == kNopPrepareFlipInterruptLabel)) {
+                flip_label = {u64(body[1] & ~3u) | (u64(body[2]) << 32), body[3], body[0] == kNopPrepareFlipInterruptLabel};
+            } else if (body_n >= 1 && body[0] == kNopPrepareFlipInterrupt) {
+                flip_label = {0, 0, true};
+            }
+            break;
+        case Op::ClearState:
+            ClearState();
+            break;
+
+        case Op::SetContextReg:
+            SetRegs(kContextRegBase + (body[0]&0xffff), body + 1, body_n - 1);
+            if (renderer) {
+                renderer->OnContextRegs(body, body_n, size_t(end-body));
+            }
+            break;
+        case Op::SetShReg:
+            SetRegs(kShRegBase + (body[0]&0xffff), body + 1, body_n - 1);
+            break;
+        case Op::SetUconfigReg:
+            SetRegs(kUconfigRegBase + (body[0]&0xffff), body + 1, body_n - 1);
+            break;
+        case Op::SetConfigReg:
+            SetRegs(kConfigRegBase + (body[0]&0xffff), body + 1, body_n - 1);
+            break;
+
+        case Op::IndirectBuffer: {
+            const u32* ib = Ptr<const u32>(body[0], body[1] & 0xFFFF);
+            const u32 size = body[2] & 0xFFFFF;
+            if (depth < 4 && Mapped(ib,u64(size)*4)) {
+                Execute({ib, size}, compute, depth + 1);
+            }
+            break;
+        }
+
+        case Op::EventWriteEop: {
+            const u32 data_control = body[2];
+            const u32 int_sel = (data_control >> 24) & 3;
+            const bool irq = int_sel == kIntOnly || int_sel == kIntWriteConfirm;
+            FenceWrite((data_control >> 29) & 7, u64(body[1]) | (u64(data_control & 0xFFFF) << 32), body[3], body[4],
+                       irq ? kIrqGfxEop : 0);
+            break;
+        }
+        case Op::ReleaseMem: {
+            const u32 dw2 = body[1];
+            const u32 int_sel = (dw2 >> 24) & 7;
+            const bool irq = int_sel == kIntWriteConfirm || int_sel == kIntUndocumented;
+            FenceWrite((dw2 >> 29) & 7, u64(body[2]) | (u64(body[3]) << 32), body[4], body[5],
+                       irq && !compute ? kIrqGfxEop : 0);
+            break;
+        }
+        case Op::EventWriteEos: {
+            const u32 cmd = (body[2] >> 29) & 7;
+            if (cmd == 2) { // signal fence
+                FenceWrite(kData32, u64(body[1]) | (u64(body[2] & 0xFFFF) << 32), body[3], 0, 0);
+            }
+            break;
+        }
+
+        case Op::WriteData: {
+            const u32 dst_sel = (body[0] >> 8) & 0xF;
+            if (dst_sel == 1 || dst_sel == 2 || dst_sel == 5) {
+                static const bool log = std::getenv("DC_LOG_WRITEDATA") != nullptr;
+                if (log) {
+                    DC_INFO("gpu: WRITE_DATA %#llx %u dwords ctl %#x val %#x",
+                            (unsigned long long)(u64(body[1]) | (u64(body[2]) << 32)), body_n - 3, body[0],
+                            body_n > 3 ? body[3] : 0);
+                }
+                u32* dst = Ptr<u32>(body[1], body[2]);
+                if (!Mapped(dst,u64(body_n-3)*4)) { ++stats.malformed_packets; break; }
+                std::memcpy(dst, body + 3, (body_n - 3) * 4);
+                // Like a CE dump: draws recorded before this one must still read the
+                // old data when the host GPU runs them, later ones the new data.
+                if (renderer && body_n - 3 > 2) {
+                    renderer->NoteConstDump(reinterpret_cast<u64>(dst), (body_n - 3) * 4);
+                }
+            }
+            break;
+        }
+
+        case Op::DmaData: {
+            // CP DMA: copies/fills between memory, GDS and immediate data.
+            const u32 ctl = body[0];
+            const u32 cmd = body[5];
+            const u32 bytes = cmd & 0x1FFFFF;
+            const u32 src_sel = (ctl >> 29) & 3; // 0/3 memory, 1 GDS, 2 data
+            const u32 dst_sel = (ctl >> 20) & 3; // 0/3 memory, 1 GDS
+            if ((cmd >> 27) & 1) {
+                break; // destination is register space: cache prefetch hints
+            }
+            if (renderer) {
+                const u32 dsel = dst_sel == 1 ? 1 : 0;
+                const u32 ssel = src_sel == 3 ? 0 : src_sel;
+                const u64 dst_addr = dsel ? (body[3] & 0xFFFF) : u64(body[3]) | (u64(body[4]) << 32);
+                const u64 src_addr = ssel == 2 ? body[1]
+                                   : ssel == 1 ? (body[1] & 0xFFFF) : u64(body[1]) | (u64(body[2]) << 32);
+                if (bytes && renderer->DmaData(dsel, dst_addr, ssel, src_addr, bytes)) {
+                    break;
+                }
+            }
+            u8* gds = renderer ? renderer->Gds() : nullptr;
+            u8* dst = dst_sel == 1 ? (gds ? gds + (body[3] & 0xFFFF) : nullptr) : Ptr<u8>(body[3], body[4]);
+            if (!dst || bytes == 0 || (dst_sel != 1 && !Mapped(dst, bytes)) ||
+                (src_sel != 1 && src_sel != 2 && !Mapped(Ptr<const u8>(body[1], body[2]), bytes))) {
+                if (bytes) {
+                    DC_WARN("gpu: DMA_DATA to/from unmapped memory skipped (ctl %#x dst %p, %u bytes)", ctl, dst, bytes);
+                }
+                break;
+            }
+            SyncRenderer(); // the GPU may still be producing what we copy
+            if (src_sel == 2) {
+                for (u32 k = 0; k + 4 <= bytes; k += 4) {
+                    std::memcpy(dst + k, &body[1], 4);
+                }
+            } else {
+                const u8* src = src_sel == 1 ? (gds ? gds + (body[1] & 0xFFFF) : nullptr) : Ptr<const u8>(body[1], body[2]);
+                if (src) {
+                    std::memmove(dst, src, bytes);
+                }
+            }
+            break;
+        }
+
+        case Op::WaitRegMem: {
+            const u32 func = body[0] & 7;
+            const bool memory = (body[0] >> 4) & 1;
+            const u32 ref = body[3];
+            const u32 mask = body[4];
+            if (memory) {
+                const volatile u32* addr = Ptr<const u32>(body[1] & ~3u, body[2]);
+                if (!Mapped(const_cast<const u32*>(addr),4)) { ++stats.malformed_packets; break; }
+                if (Compare(func, *addr & mask, ref)) {
+                    break;
+                }
+                u32 pending = 0;
+                if (PendingFence(reinterpret_cast<u64>(addr), &pending) && Compare(func, pending & mask, ref)) {
+                    break;
+                }
+                // Whatever produces the value may sit in recorded host work.
+                if (renderer) {
+                    renderer->OnSubmit();
+                }
+                u32 iters = 0;
+                while (!Compare(func, *addr & mask, ref)) {
+                    if (++iters > 1000000) {
+                        DC_WARN("gpu: WaitRegMem timeout (addr=%p val=%#x ref=%#x mask=%#x func=%u)",
+                                addr, *addr, ref, mask, func);
+                        break;
+                    }
+                    sched_yield();
+                }
+            }
+            break;
+        }
+
+        case Op::WaitOnCeCounter:
+            if (!compute) {
+                RunConstantEngine([&] { return ce.ce_counter > ce.de_counter; });
+            }
+            break;
+        case Op::IncrementDeCounter:
+            ++ce.de_counter;
+            break;
+
+        case Op::IndexType:
+            index_size = (body[0] & 3) == 1 ? 4 : 2;
+            break;
+        case Op::IndexBase:
+            index_base = u64(body[0] & ~1u) | (u64(body[1] & 0xFFFF) << 32);
+            break;
+        case Op::NumInstances:
+            num_instances = body[0] ? body[0] : 1;
+            break;
+
+        case Op::DrawIndex2:
+            index_base = u64(body[1]) | (u64(body[2] & 0xFFFF) << 32);
+            Draw(true, body[3], 0, 0, 0);
+            break;
+        case Op::DrawIndexOffset2:
+            Draw(true, body[2], body[1], 0, 0);
+            break;
+        case Op::DrawIndexAuto:
+            Draw(false, body[0], 0, 0, 0);
+            break;
+        case Op::SetBase:
+            if (t_ring) {
+                t_ring->indirect_base = u64(body[1] & ~7u) | (u64(body[2] & 0xFFFF) << 32);
+            }
+            break;
+        case Op::DrawIndirect:
+        case Op::DrawIndexIndirect: {
+            // DrawIndirect args: vertex count, instances, first vertex, first instance.
+            // DrawIndexIndirect: index count, instances, first index, base vertex, first instance.
+            const bool indexed = op == Op::DrawIndexIndirect;
+            const u32* a = IndirectArgs(body[0], indexed ? 5 : 4);
+            if (!a) {
+                break;
+            }
+            const u32 base_vtx_loc = body[1] & 0xFFFF;
+            const u32 start_inst_loc = body[2] & 0xFFFF;
+            if (base_vtx_loc && kShRegBase+base_vtx_loc<RegFile::kSize) {
+                regs[kShRegBase + base_vtx_loc] = indexed ? a[3] : a[2];
+            }
+            if (start_inst_loc && kShRegBase+start_inst_loc<RegFile::kSize) {
+                regs[kShRegBase + start_inst_loc] = indexed ? a[4] : a[3];
+            }
+            if (indexed) {
+                Draw(true, a[0], a[2], 0, a[1]);
+            } else {
+                Draw(false, a[0], 0, a[2], a[1]);
+            }
+            break;
+        }
+
+        case Op::DispatchDirect:
+            ++stats.dispatches;
+            if (renderer) {
+                renderer->Dispatch(regs, body[0], body[1], body[2]);
+            }
+            break;
+        case Op::DispatchIndirect: {
+            ++stats.dispatches;
+            const u32* a = IndirectArgs(body[0], 3);
+            if (renderer && a) {
+                renderer->Dispatch(regs, a[0], a[1], a[2]);
+            }
+            break;
+        }
+
+        default:
+            if (trace) {
+                static std::atomic<u64> seen[4]{};
+                const u64 bit = 1ull << (op & 63);
+                if (!(seen[op >> 6].fetch_or(bit) & bit)) {
+                    DC_INFO("gpu: CP%s: unhandled PM4 opcode %#x (%u dwords)", compute ? " compute" : "", op, body_n);
+                }
+            }
+            break;
+        }
+        if (validation && validation->Checked()) {
+            ++stats.validated_register_packets;
+            if (auto index=validation->Mismatch({regs.Data(),RegFile::kSize})) {
+                ++stats.register_mismatches;
+                DC_WARN("gpu: independent decoder mismatch at register %#x, opcode %#x",*index,op);
+            }
+        }
+        if (trace && (op == Op::EventWriteEop || op == Op::ReleaseMem || op == Op::EventWriteEos ||
+                      op == Op::WriteData || op == Op::DmaData || op == Op::WaitRegMem)) {
+            DC_INFO("gpu: CP%s %#x: %08x %08x %08x %08x %08x %08x", compute ? " compute" : "", op, body[0],
+                    body_n > 1 ? body[1] : 0, body_n > 2 ? body[2] : 0, body_n > 3 ? body[3] : 0,
+                    body_n > 4 ? body[4] : 0, body_n > 5 ? body[5] : 0);
+        }
+        p += body_n + 1;
+    }
+}
+
+CommandProcessor& Instance() {
+    static CommandProcessor cp;
+    return cp;
+}
+
+} // namespace Gpu::Liverpool
