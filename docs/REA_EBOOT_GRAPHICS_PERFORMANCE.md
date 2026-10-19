@@ -4,6 +4,13 @@ Date: 2026-10-18. Scope: static executable research correlated with the current
 direct Metal port. No game launch, save changes, source-dump writes, or runtime
 patches were performed. No FPS improvement or gameplay fix is claimed.
 
+This document records the investigation before implementation. Subsequent
+port changes and tests are documented in
+[macOS GPU stability and prewarming](MACOS_GPU_STABILITY.md).
+The later [gameplay validation](MACOS_GPU_GAMEPLAY_VALIDATION.md) records native
+motion-vector contracts and explains why the captured HTILE traffic supports a
+metadata-state fix rather than an accurate depth-extrema optimization.
+
 ## Result and implementation order
 
 The executable gives us concrete places to investigate CPU/GPU stalls and an

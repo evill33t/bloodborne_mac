@@ -7,7 +7,7 @@ file(WRITE "${BB_FEATURE_GEN}/bbhost_version.h" "#pragma once\n#define BBHOST_VE
 file(READ "${BB_FEATURE_VENDOR}/tools/pc_option_messages.tsv" BB_MAC_MESSAGES)
 file(WRITE "${BB_FEATURE_GEN}/pc_option_messages.inc" "R\"tsv(${BB_MAC_MESSAGES})tsv\"\n")
 add_library(bbmac-features STATIC
-    platform.cpp thunk.cpp features.cpp game_menu.cpp futex.cpp graphics.cpp gpu_fences.cpp
+    platform.cpp thunk.cpp features.cpp game_menu.cpp futex.cpp graphics.cpp gpu_fences.cpp motion_capture.cpp
     "${BB_FEATURE_SRC}/core/config.cpp" "${BB_FEATURE_SRC}/core/sfo.cpp"
     "${BB_FEATURE_SRC}/engine/frame_rate.cpp" "${BB_FEATURE_SRC}/engine/frame_tick.cpp"
     "${BB_FEATURE_SRC}/engine/params.cpp" "${BB_FEATURE_SRC}/engine/paramdef.cpp"

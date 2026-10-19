@@ -1,6 +1,8 @@
 #include "gpu/metal/mtl_renderer.h"
 
 #import <Metal/Metal.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -37,6 +40,8 @@
 #include "gpu/metal/raw_texture_snapshot.h"
 #include "gpu/metal/texture_cache_policy.h"
 #include "gpu/metal/temporal_aa.h"
+#include "gpu/metal/native_motion_capture.h"
+#include "gpu/metal/stutter_trace.h"
 
 namespace Gpu::Metal {
 
@@ -309,10 +314,14 @@ struct MetalRenderer::Impl {
   id<MTLSharedEvent> signal_event = nil;
   MTLSharedEventListener *signal_listener = nil;
   u64 signal_value = 0;
-  std::mutex signal_lock;
-  std::deque<std::pair<u64, std::function<void()>>> signal_queue;
-  std::condition_variable signals_changed;
-  std::size_t active_signals = 0;
+  struct Signals {
+    std::mutex lock;
+    std::deque<std::pair<u64,std::function<void()>>> queue;
+    std::condition_variable changed;
+    std::size_t active=0;
+    bool closed=false;
+  };
+  std::shared_ptr<Signals> signals=std::make_shared<Signals>();
 
   // ---- caches ----
   // A program is reused only while its whole code (and fetch subroutine) is
@@ -359,6 +368,11 @@ struct MetalRenderer::Impl {
     double clear_depth = 1.0;
     u32 clear_stencil = 0;
     u64 written = 0;    // write_seq of the last pass/dispatch writing it
+    struct NativeVelocity {
+      u64 frame=~0ull,generation=0;
+      std::array<float,2> uv_scale{};
+      bool safe=false,produced=false;
+    } velocity;
     u32 bind_slice = 0; // array slice the CB registers point at (CB_COLOR_VIEW)
     u32 bind_level = 0; // mip level, when the CB address is a level of this one
     u32 levels = 1; // mip levels (compute shaders build mip chains in place)
@@ -373,6 +387,8 @@ struct MetalRenderer::Impl {
   RenderTarget *temporal_depth=nullptr,*temporal_color=nullptr;
   bool temporal_resolved=false;
   std::atomic<bool> temporal_active{false};
+  std::optional<SceneCamera> scene_camera;
+  u64 scene_camera_frame=~0ull;
   u64 write_seq = 0;
 
   // Fast-clear metadata surfaces (CMASK / HTILE) -> the surface they describe.
@@ -425,6 +441,7 @@ struct MetalRenderer::Impl {
     const double now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if (now<next_texture_collection) return;
     next_texture_collection=now+1;
+    StutterTrace::Scope timing("texture_collection",frame_count,textures.size());
     if (!texture_budget) {
       texture_budget=std::clamp<u64>(device.recommendedMaxWorkingSetSize/8,256ull<<20,2ull<<30);
       if (const char* env=std::getenv("BB_METAL_TEXTURE_CACHE_MB")) {
@@ -547,7 +564,12 @@ struct MetalRenderer::Impl {
 
   // ================= setup =================
 
+#include "gpu/metal/renderer_capture.inc"
+#include "gpu/metal/htile_capture.inc"
+#include "gpu/metal/native_velocity.inc"
+
   void Init() {
+    InitCapture();
     dump_dir = std::getenv("DC_DUMP_SHADERS");
     dump_frames = std::getenv("DC_DUMP_FRAMES");
     trace_file = std::getenv("DC_TRACE_FILE");
@@ -601,6 +623,7 @@ struct MetalRenderer::Impl {
     profile = std::getenv("DC_GPU_PROFILE") != nullptr;
     profile_passes = profile && std::strcmp(std::getenv("DC_GPU_PROFILE"),"passes")==0;
     compiler = std::make_unique<ShaderCompiler>(device, 4,ShaderCompiler::CacheMode::DriverManaged);
+    compiler->EnablePrewarming();
     signal_event = [device newSharedEvent];
     signal_listener = [[MTLSharedEventListener alloc]
         initWithDispatchQueue:dispatch_queue_create("gpu signals",
@@ -1168,43 +1191,49 @@ struct MetalRenderer::Impl {
     EndPass();
     EnsureCommandBuffer();
     const u64 v = ++signal_value;
+    const auto callbacks=signals;
+    const auto state=execution;
     {
-      std::scoped_lock lk(signal_lock);
-      signal_queue.emplace_back(v, std::move(done));
+      std::scoped_lock lk(callbacks->lock);
+      callbacks->queue.emplace_back(v, std::move(done));
     }
     [cmd encodeSignalEvent:signal_event value:v];
     [signal_event notifyListener:signal_listener
                          atValue:v
                            block:^(id<MTLSharedEvent> e, uint64_t) {
-                             RunSignals(e.signaledValue);
+                             RunSignals(callbacks,state,e.signaledValue);
                            }];
   }
 
   // Listener queue: runs, in order, the callbacks of every value reached.
-  void RunSignals(u64 reached) {
+  static void RunSignals(const std::shared_ptr<Signals>& callbacks,
+      const std::shared_ptr<Gpu::ExecutionState>& state,u64 reached) {
     for (;;) {
       std::function<void()> fn;
       {
-        std::scoped_lock lk(signal_lock);
-        if(execution->Failed()) {signal_queue.clear();signals_changed.notify_all();return;}
-        if (signal_queue.empty() || signal_queue.front().first > reached) {
+        std::scoped_lock lk(callbacks->lock);
+        if(callbacks->closed || state->Failed()) {callbacks->queue.clear();callbacks->changed.notify_all();return;}
+        if (callbacks->queue.empty() || callbacks->queue.front().first > reached) {
           return;
         }
-        fn = std::move(signal_queue.front().second);
-        signal_queue.pop_front();
-        ++active_signals;
+        fn = std::move(callbacks->queue.front().second);
+        callbacks->queue.pop_front();
+        ++callbacks->active;
       }
-      fn();
+      try {fn();}
+      catch(const std::exception& error) {state->Fail(std::string("GPU completion callback failed: ")+error.what());}
+      catch(...) {state->Fail("GPU completion callback failed");}
       {
-        std::scoped_lock lk(signal_lock);
-        --active_signals;
+        std::scoped_lock lk(callbacks->lock);
+        --callbacks->active;
       }
-      signals_changed.notify_all();
+      callbacks->changed.notify_all();
     }
   }
 
   // Command buffers on one queue complete in order: the last one is enough.
   void WaitLast() {
+    StutterTrace::Scope timing("gpu_wait",frame_count);
     if (last_committed) {
       const auto t0 = std::chrono::steady_clock::now();
       [last_committed waitUntilCompleted];
@@ -1269,6 +1298,7 @@ struct MetalRenderer::Impl {
       }
       return e.prog.get();
     }
+    StutterTrace::Scope timing("shader_decode",frame_count,addr);
     Shader::BuildInput in{stage, addr, ud, num_user_sgprs, vgpr_comp_cnt};
     in.compute_rsrc2 = compute_rsrc2;
     auto prog = Shader::BuildProgram(in);
@@ -1349,6 +1379,7 @@ struct MetalRenderer::Impl {
 
   // Blocks until the pipeline `key` has been compiled.
   void WaitCompiled(u64 key) {
+    StutterTrace::Scope timing("pipeline_wait",frame_count,key);
     while (pending.count(key)) {
       {
         std::unique_lock lk(done_lock);
@@ -1504,6 +1535,7 @@ struct MetalRenderer::Impl {
           p->initialized = true;
           p->clear_pending = false;
           p->written = ++write_seq;
+          p->velocity.safe=false;
           type_out->ufloat = p->tex.pixelFormat == MTLPixelFormatRG11B10Float;
           return TargetView(*p, lv + base_level, 1, MTLPixelFormatInvalid,
                             base_array, slice_count);
@@ -1584,6 +1616,7 @@ struct MetalRenderer::Impl {
     if (storage) {
       // Written by shaders: keep it GPU-side like a render target, so
       // later draws sample what the compute pass produced.
+      if(auto* old=Latest(color_targets,addr)) old->velocity.safe=false;
       if (fi.format == MTLPixelFormatInvalid || fi.compressed) {
         ReportOnce("storage image type/format not supported (dim=" +
                    std::to_string(ttype) + " dfmt=" + std::to_string(dfmt) +
@@ -1641,6 +1674,7 @@ struct MetalRenderer::Impl {
       target.initialized = true;
       target.clear_pending = false;
       target.written = ++write_seq;
+      target.velocity.safe=false;
       return TargetView(target, base_level, 1, MTLPixelFormatInvalid,
                         base_array, slice_count);
     }
@@ -1717,6 +1751,7 @@ struct MetalRenderer::Impl {
       e.hot = true;
     }
 
+    StutterTrace::Scope timing("texture_upload",frame_count,addr,size);
     // replaceRegion writes CPU-side storage immediately. An older command
     // buffer may still sample the previous upload: give each changed version
     // its own texture and let Metal retain that version until its reads finish.
@@ -2051,6 +2086,7 @@ struct MetalRenderer::Impl {
       if (it != (m.depth ? depth_targets : color_targets).end()) {
         for (auto &t : it->second) {
           t->clear_pending = true;
+          t->velocity.safe=false;
         }
       }
       any = true;
@@ -2350,7 +2386,7 @@ struct MetalRenderer::Impl {
       if (!Readable(base,864)) continue;
       std::array<float,216> data;
       std::memcpy(data.data(),reinterpret_cast<const void*>(base),sizeof(data));
-      if (auto camera=ReadSceneCamera(data,viewport_y)) temporal->ObserveCamera(*camera);
+      if (auto camera=ReadSceneCamera(data,viewport_y)) {scene_camera=*camera;scene_camera_frame=frame_count;temporal->ObserveCamera(*camera);}
     }
   }
   // Evaluates each image instruction's descriptors against the user data.
@@ -2937,6 +2973,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
       depth->clear_stencil = r[Reg::DB_STENCIL_CLEAR] & 0xFF;
       if (ZInfo::TileSurface(z_info)) {
         NoteMeta(u64(r[Reg::DB_HTILE_DATA_BASE]) << 8, zbase, true);
+        ObserveHtileCaptureLayout(r,zbase,w,h);
       }
     } else {
       depth_fmt = MTLPixelFormatInvalid;
@@ -3022,7 +3059,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     }
   }
   // ---- resources ----
-  if (temporal_aa.load(std::memory_order_relaxed)) {
+  if (temporal_aa.load(std::memory_order_relaxed) || !capture_root.empty()) {
     if (!temporal) temporal=std::make_unique<TemporalAA>((__bridge void*)device);
     unsigned targets=0;
     for (auto* target:colors) targets+=target!=nullptr;
@@ -3392,6 +3429,11 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   if (ps) {
     PatchUserData(pud);
   }
+  if(trace && !capture_root.empty()) {
+    TraceHtileReaders(*vs,vud,0,0,0);CaptureMotionConstants(*vs,vud);
+    if(ps) {TraceHtileReaders(*ps,pud,0,0,0);CaptureMotionConstants(*ps,pud);}
+  }
+  ObserveNativeVelocity(r,*vs,ps,vud,pud,colors,ps_res.tex,dc,sc);
   // On-demand nested material constants, using the same snapshotted user data
   // as the GPU. Syntax: DC_PEEK_PS_CHAIN=2:30:60,2:30:20; all offsets are hex,
   // intermediate offsets load a guest pointer and the last reads eight floats.
@@ -3691,19 +3733,23 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
   Program *cs = GetProgram(Stage::Compute, addr, ud, Bits(rsrc2, 1, 5),
                            Bits(rsrc2, 11, 2), rsrc2);
   if (!cs) return;
+  TraceHtileReaders(*cs,ud,gx,gy,gz);
+  if(cs->retail_id==0x9a9cf8a9) CaptureSceneBoundary();
   if (cs->retail_id==0x9a9cf8a9 && temporal_aa.load(std::memory_order_relaxed) &&
       temporal && temporal_depth && temporal_color) {
     // The retail scene-postprocessing boundary used by bbport. Resolve HDR
     // before tone mapping and HUD composition, retaining the guest's targets.
     EndPass(); EnsureCommandBuffer();
+    const auto motion=NativeVelocityInput();
     if (void* output=temporal->Encode((__bridge void*)cmd,(__bridge void*)temporal_color->tex,
-                                     (__bridge void*)temporal_depth->tex)) {
+                                     (__bridge void*)temporal_depth->tex,frame_count,motion ? &*motion : nullptr)) {
       auto blit=[cmd blitCommandEncoder];
       [blit copyFromTexture:(__bridge id<MTLTexture>)output sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
           sourceSize:MTLSizeMake(temporal_color->width,temporal_color->height,1) toTexture:temporal_color->tex
           destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
       [blit endEncoding];
       temporal_color->written=++write_seq; temporal_resolved=true;
+      CaptureRaw(temporal_color->tex,"scene_resolved_hdr_"+Hex(temporal_color->addr));
     }
   }
   // Typed buffer clears also affect private Metal render targets. Running the
@@ -3759,6 +3805,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
           rt->initialized=true;
           rt->clear_pending=false;
           rt->written=++write_seq;
+          ObserveNativeVelocityClear(*rt,value);
           if (trace) DC_INFO("gpu: typed fill clears target %#llx (%ux%u)",dst,rt->width,rt->height);
         }
       }
@@ -3814,6 +3861,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
       to.clear_stencil = from->clear_stencil;
       if (from_depth) ++to.depth_revision;
       to.written = ++write_seq;
+      to.velocity.safe=false;
       if (trace || from->dim != TexDim::Tex2D) {
         DC_INFO("gpu:   surface copy %#llx -> %#llx (%ux%u dim %d layers %u fmt %lu)",
                 src, dst, from->width, from->height, (int)from->dim,
@@ -3833,24 +3881,28 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
       return;
     }
   }
-  // A shader reading HTILE (e.g. per-tile depth bounds for light culling)
-  // would see stale memory: depth lives in Metal textures. Give it expanded
-  // tiles with the full Z range, so nothing is culled by mistake.
-  for (u32 k = 0; k + 3 < 16 && !metas.empty(); ++k) {
+  // Full-range fallback is only for an actual read-only metadata descriptor.
+  // Retail shadow kernels also read/modify/write HTILE state bits. Replacing
+  // their input with depth bounds corrupts that state and adds redundant fills.
+  // Do not interpret arbitrary overlapping user-data words as descriptors.
+  std::unordered_set<u64> expanded_metadata;
+  for (const auto& read:cs->buffer_reads) {
+    if (metas.empty() || !read.HasReadOnlyDescriptor()) continue;
+    std::array<u32,4> descriptor;
+    for (unsigned k=0;k<4;++k) descriptor[k]=Shader::ResolveSgpr(read.descriptor[k],ud);
     const u64 base =
-        (u64(ud[k]) | (u64(ud[k + 1] & 0xFFF) << 32)) & kGpuAddrMask;
+        (u64(descriptor[0]) | (u64(descriptor[1] & 0xFFF) << 32)) & kGpuAddrMask;
     auto m = metas.find(base);
-    if (m == metas.end() || !m->second.depth) {
+    if (m == metas.end() || !m->second.depth || !expanded_metadata.insert(base).second) {
       continue;
     }
-    const u32 stride = (ud[k + 1] >> 16) & 0x3FFF;
-    const u64 bytes = u64(ud[k + 2]) * (stride ? stride : 1);
-    if (bytes && bytes < (64ull << 20)) {
+    const u32 stride = (descriptor[1] >> 16) & 0x3FFF;
+    const u64 bytes = u64(descriptor[2]) * (stride ? stride : 1);
+    if (bytes && bytes < (64ull << 20) && !Shader::MayWriteBuffer(*cs,ud,base,bytes)) {
       expanding_htile = true; // our own fill, not the game clearing depth
       DmaData(0, base, 2, 0xFFFC000Fu, static_cast<u32>(bytes & ~3ull));
       expanding_htile = false;
     }
-    k += 3;
   }
   std::vector<TextureType> types;
   Resources res;
@@ -3993,6 +4045,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
 }
 
 void MetalRenderer::Impl::Flip(const FlipInfo &f) {
+  FinishNativeVelocityFrame();
   ++frame_count;
   CollectTextures();
   temporal_active.store(temporal_resolved,std::memory_order_relaxed);
@@ -4047,6 +4100,13 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           stat_depth_copies / double(frames),
           (upload_allocations.load(std::memory_order_relaxed)-stat_upload_base) / double(frames),
           pending.size());
+      const auto warm=compiler->GetWarmupStats();
+      DC_INFO("gpu prewarm: %llu recipes loaded, %llu ready, %llu pipeline hits",
+          warm.loaded,warm.ready,warm.hits);
+      if(temporal) DC_INFO("gpu temporal: %llu resolved frames, %llu native velocity inputs",
+          temporal->ResolvedFrames(),temporal->NativeMotionFrames());
+      if(NativeVelocityEnabled()) DC_INFO("gpu velocity: %llu clears, %llu producers, %llu camera matches, %llu filters (cumulative)",
+          velocity_clears,velocity_producers,velocity_camera_matches,velocity_filters);
       stat_upload_base=upload_allocations.load(std::memory_order_relaxed);
       stat_hashed = 0;
       stat_depth_copies = 0;
@@ -4195,6 +4255,10 @@ MetalRenderer::MetalRenderer(Device &device) : impl(std::make_unique<Impl>()) {
 MetalRenderer::~MetalRenderer() {
   std::scoped_lock lk(impl->lock);
   impl->Commit(true);
+  // Event-listener blocks can run after command-buffer completion handlers.
+  // Their shared state stays alive, but they must never call through Impl.
+  std::lock_guard signals(impl->signals->lock);
+  impl->signals->closed=true;impl->signals->queue.clear();
 }
 
 void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
@@ -4202,6 +4266,7 @@ void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
   if(Execution()->Failed()) return;
   impl->last_vs=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_VS);
   impl->last_ps=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_PS);
+  StutterTrace::Scope timing("draw_record",impl->frame_count,impl->last_vs,impl->last_ps);
   @autoreleasepool {
     impl->Draw(regs, draw);
     if (impl->profile && !impl->profile_passes) {
@@ -4219,6 +4284,7 @@ void MetalRenderer::Dispatch(const RegFile &regs, std::uint32_t x,
   std::scoped_lock lk(impl->lock);
   if(Execution()->Failed()) return;
   impl->last_cs=regs.ProgramAddr(Liverpool::Reg::COMPUTE_PGM_LO);
+  StutterTrace::Scope timing("dispatch_record",impl->frame_count,impl->last_cs);
   @autoreleasepool {
     impl->Dispatch(regs, x, y, z);
     if (impl->profile) {
@@ -4248,26 +4314,29 @@ void MetalRenderer::WaitIdle() {
 }
 bool MetalRenderer::WaitIdleUntil(std::chrono::steady_clock::time_point deadline,std::string& error) {
   if(Execution()->Failed()){error=Execution()->Error();return false;}
-  // In particular, do not block the UI behind a Flip whose presentation has
-  // not been acknowledged. The caller runs on a separate checkpoint worker.
+  // Do not block behind a Flip whose presentation has not been acknowledged.
+  // Used by both checkpoint workers and CPU consumers of GPU-produced data.
   std::unique_lock<std::mutex> lock(impl->lock,std::defer_lock);
   while (!lock.try_lock()) {
-    if (std::chrono::steady_clock::now()>=deadline) {error="Renderer did not reach a checkpoint boundary.";return false;}
+    if (std::chrono::steady_clock::now()>=deadline) {error="Renderer did not reach a GPU drain boundary.";return false;}
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   @autoreleasepool {
     impl->Commit(false);
     id<MTLCommandBuffer> command=impl->last_committed;
     while (command && command.status!=MTLCommandBufferStatusCompleted) {
-      if (command.status==MTLCommandBufferStatusError) {error="Metal work failed while draining the checkpoint.";return false;}
-      if (std::chrono::steady_clock::now()>=deadline) {error="Metal work did not complete before the checkpoint timeout.";return false;}
+      if (command.status==MTLCommandBufferStatusError) {
+        error=std::string(command.label.UTF8String ?: "Metal submission")+": "+
+            (command.error.localizedDescription.UTF8String ?: "command execution failed");return false;
+      }
+      if (std::chrono::steady_clock::now()>=deadline) {error="Metal work did not complete before the GPU drain timeout.";return false;}
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if(Execution()->Failed()){error=Execution()->Error();return false;}
-    std::unique_lock signals(impl->signal_lock);
-    if (!impl->signals_changed.wait_until(signals,deadline,[&] {
-      return Execution()->Failed() || (impl->signal_queue.empty() && !impl->active_signals);
-    })) {error="GPU fence callbacks did not finish before the checkpoint timeout.";return false;}
+    std::unique_lock signals(impl->signals->lock);
+    if (!impl->signals->changed.wait_until(signals,deadline,[&] {
+      return Execution()->Failed() || (impl->signals->queue.empty() && !impl->signals->active);
+    })) {error="GPU fence callbacks did not finish before the GPU drain timeout.";return false;}
     if(Execution()->Failed()){error=Execution()->Error();return false;}
     impl->last_committed=nil;
     impl->arena_released.store(impl->arena_head,std::memory_order_release);

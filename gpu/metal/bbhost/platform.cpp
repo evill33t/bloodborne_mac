@@ -273,6 +273,9 @@ bool RedirectCheckedCall(ElfImage* image,std::uint64_t at,std::uint64_t target,v
     if(!guest_protect_rwx(&image->mem,at,5)) return false;
     displacement=std::int32_t(reinterpret_cast<std::uint64_t>(stub)-at-5);
     std::memcpy(call+1,&displacement,4);
-    return guest_protect_rx(&image->mem,at,5);
+    if(guest_protect_rx(&image->mem,at,5)) return true;
+    // Refusal must retain the original call even if page protection failed.
+    displacement=std::int32_t(target-at-5);std::memcpy(call+1,&displacement,4);
+    guest_protect_rx(&image->mem,at,5);return false;
 }
 }

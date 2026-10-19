@@ -31,12 +31,12 @@ public:
     ShaderCompiler(id<MTLDevice> device, u32 threads,CacheMode cache_mode=CacheMode::DriverManaged);
     ~ShaderCompiler();
 
-    // The "main0" function of MSL `src`, cached by `key`; nil if it does not
-    // compile. Thread-safe.
+    // The "main0" function, cached by the exact MSL source; nil if compilation
+    // fails. Guest keys can be reused after streaming. Thread-safe.
     id<MTLFunction> Function(u64 key, const std::string& src, u64 address);
 
     // Runs `job` on a worker thread.
-    void Submit(std::function<void()> job);
+    void Submit(std::function<void()> job,bool background=false);
 
     // The runtime relies on Metal's managed cache and preserves cold first-use
     // draws. Explicit binary-archive collection is restricted to offline tools:
@@ -46,19 +46,41 @@ public:
     struct CacheStats { u64 hits=0, misses=0, writes=0; bool loaded=false; };
     CacheStats GetCacheStats();
     void FlushCache();
+    // Plain source/descriptor recipes only. No Metal binary archive APIs.
+    void EnablePrewarming();
+    struct WarmupStats {u64 hits=0,loaded=0,ready=0;};
+    WarmupStats GetWarmupStats();
 
 private:
-    void Worker();
+    void Worker(bool background);
 
     id<MTLDevice> device;
     std::mutex lock;
     std::condition_variable cv;
     std::deque<std::function<void()>> jobs;
+    std::deque<std::function<void()>> background_jobs;
     std::vector<std::thread> threads;
     bool stop = false;
 
     std::mutex fn_lock;
-    std::unordered_map<u64, id<MTLFunction>> functions;
+    std::condition_variable fn_changed;
+    std::unordered_map<std::string, id<MTLFunction>> functions;
+    std::unordered_map<std::string,bool> compiling;
+    std::unordered_map<std::uintptr_t,std::string> function_sources;
+    NSString* warm_root=nil;
+    std::mutex warm_lock;
+    struct WarmPipeline {id<MTLRenderPipelineState> render=nil;id<MTLComputePipelineState> compute=nil;};
+    std::unordered_map<std::string,WarmPipeline> warm_pipelines;
+    std::unordered_map<std::string,NSData*> recipe_writes;
+    std::mutex recipe_write_lock;
+    WarmupStats warm_stats;
+    NSDictionary* RenderRecipe(MTLRenderPipelineDescriptor*);
+    NSDictionary* ComputeRecipe(MTLComputePipelineDescriptor*);
+    void Remember(NSDictionary*,WarmPipeline);
+    void WriteRecipe(const std::string&);
+    void Prewarm(NSDictionary*);
+    id<MTLRenderPipelineState> NewRenderPipeline(MTLRenderPipelineDescriptor*,NSError**);
+    id<MTLComputePipelineState> NewComputePipeline(MTLComputePipelineDescriptor*,NSError**);
     std::mutex archive_lock;
     id<MTLBinaryArchive> archive=nil;
     NSURL* archive_url=nil;

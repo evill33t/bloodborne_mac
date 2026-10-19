@@ -99,8 +99,11 @@ while the menu is open, but the game continues running.
 - **Temporal anti-aliasing (experimental):** an opt-in live setting. A native Metal
   resolve uses scene camera/depth before the game's post-processing and HUD,
   with variance clipping, disocclusion rejection and camera-cut/history resets.
-  This is camera-based temporal AA without projection jitter or additional
-  per-object motion vectors; moving objects can still ghost. It does not provide
+  Verified native object-motion producers now supply half-resolution vectors
+  when their current/previous camera, depth, coverage and frame contracts match.
+  Unsupported/stale inputs use camera reprojection; moving objects can still
+  ghost. `BB_METAL_NATIVE_MOTION=0` selects camera-only comparison. There is no
+  projection jitter. It does not provide
   temporal upscaling. Unsupported scene inputs keep the original frame and the
   status reads **Temporal AA waiting for scene**. MetalFX Spatial can be used
   separately for presentation scaling.
@@ -141,6 +144,21 @@ under Rosetta. Old files under `$BB_DATA_DIR/metal-cache` are left untouched and
 are not loaded by the game. Environment variables cannot re-enable that path.
 Binary-archive persistence is restricted to the isolated development fixture.
 
+The renderer also records plain MSL/pipeline recipes outside the game dump and
+prewarms exact matches on a background compiler worker at the next launch.
+`BB_METAL_SHADER_PREWARM=0` disables this path. GPU label waits now park on
+completion notifications, detect invalid mappings and report failures. Supported
+1.09 native fence-loop hooks preserve guest comparisons and timeout budgets;
+`BB_METAL_PARK_FENCES=0` retains the original polling. See the
+[GPU stability and prewarming guide](../../docs/MACOS_GPU_STABILITY.md) for
+cache limits, diagnostics and validation. The
+[gameplay report](../../docs/MACOS_GPU_GAMEPLAY_VALIDATION.md) records real
+captures, performance and stability limits. Opt-in `BB_METAL_CAPTURE_DIR`
+diagnostics perform bounded lossless readbacks; disable them for timing runs.
+The [stutter follow-up](../../docs/MACOS_STUTTER_PROFILING.md) records the
+dedicated presentation loop, controlled UI-stall regression and visible-window
+gameplay results.
+
 Reconstructible uploaded textures expire after 20 idle seconds. Under cache
 pressure the oldest uploads can leave sooner, with a two-second grace period for
 the active scene. Render targets and GPU-owned surface contents are retained.
@@ -164,8 +182,8 @@ ROSETTA_ADVERTISE_AVX=1 ctest --test-dir out/macos-runtime \
   --output-on-failure
 ```
 
-These are fixture checks; gameplay image quality, long-session memory behavior
-and any FPS/stutter improvement still need repeatable in-game measurements.
+These are fixture checks; the gameplay report separately records the tested
+scene and settings. Longer sessions and other areas still require validation.
 
 ## Achievements
 
@@ -399,9 +417,22 @@ submission/presentation times and display intervals; once per second the log
 also reports median, 95th-percentile and maximum intervals. This uses drawable
 callbacks and does not enable GPU counters. Average FPS alone does not measure
 frame pacing; a 30 FPS stream can still alternate short and long intervals.
-The UI is woken at each flip and acknowledges it only after queuing the
-presentation. This keeps later rendering from overtaking a completed frame
-on the shared Metal queue, without waiting for the GPU to finish every frame.
+The dedicated presentation thread acknowledges each flip after committing its
+presentation read on the shared Metal queue. With V-sync on it uses drawables
+provided by `CAMetalDisplayLink`; V-sync-off acquires drawables on that worker.
+This keeps later rendering ordered without waiting for the GPU to finish every
+frame, and isolates it from UI-event stalls. `BB_METAL_PRESENT_THREAD=0`
+restores the UI path; `BB_METAL_DISPLAY_LINK=0` retains the worker with legacy
+drawable acquisition. Resize, refresh, V-sync and scaling changes apply live.
+
+`BB_METAL_STUTTER_TRACE=/absolute/output.csv` optionally records slow CPU stages
+without pixel readback or forced GPU drains. Most scopes use a 10 ms threshold;
+whole UI iterations and frame handoffs use 50 ms. Tracing refuses paths inside
+the configured original-game directories. For timing comparisons keep the game
+visible, require positive presentation timestamps and check the
+`DC_GPU_STATS=1` unavailable-drawable skip counter. Fully occluded windows can
+stop receiving display-link updates; after 100 ms the producer may skip a frame
+to keep running. Those periods do not provide valid whole-window display FPS.
 
 The Windows reference was reviewed at
 [`0a71dd171f15096a01dc0f472aa0bcff12c41c6d`](https://github.com/Mrsuss60/bloodborne_pc_windows_port/tree/0a71dd171f15096a01dc0f472aa0bcff12c41c6d)

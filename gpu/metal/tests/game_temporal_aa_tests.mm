@@ -49,7 +49,9 @@ int main() {
         };
         assert(std::abs(render(0,.5,true)-.25f)<.001); // cold history preserves HDR and alpha
         const float accumulated=render(1,.5,true);
-        assert(accumulated>.25f && accumulated<.74f); // actual temporal accumulation
+        // An independently changing surface must favor its current color.
+        // The old camera-only .75 history weight leaves this below .5.
+        assert(accumulated>.5f && accumulated<.74f);
         assert(std::abs(render(0,.8,true)-.25f)<.001); // disocclusion rejects stale history
         taa.Invalidate();
         assert(std::abs(render(1,.8,true)-.75f)<.001);

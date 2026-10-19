@@ -385,8 +385,42 @@ std::unique_ptr<Program> BuildProgram(const BuildInput& in) {
                 std::array<SgprSource,4> descriptor;
                 for (unsigned k=0;k<4;++k) descriptor[k]=prov.Get(i.sbase+k);
                 if (std::find(p->buffers.begin(),p->buffers.end(),descriptor)==p->buffers.end()) p->buffers.push_back(descriptor);
+                BufferReadResource read;
+                read.descriptor=descriptor;
+                read.pc=i.pc; read.encoding=i.enc; read.op=i.op;
+                read.immediate_offset=i.imm ? i.smrd_offset*4 : 0;
+                read.scalar_offset=i.imm ? 0 : static_cast<u16>(i.smrd_offset);
+                read.dynamic_scalar_offset=!i.imm;
+                p->buffer_reads.push_back(read);
             }
             break;
+        case Enc::MUBUF:
+        case Enc::MTBUF: {
+            const bool typed=i.enc==Enc::MTBUF;
+            const bool atomic=!typed && i.op>=u16(Mubuf::BUFFER_ATOMIC_SWAP) &&
+                              i.op<=u16(Mubuf::BUFFER_ATOMIC_DEC);
+            const bool load=i.op<=3 || (!typed && i.op>=u16(Mubuf::BUFFER_LOAD_UBYTE) &&
+                                       i.op<=u16(Mubuf::BUFFER_LOAD_DWORDX3));
+            const bool store=(i.op>=4 && i.op<=7) || (!typed &&
+                (i.op==u16(Mubuf::BUFFER_STORE_BYTE) || i.op==u16(Mubuf::BUFFER_STORE_SHORT) ||
+                 (i.op>=u16(Mubuf::BUFFER_STORE_DWORD) && i.op<=u16(Mubuf::BUFFER_STORE_DWORDX3))));
+            if (store || atomic) {
+                std::array<SgprSource,4> descriptor;
+                for (unsigned k=0;k<4;++k) descriptor[k]=prov.Get(i.srsrc+k);
+                p->buffer_writes.push_back(descriptor);
+            }
+            if (!load && !atomic) break;
+            BufferReadResource read;
+            for (unsigned k=0;k<4;++k) read.descriptor[k]=prov.Get(i.srsrc+k);
+            read.pc=i.pc; read.encoding=i.enc; read.op=i.op;
+            read.immediate_offset=i.offset; read.scalar_offset=i.soffset;
+            read.dynamic_scalar_offset=!(i.soffset>=Operand::Zero && i.soffset<=Operand::IntNegMax);
+            read.vector_address=i.vaddr; read.index_enabled=i.idxen;
+            read.offset_enabled=i.offen; read.address64=i.addr64;
+            read.writes=atomic;
+            p->buffer_reads.push_back(read);
+            break;
+        }
         case Enc::EXP:
             if (i.target >= ExpTarget::Param0) {
                 p->param_mask |= 1u << (i.target - ExpTarget::Param0);
@@ -462,11 +496,39 @@ std::unique_ptr<Program> BuildProgram(const BuildInput& in) {
         }
         prov.Step(i);
     }
+    for (auto& read:p->buffer_reads)
+        read.descriptor_written=std::find(p->buffer_writes.begin(),p->buffer_writes.end(),read.descriptor)!=p->buffer_writes.end();
     std::sort(p->labels.begin(), p->labels.end());
     p->labels.erase(std::unique(p->labels.begin(), p->labels.end()), p->labels.end());
     FindBufferCopy(*p);
     FindBufferFill(*p);
     return p;
+}
+
+bool MayWriteBuffer(const Program& program,const u32* ud,u64 base,u64 bytes) {
+    constexpr u64 limit=1ull<<40;
+    if (!ud || !bytes || base>=limit || bytes>limit-base) return true;
+    for (const auto& writer:program.buffer_writes) {
+        std::array<u32,4> descriptor;
+        for (unsigned k=0;k<4;++k) {
+            const auto& source=writer[k];
+            if (source.kind==SgprSource::Unknown || source.ud>=16 ||
+                (source.kind!=SgprSource::UserData && source.ud>=15)) return true;
+            if (source.kind!=SgprSource::UserData) {
+                const u64 pointer=source.kind==SgprSource::PointerLoad
+                    ? (u64(ud[source.ud])|(u64(ud[source.ud+1])<<32))&0xffffffffffffull
+                    : u64(ud[source.ud])|(u64(ud[source.ud+1]&0xfff)<<32);
+                const u64 address=pointer+source.offset;
+                if (address<pointer || address>~0ull-4 || !Readable(address,4)) return true;
+            }
+            descriptor[k]=ResolveSgpr(source,ud);
+        }
+        const u64 start=(u64(descriptor[0])|(u64(descriptor[1]&0xfff)<<32))&(limit-1);
+        const u64 count=u64(descriptor[2])*std::max(1u,(descriptor[1]>>16)&0x3fff);
+        if (!count || count>limit-start) return true;
+        if (start<base+bytes && base<start+count) return true;
+    }
+    return false;
 }
 
 u32 ResolveSgpr(const SgprSource& src, const u32* ud) {

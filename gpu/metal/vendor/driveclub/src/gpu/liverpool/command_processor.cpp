@@ -1,6 +1,7 @@
 #include "gpu/liverpool/command_processor.h"
 
 #include <atomic>
+#include <array>
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>
@@ -8,7 +9,6 @@
 #include <set>
 
 #include <pthread.h>
-#include <sched.h>
 #include <x86intrin.h>
 
 #include "common/log.h"
@@ -46,25 +46,6 @@ bool Mapped(const void* p, u64 size) {
 template <typename T>
 T* Ptr(u32 lo, u32 hi) {
     return reinterpret_cast<T*>(u64(lo) | (u64(hi) << 32));
-}
-
-void WriteFence(u32 data_sel, u32 lo, u32 hi, u32 data_lo, u32 data_hi) {
-    switch (data_sel) {
-    case kData32:
-        *Ptr<u32>(lo, hi) = data_lo;
-        break;
-    case kData64:
-        *Ptr<u64>(lo, hi) = u64(data_lo) | (u64(data_hi) << 32);
-        break;
-    case kGpuClock:
-        *Ptr<u64>(lo, hi) = GpuClock();
-        break;
-    case kPerfCounter:
-        *Ptr<u64>(lo, hi) = __rdtsc();
-        break;
-    default:
-        break;
-    }
 }
 
 bool Compare(u32 func, u32 value, u32 ref) {
@@ -114,7 +95,7 @@ void CommandProcessor::ClearState() {
 }
 
 CommandProcessor::~CommandProcessor() {
-    stopping=true;execution->Notify();
+    stopping=true;execution->Notify();admission_changed.notify_all();
     for (auto& r : rings) {
         if (r) {
             r->thread.request_stop();
@@ -130,6 +111,7 @@ void CommandProcessor::SetRenderer(Gpu::Renderer* r) {
 }
 void CommandProcessor::Fail(const std::string& reason) {
     if(execution->Fail(reason)) DC_ERROR("gpu: %s",reason.c_str());
+    admission_changed.notify_all();
 }
 bool CommandProcessor::WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare,u64 mask,
     std::chrono::steady_clock::time_point deadline,bool fatal_timeout) {
@@ -143,6 +125,7 @@ bool CommandProcessor::WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare
         default:return false;
         }
     };
+    bool parked=false;
     for(;;) {
         const auto epoch=execution->Epoch();
         if(execution->Failed() || stopping) return false;
@@ -151,13 +134,15 @@ bool CommandProcessor::WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare
         if(matches(value)) return true;
         const auto now=std::chrono::steady_clock::now();
         if(now>=deadline) {
-            if(fatal_timeout) Fail("GPU fence wait timed out at "+std::to_string(address)+
-                " value="+std::to_string(value)+" reference="+std::to_string(reference));
+            if(fatal_timeout) {++stats.label_timeouts;Fail("GPU fence wait timed out at "+std::to_string(address)+
+                " value="+std::to_string(value)+" reference="+std::to_string(reference));}
             return false;
         }
         // External CPU stores have no GPU callback. Periodic rechecks retain
         // that protocol while GPU-completed labels wake immediately.
+        if(!parked) {++stats.label_waits;parked=true;}
         execution->Wait(epoch,std::min(deadline,now+std::chrono::microseconds(250)));
+        stats.label_parked_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-now).count();
     }
 }
 
@@ -178,7 +163,8 @@ CommandProcessor::Ring& CommandProcessor::GetRing(u32 index) {
 
 void CommandProcessor::Push(u32 index, Job job) {
     std::unique_lock admission(admission_lock);
-    admission_changed.wait(admission,[&]{return !checkpoint_paused || execution->Failed() || stopping;});
+    while(checkpoint_paused && !execution->Failed() && !stopping)
+        admission_changed.wait_for(admission,std::chrono::milliseconds(10));
     if(execution->Failed() || stopping) return;
     Ring& r = GetRing(index);
     {
@@ -358,6 +344,7 @@ void CommandProcessor::AfterGpu(std::function<void()> fn) {
 }
 
 void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq) {
+    if(data_sel>kPerfCounter) {Fail("Unsupported GPU fence data selector");return;}
     Metal::GuestLabel destination;
     const u32 bytes=data_sel==kData32 ? 4 : data_sel==kDataNone ? 0 : 8;
     if(bytes && !destination.Capture(addr,bytes)) {Fail("Invalid GPU fence destination at "+std::to_string(addr));return;}
@@ -516,15 +503,25 @@ void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first
 
 // Indirect draw/dispatch arguments live at the SET_BASE address + offset.
 const u32* CommandProcessor::IndirectArgs(u32 offset, u32 dwords) {
-    // These arguments are read by the CPU. A predicted pending fence is not
-    // sufficient: commit GPU producers and wait before reading their bytes.
-    if(!SyncRenderer()) return nullptr;
     const Ring* ring = t_ring;
     const u64 addr = (ring ? ring->indirect_base : 0) + offset;
-    if (!addr || addr<offset || !Mapped(reinterpret_cast<const void*>(addr),u64(dwords)*4)) {
-        return nullptr;
+    if (!addr || addr<offset || !dwords || dwords>5 || addr>UINT64_MAX-u64(dwords)*4) {
+        Fail("Invalid indirect argument address");return nullptr;
     }
-    return reinterpret_cast<const u32*>(addr);
+    std::array<Metal::GuestLabel,5> labels;
+    for(u32 k=0;k<dwords;++k) if(!labels[k].Capture(addr+k*4,4)) {
+        Fail("Unmapped indirect argument buffer");return nullptr;
+    }
+    // Commit GPU producers before CPU reads. Retain the captured identities
+    // across that wait so an unmap/reuse cannot silently change the arguments.
+    if(!SyncRenderer()) return nullptr;
+    static thread_local std::array<u32,5> snapshot;
+    for(u32 k=0;k<dwords;++k) {
+        u64 value=0;
+        if(!labels[k].Load(value)) {Fail("Indirect argument mapping expired during GPU completion");return nullptr;}
+        snapshot[k]=u32(value);
+    }
+    return snapshot.data();
 }
 
 void CommandProcessor::Interrupt(u32 irq) {

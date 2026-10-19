@@ -14,6 +14,7 @@
 #include "gpu/metal/bbhost/features.h"
 #include "gpu/metal/bbhost/network.h"
 #include "gpu/metal/frame_handoff.h"
+#include "gpu/metal/stutter_trace.h"
 #include "hle/video_out/video_out.h"
 #include "gpu/liverpool/command_processor.h"
 #include "core/memory.h"
@@ -272,6 +273,7 @@ extern "C" int bbgpu_init(const BbGpuConfig*) {
         device=std::make_unique<Gpu::Metal::Device>();
         renderer=std::make_unique<Gpu::Metal::MetalRenderer>(*device);
         renderer->SetFrameReadyCallback([](void* texture) {
+            Gpu::Metal::StutterTrace::Scope timing("frame_handoff",renderer->FrameCount(),0,0,50);
             frame_handoff.PublishAndWait(texture,[] {
                 if (frame_event) { SDL_Event event{};event.type=frame_event;SDL_PushEvent(&event); }
             });
@@ -374,6 +376,8 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     Uint64 fps_start=0, fps_frames=0;
     while (true) {
         @autoreleasepool {
+            Gpu::Metal::StutterTrace::Scope iteration_timing("ui_iteration",0,0,0,50);
+            Gpu::Metal::StutterTrace::Scope event_timing("ui_events");
             SDL_Event event;
             bool have_event=SDL_WaitEventTimeout(&event,4);
             while (have_event) {
@@ -382,6 +386,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     presenter->Resize(event.window.data1,event.window.data2);
                 if (event.type==SDL_EVENT_WINDOW_DISPLAY_CHANGED) {
                     if (auto mode=SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)); mode && mode->refresh_rate>=30) display_refresh.store(mode->refresh_rate);
+                    if(presenter)presenter->SetRefreshRate(display_refresh.load());
                 }
                 if (!input.HandleEvent(event) && !MacInput::CapturesInput.load() && !achievements->HandleEvent(event)) overlay.HandleEvent(event);
                 input.Tick(MacSettings::CapturesInput.load() || MacAchievements::CapturesInput.load());
@@ -391,6 +396,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
             achievements->Tick(SDL_GetTicks());
             input.Tick(MacSettings::CapturesInput.load() || MacAchievements::CapturesInput.load());
             if (MacFeatures::TakeSettings(settings)) apply_settings();
+            event_timing.End();
             if (ready.load(std::memory_order_acquire)) {
                 if(renderer->Execution()->Failed()) {
                     const auto error=renderer->Execution()->Error();
@@ -401,19 +407,23 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     _Exit(1);
                 }
                 if (!presenter) {
-                    presenter=std::make_unique<Gpu::Metal::Presenter>(*device,SDL_Metal_GetLayer(view),Gpu::Metal::PresenterConfig{});
+                    presenter=std::make_unique<Gpu::Metal::Presenter>(*device,SDL_Metal_GetLayer(view),Gpu::Metal::PresenterConfig{settings.vsync,display_refresh.load()});
                     int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);
                     presenter->Resize(width,height);
                     apply_settings();
+                    const char* threaded=std::getenv("BB_METAL_PRESENT_THREAD");
+                    if(!threaded || std::strcmp(threaded,"0"))
+                        presenter->StartFrameLoop([] {return frame_handoff.Pending();},[] {frame_handoff.Acknowledge();});
                     fps_start=SDL_GetTicksNS();
                     fps_frames=presenter->PresentedFrameCount();
                 }
-                if (void* frame=frame_handoff.Pending()) {
+                if (void* frame=presenter->HasFrameLoop()?nullptr:frame_handoff.Pending()) {
                     presenter->PresentTexture(frame);
                     frame_handoff.Acknowledge();
                 }
                 const Uint64 now=SDL_GetTicksNS();
                 if (now-fps_start>=1000000000ull) {
+                    Gpu::Metal::StutterTrace::Scope status_timing("ui_status");
                     const Uint64 frames=presenter->PresentedFrameCount();
                     const double fps=double(frames-fps_frames)*1.0e9/double(now-fps_start);
                     char title[96];
@@ -454,6 +464,13 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     }
                     fps_start=now;
                     fps_frames=frames;
+                    if(std::getenv("DC_GPU_STATS")) {
+                        std::fprintf(stderr,"[presentation] %s, %llu unavailable-drawable skips\n",presenter->HasFrameLoop()?"dedicated thread":"UI thread",(unsigned long long)presenter->SkippedFrameCount());
+                        const auto& stats=Gpu::Liverpool::Instance().GetStats();
+                        std::fprintf(stderr,"[GPU CPU waits] %llu waits, %.1f ms parked, %llu timeouts (cumulative)\n",
+                            (unsigned long long)stats.label_waits.load(),stats.label_parked_us.load()/1000.0,
+                            (unsigned long long)stats.label_timeouts.load());
+                    }
                 }
             }
         }

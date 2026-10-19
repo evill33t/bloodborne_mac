@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <filesystem>
 
 #include "common/log.h"
 
@@ -42,7 +44,8 @@ ShaderCompiler::ShaderCompiler(id<MTLDevice> device, u32 count,CacheMode cache_m
         }
     }
     for (u32 k = 0; k < count; ++k) {
-        threads.emplace_back([this] { Worker(); });
+        // Reserve the other compiler workers for first-use work from the game.
+        threads.emplace_back([this,background=k+1==count] { Worker(background); });
     }
 }
 
@@ -55,6 +58,8 @@ ShaderCompiler::~ShaderCompiler() {
     for (auto& t : threads) {
         t.join();
     }
+    // Cancel expensive queued prewarming at shutdown, but keep observed recipes.
+    while(!recipe_writes.empty()) {const auto key=recipe_writes.begin()->first;WriteRecipe(key);}
     FlushCache();
 }
 
@@ -74,7 +79,7 @@ void ShaderCompiler::FlushCache() { std::scoped_lock guard(archive_lock); SaveAr
 ShaderCompiler::CacheStats ShaderCompiler::GetCacheStats() {
     std::scoped_lock guard(archive_lock); return cache_stats;
 }
-id<MTLRenderPipelineState> ShaderCompiler::RenderPipeline(MTLRenderPipelineDescriptor* d,NSError** error) {
+id<MTLRenderPipelineState> ShaderCompiler::NewRenderPipeline(MTLRenderPipelineDescriptor* d,NSError** error) {
     if (!archive) return [device newRenderPipelineStateWithDescriptor:d error:error];
     std::scoped_lock guard(archive_lock);
     if (archive) {
@@ -91,7 +96,7 @@ id<MTLRenderPipelineState> ShaderCompiler::RenderPipeline(MTLRenderPipelineDescr
     }
     return pso;
 }
-id<MTLComputePipelineState> ShaderCompiler::ComputePipeline(MTLComputePipelineDescriptor* d,NSError** error) {
+id<MTLComputePipelineState> ShaderCompiler::NewComputePipeline(MTLComputePipelineDescriptor* d,NSError** error) {
     if (!archive) return [device newComputePipelineStateWithDescriptor:d options:MTLPipelineOptionNone reflection:nil error:error];
     std::scoped_lock guard(archive_lock);
     if (archive) {
@@ -109,26 +114,26 @@ id<MTLComputePipelineState> ShaderCompiler::ComputePipeline(MTLComputePipelineDe
     return pso;
 }
 
-void ShaderCompiler::Submit(std::function<void()> job) {
+void ShaderCompiler::Submit(std::function<void()> job,bool background) {
     {
         std::scoped_lock lk(lock);
-        jobs.push_back(std::move(job));
+        (background ? background_jobs : jobs).push_back(std::move(job));
     }
-    cv.notify_one();
+    cv.notify_all();
 }
 
-void ShaderCompiler::Worker() {
+void ShaderCompiler::Worker(bool background) {
     pthread_setname_np("GPU shader compiler");
     while (true) {
         std::function<void()> job;
         {
             std::unique_lock lk(lock);
-            cv.wait(lk, [this] { return stop || !jobs.empty(); });
+            cv.wait(lk, [this,background] { return stop || !jobs.empty() || (background && !background_jobs.empty()); });
             if (stop) {
                 return;
             }
-            job = std::move(jobs.front());
-            jobs.pop_front();
+            auto& next=jobs.empty() ? background_jobs : jobs;
+            job = std::move(next.front());next.pop_front();
         }
         @autoreleasepool {
             job();
@@ -137,11 +142,18 @@ void ShaderCompiler::Worker() {
 }
 
 id<MTLFunction> ShaderCompiler::Function(u64 key, const std::string& src, u64 address) {
+    (void)key;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(src.data(),static_cast<CC_LONG>(src.size()),digest);
+    std::string identity;for(unsigned char b:digest) {identity+="0123456789abcdef"[b>>4];identity+="0123456789abcdef"[b&15];}
     {
-        std::scoped_lock lk(fn_lock);
-        if (auto it = functions.find(key); it != functions.end()) {
+        std::unique_lock lk(fn_lock);
+        fn_changed.wait(lk,[&]{return !compiling[identity];});
+        if (auto it = functions.find(identity); it != functions.end()) {
+            if(it->second && warm_root) function_sources[reinterpret_cast<std::uintptr_t>((__bridge void*)it->second)]=src;
             return it->second;
         }
+        compiling[identity]=true;
     }
     MTLCompileOptions* opts = [MTLCompileOptions new];
     opts.mathMode = MTLMathModeSafe;
@@ -156,8 +168,14 @@ id<MTLFunction> ShaderCompiler::Function(u64 key, const std::string& src, u64 ad
         DC_ERROR("gpu: MSL compile failed for shader %#llx: %s", address,
                  err ? err.localizedDescription.UTF8String : "?");
     }
-    std::scoped_lock lk(fn_lock);
-    return functions.emplace(key, fn).first->second;
+    {
+        std::scoped_lock lk(fn_lock);
+        functions[identity]=fn;compiling.erase(identity);
+        if(fn && warm_root) function_sources[reinterpret_cast<std::uintptr_t>((__bridge void*)fn)]=src;
+    }
+    fn_changed.notify_all();return fn;
 }
+
+#include "gpu/metal/pipeline_prewarm.inc"
 
 } // namespace Gpu::Metal

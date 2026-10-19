@@ -46,6 +46,32 @@ struct ImageResource {
     u32 sampler_index = 0;
 };
 
+// Resource provenance for a read-capable buffer instruction. This describes
+// the resource referenced by the instruction, not the dynamic addresses or
+// active lanes reached at runtime. Keep it separate from Program::buffers,
+// whose scalar-load list is used by camera discovery.
+struct BufferReadResource {
+    std::array<SgprSource, 4> descriptor{};
+    u32 pc = 0;
+    Gcn::Enc encoding = Gcn::Enc::Unknown;
+    u16 op = 0;
+    u32 immediate_offset = 0; // bytes; zero when the offset is dynamic
+    u16 scalar_offset = 0;    // operand code, not its runtime value
+    u8 vector_address = 0;
+    bool dynamic_scalar_offset = false;
+    bool index_enabled = false;
+    bool offset_enabled = false;
+    bool address64 = false;
+    bool writes = false; // atomics read and write the same resource
+    bool descriptor_written = false; // another instruction may store through it
+    bool HasReadOnlyDescriptor() const {
+        if (writes || descriptor_written) return false;
+        for (const auto& source:descriptor)
+            if (source.kind==SgprSource::Unknown) return false;
+        return true;
+    }
+};
+
 // Fetch-subroutine instructions get pcs in their own range so they never
 // collide with branch targets of the main program.
 constexpr u32 kFetchPcBase = 0x100000;
@@ -78,6 +104,8 @@ struct Program {
     std::vector<ImageResource> images;
     std::vector<std::array<SgprSource, 4>> samplers;
     std::vector<std::array<SgprSource, 4>> buffers;
+    std::vector<BufferReadResource> buffer_reads;
+    std::vector<std::array<SgprSource,4>> buffer_writes;
 
     // VS exports.
     u32 param_mask = 0;
@@ -109,5 +137,9 @@ std::unique_ptr<Program> BuildProgram(const BuildInput& in);
 
 // Evaluates a descriptor dword at draw time.
 u32 ResolveSgpr(const SgprSource& src, const u32* user_data);
+
+// Conservative descriptor-range alias check. Unknown/unreadable writers may
+// alias any range, so callers must not overwrite their metadata inputs.
+bool MayWriteBuffer(const Program& program,const u32* user_data,u64 base,u64 bytes);
 
 } // namespace Gpu::Shader

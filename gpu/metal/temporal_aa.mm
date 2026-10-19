@@ -10,7 +10,10 @@ namespace {
 constexpr const char* Source=R"(
 #include <metal_stdlib>
 using namespace metal;
-struct Params { float4 transform[3]; float4 projection; float4 previous_projection; uint reset; };
+struct Params {
+    float4 transform[3]; float4 projection; float4 previous_projection;
+    float2 motion_scale; uint reset; uint native_motion;
+};
 float3 tone(float3 c) { c=max(c,0.0f); return c/(1.0f+dot(c,float3(.2126,.7152,.0722))); }
 float3 untone(float3 c) { return c/max(1.0f-dot(c,float3(.2126,.7152,.0722)),1e-4f); }
 kernel void resolve(texture2d<float,access::read> color [[texture(0)]],
@@ -19,6 +22,7 @@ kernel void resolve(texture2d<float,access::read> color [[texture(0)]],
                     texture2d<float,access::read> old_depth [[texture(3)]],
                     texture2d<float,access::write> result [[texture(4)]],
                     texture2d<float,access::write> new_depth [[texture(5)]],
+                    texture2d<float,access::read> motion [[texture(6)]],
                     constant Params& p [[buffer(0)]], uint2 pixel [[thread_position_in_grid]]) {
     uint2 size=uint2(color.get_width(),color.get_height());
     if (any(pixel>=size)) return;
@@ -34,6 +38,20 @@ kernel void resolve(texture2d<float,access::read> color [[texture(0)]],
         float4 view=float4((uv.x*2-1)*z/p.projection.x,(1-uv.y*2)*z/p.projection.y,z,sky ? 0.0f : 1.0f);
         float3 v=float3(dot(p.transform[0],view),dot(p.transform[1],view),dot(p.transform[2],view));
         float2 previous=float2(v.x*p.previous_projection.x,-v.y*p.previous_projection.y)/max(v.z,1e-4f)*.5f+.5f;
+        if (p.native_motion && !sky && z>0 && isfinite(z)) {
+            // Nearest sampling preserves object coverage and depth at half size.
+            float4 native=motion.read(pixel/2);
+            float encoded_depth=z/(z+10.0f);
+            float2 object_previous=uv+(native.xy-.5f)*p.motion_scale;
+            bool valid=all(isfinite(native)) && native.a==1.0f &&
+                all(native.xy>0.0f) && all(native.xy<1.0f) &&
+                abs(native.b-encoded_depth)<=1.5f/255.0f+1e-6f;
+            // One code step is already about 1.7 scene pixels at 1080p. Keep
+            // precise camera motion when the native residual is only rounding.
+            if (valid && all(isfinite(object_previous)) &&
+                any(abs(object_previous-previous)>abs(p.motion_scale)/255.0f))
+                previous=object_previous;
+        }
         if (v.z>0 && all(isfinite(previous)) && all(previous>=0.0f) && all(previous<1.0f)) {
             uint2 q=uint2(previous*float2(size));
             float pd=old_depth.read(q).r;
@@ -59,6 +77,13 @@ kernel void resolve(texture2d<float,access::read> color [[texture(0)]],
                     old=clamp(old,lo,hi);
                     float displacement=length((previous-uv)*float2(size));
                     float weight=mix(.75f,.35f,clamp(displacement/16.0f,0.0f,1.0f));
+                    // Camera reprojection cannot follow independently moving
+                    // objects. Reduce stale history when the local HDR color
+                    // changes, while retaining full weight for a stable scene.
+                    float3 present=tone(current.rgb);
+                    float3 delta=abs(old-present);
+                    float change=max(delta.r,max(delta.g,delta.b))/max(.1f,max(present.r,max(present.g,present.b)));
+                    weight/=1.0f+16.0f*change*change;
                     resolved=untone(mix(tone(current.rgb),old,weight));
                 }
             }
@@ -71,8 +96,10 @@ kernel void resolve(texture2d<float,access::read> color [[texture(0)]],
 struct alignas(16) Parameters {
     std::array<float,12> transform;
     std::array<float,4> projection,previous_projection;
-    std::uint32_t reset;
+    std::array<float,2> motion_scale;
+    std::uint32_t reset,native_motion;
 };
+static_assert(sizeof(Parameters)==96);
 }
 struct TemporalAA::Impl {
     id<MTLDevice> device;
@@ -82,7 +109,7 @@ struct TemporalAA::Impl {
     bool observed=false,resolved=false,history=false;
     bool failed=false;
     unsigned next=0;
-    std::uint64_t frames=0;
+    std::uint64_t frames=0,native_frames=0,last_frame=0;
 };
 TemporalAA::TemporalAA(void* device):impl(std::make_unique<Impl>()) {
     impl->device=(__bridge id<MTLDevice>)device;
@@ -93,13 +120,14 @@ void TemporalAA::ObserveCamera(const SceneCamera& camera) {
 }
 bool TemporalAA::HasCamera() const { return impl->observed; }
 std::uint64_t TemporalAA::ResolvedFrames() const { return impl->frames; }
+std::uint64_t TemporalAA::NativeMotionFrames() const { return impl->native_frames; }
 void TemporalAA::Invalidate() { impl->history=impl->observed=impl->resolved=false; }
 void TemporalAA::EndFrame() {
     if (!impl->resolved) impl->history=false;
     else impl->previous=impl->current;
     impl->observed=impl->resolved=false;
 }
-void* TemporalAA::Encode(void* command,void* color,void* depth) {
+void* TemporalAA::Encode(void* command,void* color,void* depth,std::uint64_t frame,const MotionInput* motion) {
     auto cmd=(__bridge id<MTLCommandBuffer>)command;
     auto scene=(__bridge id<MTLTexture>)color;
     auto z=(__bridge id<MTLTexture>)depth;
@@ -141,8 +169,16 @@ void* TemporalAA::Encode(void* command,void* color,void* depth) {
         for (unsigned k:{0u,1u,2u}) alignment+=impl->current.view[k]*impl->previous.view[k];
         reset=distance>100 || alignment<.5f || impl->current.projection!=impl->previous.projection;
     }
+    auto native=motion ? (__bridge id<MTLTexture>)motion->texture : nil;
+    const bool use_native=!reset && native && frame && motion->current_frame==frame &&
+        motion->previous_frame==frame-1 && impl->last_frame==frame-1 &&
+        native.pixelFormat==MTLPixelFormatRGBA8Unorm && native.textureType==MTLTextureType2D &&
+        native.width*2==scene.width && native.height*2==scene.height &&
+        std::isfinite(motion->uv_scale[0]) && std::isfinite(motion->uv_scale[1]) &&
+        motion->uv_scale[0]!=0 && motion->uv_scale[1]!=0;
     const Parameters params{Reprojection(impl->previous,impl->current),impl->current.projection,
-        impl->previous.projection,std::uint32_t(reset)};
+        impl->previous.projection,use_native ? motion->uv_scale : std::array<float,2>{},
+        std::uint32_t(reset),std::uint32_t(use_native)};
     auto encoder=[cmd computeCommandEncoder];
     if (!encoder) return nullptr;
     [encoder setComputePipelineState:impl->pipeline];
@@ -151,11 +187,14 @@ void* TemporalAA::Encode(void* command,void* color,void* depth) {
     [encoder setTexture:impl->depth[1-impl->next] atIndex:3];
     [encoder setTexture:impl->color[impl->next] atIndex:4];
     [encoder setTexture:impl->depth[impl->next] atIndex:5];
+    [encoder setTexture:use_native ? native : scene atIndex:6];
     [encoder setBytes:&params length:sizeof(params) atIndex:0];
     [encoder dispatchThreads:MTLSizeMake(scene.width,scene.height,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];
     [encoder endEncoding];
     auto result=impl->color[impl->next];
     impl->next=1-impl->next; impl->resolved=impl->history=true; ++impl->frames;
+    impl->last_frame=frame;
+    if (use_native) ++impl->native_frames;
     return (__bridge void*)result;
 }
 }

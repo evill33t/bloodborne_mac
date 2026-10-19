@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <unistd.h>
+#include <thread>
+#include <chrono>
 
 // A real GPU behind a proxy that records archive requests. The production
 // cache policy must not reach any archive API, even when environment variables
@@ -40,6 +42,13 @@ int main() {
             render.vertexFunction=compiler.Function(1,"#include <metal_stdlib>\nusing namespace metal; vertex float4 main0(uint i [[vertex_id]]) { return float4(float(i),0,0,1); }",0);
             render.fragmentFunction=compiler.Function(2,"#include <metal_stdlib>\nusing namespace metal; fragment float4 main0() { return float4(1); }",0);
             render.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;
+            render.colorAttachments[0].blendingEnabled=YES;
+            render.colorAttachments[0].sourceRGBBlendFactor=MTLBlendFactorSourceAlpha;
+            render.colorAttachments[0].destinationRGBBlendFactor=MTLBlendFactorOneMinusSourceAlpha;
+            render.colorAttachments[0].sourceAlphaBlendFactor=MTLBlendFactorOne;
+            render.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
+            render.stencilAttachmentPixelFormat=MTLPixelFormatDepth32Float_Stencil8;
+            render.inputPrimitiveTopology=MTLPrimitiveTopologyClassTriangle;
             NSError* error=nil;
             assert(compiler.RenderPipeline(render,&error) && !error);
             auto compute=[MTLComputePipelineDescriptor new];
@@ -82,6 +91,63 @@ int main() {
             assert(!disabled.GetCacheStats().loaded);
         }
         std::filesystem::remove_all(directory);
-        puts("Metal runtime: no binary-archive API calls on cold/warm caches, even with explicit cache environment; offline fixture: warm hits and corruption recovery passed");
+        // Source/descriptor prewarming works without binary archive calls.
+        char warm_directory[]="/tmp/bb-metal-prewarm-XXXXXX";assert(mkdtemp(warm_directory));
+        setenv("BB_DATA_DIR",warm_directory,1);unsetenv("BB_METAL_SHADER_PREWARM");
+        setenv("BB_GAME_DIR",warm_directory,1);
+        {
+            Compiler compiler(device,1);compiler.EnablePrewarming();compile(compiler);
+        }
+        assert(std::filesystem::is_empty(warm_directory)); // never cache inside the game dump
+        const auto alias=std::filesystem::path(warm_directory)/"data-alias";
+        std::filesystem::create_directory_symlink(warm_directory,alias);
+        setenv("BB_DATA_DIR",alias.c_str(),1);
+        {
+            Compiler compiler(device,1);compiler.EnablePrewarming();compile(compiler);
+        }
+        assert(std::filesystem::directory_iterator(warm_directory)!=std::filesystem::directory_iterator{});
+        assert(std::distance(std::filesystem::directory_iterator(warm_directory),std::filesystem::directory_iterator{})==1);
+        std::filesystem::remove(alias);unsetenv("BB_GAME_DIR");
+        setenv("BB_DATA_DIR",warm_directory,1);setenv("BB_METAL_SHADER_PREWARM","0",1);
+        {
+            Compiler compiler(device,1);compiler.EnablePrewarming();compile(compiler);
+        }
+        assert(std::filesystem::is_empty(warm_directory));unsetenv("BB_METAL_SHADER_PREWARM");
+        {
+            auto spy=[BBArchiveSpyDevice wrapping:device];
+            Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();compile(compiler);
+            assert(compiler.GetWarmupStats().loaded==0 && spy.archiveCalls==0);
+            // A reused guest key with changed translation must compile new code.
+            auto a=compiler.Function(99,"#include <metal_stdlib>\nusing namespace metal; kernel void main0(uint i [[thread_position_in_grid]]) { }",0);
+            auto b=compiler.Function(99,"#include <metal_stdlib>\nusing namespace metal; kernel void main0(device uint* p [[buffer(0)]],uint i [[thread_position_in_grid]]) { p[i]=7; }",0);
+            assert(a && b && a!=b);
+        }
+        unsigned recipe_count=0;
+        for(const auto& entry:std::filesystem::recursive_directory_iterator(warm_directory))
+            if(entry.path().extension()==".json") ++recipe_count;
+        assert(recipe_count==2);
+        {
+            auto spy=[BBArchiveSpyDevice wrapping:device];
+            Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(compiler.GetWarmupStats().ready<2 && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            assert(compiler.GetWarmupStats().loaded==2 && compiler.GetWarmupStats().ready==2);
+            compile(compiler);assert(compiler.GetWarmupStats().hits==2 && spy.archiveCalls==0);
+            // A changed descriptor cannot reuse the original warm pipeline.
+            auto changed=[MTLComputePipelineDescriptor new];
+            changed.computeFunction=compiler.Function(3,"#include <metal_stdlib>\nusing namespace metal; kernel void main0(uint i [[thread_position_in_grid]]) { }",0);
+            changed.maxTotalThreadsPerThreadgroup=64;
+            assert(compiler.ComputePipeline(changed,nil));assert(compiler.GetWarmupStats().hits==2);
+        }
+        // Corruption is a cache miss; no partially decoded recipe is used.
+        for(const auto& entry:std::filesystem::recursive_directory_iterator(warm_directory))
+            if(entry.path().extension()==".json") std::ofstream(entry.path(),std::ios::trunc)<<"{broken";
+        {
+            Compiler compiler(device,1);compiler.EnablePrewarming();assert(!compiler.GetWarmupStats().loaded);
+            compile(compiler);
+        }
+        std::filesystem::remove_all(warm_directory);
+        puts("Metal runtime: no binary archives; exact-source/descriptor prewarming, source-directory protection, opt-out and corruption recovery passed; offline archive fixture passed");
     }
 }

@@ -42,6 +42,7 @@ public:
         std::atomic<u64> dispatches{0};
         std::atomic<u64> submits{0};
         std::atomic<u64> validated_register_packets{0}, register_mismatches{0}, malformed_packets{0};
+        std::atomic<u64> label_waits{0},label_parked_us{0},label_timeouts{0};
     };
 
     CommandProcessor();

@@ -7,6 +7,7 @@
 #include <memory>
 #include <cstdint>
 #include <vector>
+#include <functional>
 
 namespace Gpu::Metal {
 
@@ -14,6 +15,7 @@ class Device;
 
 struct PresenterConfig {
     bool vsync = true;
+    float refresh_rate = 60;
 };
 
 struct PresentedFrame {
@@ -35,11 +37,21 @@ public:
 
     void Resize(int width_px, int height_px);
     void SetVsync(bool enabled);
+    void SetRefreshRate(float hz);
     void SetUpscaling(bool enabled,float sharpness);
     bool SupportsMetalFX() const;
     const char* UpscalingStatus() const;
     std::uint64_t PresentedFrameCount() const;
     std::vector<PresentedFrame> TakePresentations();
+
+    // Pending storage stays owned by the producer until queued() is called
+    // after the presentation command is enqueued on the shared Metal queue.
+    // Callbacks must outlive this presenter. UI setters remain nonblocking.
+    void StartFrameLoop(std::function<void*()> pending,std::function<void()> queued);
+    bool HasFrameLoop() const;
+    std::uint64_t SkippedFrameCount() const;
+    std::uint64_t DisplayLinkUpdateCount() const;
+    std::uint64_t SubmittedFrameCount() const;
 
     // Placeholder frame: clears the drawable.
     void PresentClear(float r, float g, float b);
