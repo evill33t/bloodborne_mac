@@ -2,6 +2,30 @@
 // Included inside Gpu::Metal in mtl_compiler.mm. Recipes are disposable local
 // compiler inputs. A current descriptor AND exact source must match for a hit.
 namespace {
+struct RecipeFile {NSString* name;std::uint64_t bytes;double modified;};
+bool RecipeFilename(NSString* name) {
+    if(name.length!=69 || ![name.pathExtension isEqualToString:@"json"]) return false;
+    for(unsigned i=0;i<64;++i) {
+        const auto c=[name characterAtIndex:i];
+        if(!((c>='0' && c<='9') || (c>='a' && c<='f'))) return false;
+    }
+    return true;
+}
+std::vector<RecipeFile> RecipeInventory(NSString* root) {
+    std::vector<RecipeFile> result;
+    for(NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil]) {
+        if(!RecipeFilename(name)) continue;
+        NSURL* url=[NSURL fileURLWithPath:[root stringByAppendingPathComponent:name]];
+        NSNumber *size=nil,*regular=nil,*symlink=nil;NSDate* modified=nil;
+        [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+        [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+        [url getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil];
+        [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+        if(regular.boolValue && !symlink.boolValue && size)
+            result.push_back({name,size.unsignedLongLongValue,modified.timeIntervalSince1970});
+    }
+    return result;
+}
 NSData* RecipeData(NSDictionary* recipe) {
     return recipe ? [NSJSONSerialization dataWithJSONObject:recipe options:NSJSONWritingSortedKeys error:nil] : nil;
 }
@@ -35,7 +59,13 @@ bool RecipeFormat(id value) {
     }
 }
 }
-ShaderCompiler::WarmupStats ShaderCompiler::GetWarmupStats() {std::lock_guard guard(warm_lock);return warm_stats;}
+ShaderCompiler::WarmupStats ShaderCompiler::GetWarmupStats() {
+    std::lock_guard guard(warm_lock);auto result=warm_stats;
+    result.retained=warm_pipelines.size();result.retained_bytes=warm_bytes;
+    result.pending=recipe_writes.size();result.pending_bytes=pending_recipe_bytes;
+    result.queued=warm_queued_count;result.queued_bytes=warm_queued_bytes;
+    return result;
+}
 void ShaderCompiler::EnablePrewarming() {
     if(warm_root) return;
     const char* enabled=std::getenv("BB_METAL_SHADER_PREWARM");const char* data=std::getenv("BB_DATA_DIR");
@@ -50,24 +80,35 @@ void ShaderCompiler::EnablePrewarming() {
     root=[root stringByAppendingPathComponent:[NSString stringWithFormat:@"%llx-%ld.%ld.%ld",device.registryID,
         os.majorVersion,os.minorVersion,os.patchVersion]];
     warm_root=root;
-    NSArray<NSString*>* files=[[NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:nil]
-        sortedArrayUsingSelector:@selector(compare:)];
+    auto files=RecipeInventory(root);
+    // Recently learned areas get the background worker first. This does not
+    // delay foreground requests or require separate area/configuration modes.
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
+        return a.modified!=b.modified ? a.modified>b.modified : [a.name compare:b.name]==NSOrderedAscending;
+    });
     unsigned count=0;std::uint64_t total=0;
-    for(NSString* file in files) {
-        if(![file.pathExtension isEqualToString:@"json"] || count>=64) continue;
+    for(const auto& entry:files) {
+        NSString* file=entry.name;
+        if(count>=PipelinePrewarmLimits::Recipes) break;
+        if(entry.bytes>PipelinePrewarmLimits::RecipeBytes || entry.bytes>PipelinePrewarmLimits::Bytes-total) continue;
         NSURL* url=[NSURL fileURLWithPath:[root stringByAppendingPathComponent:file]];
         NSNumber* size=nil;NSNumber* regular=nil;NSNumber* symlink=nil;
         [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
         [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
         [url getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil];
-        if(!regular.boolValue || symlink.boolValue || size.unsignedLongLongValue>1024*1024 || total+size.unsignedLongLongValue>32ull*1024*1024) continue;
+        if(!regular.boolValue || symlink.boolValue || size.unsignedLongLongValue>PipelinePrewarmLimits::RecipeBytes ||
+            size.unsignedLongLongValue>PipelinePrewarmLimits::Bytes-total) continue;
         NSData* bytes=[NSData dataWithContentsOfURL:url options:0 error:nil];
-        if(!bytes || bytes.length>1024*1024) continue;
+        if(!bytes || bytes.length>PipelinePrewarmLimits::RecipeBytes || bytes.length>PipelinePrewarmLimits::Bytes-total) continue;
         id recipe=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
         if(![recipe isKindOfClass:NSDictionary.class] || ![file.stringByDeletingPathExtension isEqualToString:@(RecipeKey(recipe).c_str())]) continue;
         total+=bytes.length;++count;
-        {std::lock_guard guard(warm_lock);++warm_stats.loaded;}
-        Submit([this,recipe] {Prewarm(recipe);},true);
+        const auto queued_bytes=bytes.length;
+        {std::lock_guard guard(warm_lock);++warm_stats.loaded;++warm_queued_count;warm_queued_bytes+=queued_bytes;}
+        Submit([this,recipe,queued_bytes] {
+            Prewarm(recipe);
+            std::lock_guard guard(warm_lock);--warm_queued_count;warm_queued_bytes-=queued_bytes;
+        },true);
     }
 }
 NSDictionary* ShaderCompiler::RenderRecipe(MTLRenderPipelineDescriptor* d) {
@@ -101,14 +142,62 @@ NSDictionary* ShaderCompiler::ComputeRecipe(MTLComputePipelineDescriptor* d) {
 void ShaderCompiler::Remember(NSDictionary* recipe,WarmPipeline pipeline) {
     if(!recipe || (!pipeline.render && !pipeline.compute)) return;
     const auto key=RecipeKey(recipe);if(key.empty()) return;
-    NSData* bytes=RecipeData(recipe);if(!bytes || bytes.length>1024*1024) return;
+    NSData* bytes=RecipeData(recipe);if(!bytes || bytes.length>PipelinePrewarmLimits::RecipeBytes) return;
+    bool schedule=false;
     {
         std::lock_guard guard(warm_lock);
-        if(warm_pipelines.size()<64 || warm_pipelines.contains(key)) warm_pipelines[key]=pipeline;
-        if(recipe_writes.size()>=64 || !recipe_writes.emplace(key,bytes).second) return;
+        StoreWarmLocked(key,pipeline,bytes.length);
+        if(recipe_writes.contains(key)) return;
+        while(recipe_writes.size()>=PipelinePrewarmLimits::Recipes ||
+                bytes.length>PipelinePrewarmLimits::Bytes-pending_recipe_bytes-warm_queued_bytes) {
+            // Queued startup recipes cannot be cancelled mid-compilation. Keep
+            // the combined serialized inputs bounded until they finish.
+            if(recipe_writes.empty()) return;
+            auto oldest=recipe_writes.begin();
+            for(auto it=recipe_writes.begin();it!=recipe_writes.end();++it)
+                if(it->second.queued<oldest->second.queued) oldest=it;
+            pending_recipe_bytes-=oldest->second.data.length;recipe_writes.erase(oldest);
+        }
+        recipe_writes.emplace(key,PendingRecipe{bytes,++warm_sequence});
+        pending_recipe_bytes+=bytes.length;
+        if(!recipe_writer_queued) {recipe_writer_queued=true;schedule=true;}
     }
     // Disk writes must not hold a warm-cache lookup lock or delay a first draw.
-    Submit([this,key]{WriteRecipe(key);},true);
+    // One outstanding writer job also bounds queue metadata when pending
+    // entries are evicted during a large burst of first-use pipelines.
+    if(schedule) Submit([this]{WritePendingRecipe();},true);
+}
+void ShaderCompiler::StoreWarmLocked(const std::string& key,WarmPipeline pipeline,u64 bytes) {
+    if(auto old=warm_pipelines.find(key);old!=warm_pipelines.end()) {
+        warm_bytes-=old->second.bytes;warm_pipelines.erase(old);
+    }
+    while(warm_pipelines.size()>=PipelinePrewarmLimits::Recipes ||
+            bytes>PipelinePrewarmLimits::Bytes-warm_bytes) {
+        auto oldest=warm_pipelines.begin();
+        for(auto it=warm_pipelines.begin();it!=warm_pipelines.end();++it)
+            if(it->second.used<oldest->second.used) oldest=it;
+        warm_bytes-=oldest->second.bytes;warm_pipelines.erase(oldest);
+    }
+    pipeline.bytes=bytes;pipeline.used=++warm_sequence;
+    warm_pipelines.emplace(key,pipeline);warm_bytes+=bytes;
+}
+void ShaderCompiler::WritePendingRecipe() {
+    std::string key;
+    {
+        std::lock_guard guard(warm_lock);
+        if(recipe_writes.empty()) {recipe_writer_queued=false;return;}
+        auto oldest=recipe_writes.begin();
+        for(auto it=recipe_writes.begin();it!=recipe_writes.end();++it)
+            if(it->second.queued<oldest->second.queued) oldest=it;
+        key=oldest->first;
+    }
+    WriteRecipe(key);
+    {
+        std::lock_guard guard(warm_lock);
+        if(recipe_writes.empty()) {recipe_writer_queued=false;return;}
+    }
+    // Return to the queue between files, retaining demand-job priority.
+    Submit([this]{WritePendingRecipe();},true);
 }
 void ShaderCompiler::WriteRecipe(const std::string& key) {
     std::lock_guard writer(recipe_write_lock);
@@ -116,24 +205,50 @@ void ShaderCompiler::WriteRecipe(const std::string& key) {
     {
         std::lock_guard guard(warm_lock);
         auto it=recipe_writes.find(key);if(it==recipe_writes.end()) return;
-        bytes=it->second;recipe_writes.erase(it);
+        bytes=it->second.data;pending_recipe_bytes-=bytes.length;recipe_writes.erase(it);
     }
     auto manager=NSFileManager.defaultManager;
     if(![manager createDirectoryAtPath:warm_root withIntermediateDirectories:YES attributes:nil error:nil]) return;
     NSString* path=[warm_root stringByAppendingPathComponent:[@(key.c_str()) stringByAppendingString:@".json"]];
-    if(![manager fileExistsAtPath:path] && [manager contentsOfDirectoryAtPath:warm_root error:nil].count>=64) return;
+    NSURL* destination=[NSURL fileURLWithPath:path];NSNumber *symlink=nil,*regular=nil;
+    [destination getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil];
+    [destination getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+    if(symlink.boolValue || ([manager fileExistsAtPath:path] && !regular.boolValue)) return;
+    auto files=RecipeInventory(warm_root);
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
+        return a.modified!=b.modified ? a.modified<b.modified : [a.name compare:b.name]==NSOrderedAscending;
+    });
+    std::uint64_t total=0;std::size_t count=0;
+    for(const auto& file:files) if(![file.name isEqualToString:destination.lastPathComponent]) {
+        if(file.bytes>UINT64_MAX-total) return;
+        total+=file.bytes;++count;
+    }
+    for(const auto& file:files) {
+        if(count<PipelinePrewarmLimits::Recipes && total<=PipelinePrewarmLimits::Bytes-bytes.length) break;
+        if([file.name isEqualToString:destination.lastPathComponent]) continue;
+        // Only regular, nonsymlink, generated-key JSON entries are eligible.
+        // Never follow or remove unrelated files in the cache directory.
+        NSURL* candidate=[NSURL fileURLWithPath:[warm_root stringByAppendingPathComponent:file.name]];
+        NSNumber *link=nil,*plain=nil;
+        [candidate getResourceValue:&link forKey:NSURLIsSymbolicLinkKey error:nil];
+        [candidate getResourceValue:&plain forKey:NSURLIsRegularFileKey error:nil];
+        if(!link.boolValue && plain.boolValue && [manager removeItemAtURL:candidate error:nil]) {
+            total-=file.bytes;--count;
+        }
+    }
+    if(count>=PipelinePrewarmLimits::Recipes || total>PipelinePrewarmLimits::Bytes-bytes.length) return;
     [bytes writeToFile:path options:NSDataWritingAtomic error:nil];
 }
 id<MTLRenderPipelineState> ShaderCompiler::RenderPipeline(MTLRenderPipelineDescriptor* d,NSError** error) {
     NSDictionary* recipe=RenderRecipe(d);const auto key=RecipeKey(recipe);
     if(!key.empty()) {std::lock_guard guard(warm_lock);auto it=warm_pipelines.find(key);
-        if(it!=warm_pipelines.end() && it->second.render){++warm_stats.hits;if(error)*error=nil;return it->second.render;}}
+        if(it!=warm_pipelines.end() && it->second.render){it->second.used=++warm_sequence;++warm_stats.hits;if(error)*error=nil;return it->second.render;}}
     auto result=NewRenderPipeline(d,error);Remember(recipe,{result,nil});return result;
 }
 id<MTLComputePipelineState> ShaderCompiler::ComputePipeline(MTLComputePipelineDescriptor* d,NSError** error) {
     NSDictionary* recipe=ComputeRecipe(d);const auto key=RecipeKey(recipe);
     if(!key.empty()) {std::lock_guard guard(warm_lock);auto it=warm_pipelines.find(key);
-        if(it!=warm_pipelines.end() && it->second.compute){++warm_stats.hits;if(error)*error=nil;return it->second.compute;}}
+        if(it!=warm_pipelines.end() && it->second.compute){it->second.used=++warm_sequence;++warm_stats.hits;if(error)*error=nil;return it->second.compute;}}
     auto result=NewComputePipeline(d,error);Remember(recipe,{nil,result});return result;
 }
 void ShaderCompiler::Prewarm(NSDictionary* r) {
@@ -141,7 +256,7 @@ void ShaderCompiler::Prewarm(NSDictionary* r) {
         if(![r[@"version"] isEqual:@1]) return;
         WarmPipeline pipeline;
         if([r[@"kind"] isEqual:@"compute"]) {
-            if(![r[@"source"] isKindOfClass:NSString.class] || [r[@"source"] length]>512*1024 ||
+            if(![r[@"source"] isKindOfClass:NSString.class] || [r[@"source"] length]>PipelinePrewarmLimits::RecipeBytes/2 ||
                 !RecipeNumber(r[@"group"],1024) || !RecipeNumber(r[@"multiple"],1)) return;
             auto d=[MTLComputePipelineDescriptor new];d.computeFunction=Function(0,[r[@"source"] UTF8String],0);
             d.maxTotalThreadsPerThreadgroup=[r[@"group"] unsignedIntValue];
@@ -151,7 +266,7 @@ void ShaderCompiler::Prewarm(NSDictionary* r) {
             NSArray* s=r[@"state"];NSArray* colors=r[@"colors"];
             if(![s isKindOfClass:NSArray.class] || s.count!=13 || ![colors isKindOfClass:NSArray.class] || colors.count!=8 ||
                 ![r[@"vertex"] isKindOfClass:NSString.class] || ![r[@"fragment"] isKindOfClass:NSString.class] ||
-                [r[@"vertex"] length]>512*1024 || [r[@"fragment"] length]>512*1024 ||
+                [r[@"vertex"] length]>PipelinePrewarmLimits::RecipeBytes/2 || [r[@"fragment"] length]>PipelinePrewarmLimits::RecipeBytes/2 ||
                 !RecipeFormat(s[0]) || !RecipeFormat(s[1])) return;
             for(unsigned i=2;i<13;++i) if(!RecipeNumber(s[i],i==8 ? 64 : i==2 ? 8 : i==12 ? 2 : i==6 || i==7 || i==10 ? 3 : 1)) return;
             if(![device supportsTextureSampleCount:[s[2] unsignedIntValue]]) return;
@@ -176,6 +291,6 @@ void ShaderCompiler::Prewarm(NSDictionary* r) {
         }
         if(pipeline.render || pipeline.compute) {std::lock_guard guard(warm_lock);
             const auto key=RecipeKey(r);
-            if(warm_pipelines.size()<64 || warm_pipelines.contains(key)) {warm_pipelines[key]=pipeline;++warm_stats.ready;}}
+            StoreWarmLocked(key,pipeline,RecipeData(r).length);++warm_stats.ready;}
     }
 }
