@@ -112,9 +112,12 @@ Cold first-use draws are preserved. A pipeline is reused only when its current
 source and serialized descriptor match exactly; function caching uses the MSL
 source hash rather than a reusable guest address/key.
 
-The cache admits up to 64 pipelines. Each JSON recipe is at most 1 MiB, and
-startup loads at most 64 files/32 MiB. Corrupt, incompatible and symlinked files
-are ignored; successful compilation can replace a corrupt recipe atomically.
+The cache retains up to 512 pipelines with at most 128 MiB of serialized
+recipes; each JSON recipe is at most 1 MiB. Startup inputs and pending writes
+share the same count/byte limits. Recently used areas warm first, and oldest
+generated entries are evicted so the cache can learn later areas after filling.
+Corrupt, incompatible and symlinked files are ignored; successful compilation
+can replace a corrupt recipe atomically. Unrelated files are never evicted.
 Cache roots resolving inside `BB_GAME_DIR` or `BB_SOURCE_GAME` are refused.
 Set `BB_METAL_SHADER_PREWARM=0` to disable recording and prewarming.
 `DC_GPU_STATS=1` reports recipe loads, ready pipelines and warm pipeline hits.

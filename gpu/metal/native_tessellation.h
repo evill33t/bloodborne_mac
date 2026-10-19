@@ -23,11 +23,11 @@ inline const char* NativeTessellationMsl() {
 // Preparation stays in the domain invocation: no compute encoder or render-pass
 // break, and no CPU read of live guest geometry or reordered game commands.
 struct DcNativeTess { uint words[36]; uint hull_base; uint outer_factor; };
-static inline uint4 dc_native_tess_fetch(thread const DcMem& mem,ulong table,uint slot,uint vertex) {
+static inline uint4 dc_native_tess_fetch(thread const DcMem& mem,ulong table,uint slot,uint vertex_index) {
     device uint* p=dc_ptr_n(mem,(table+ulong(slot)*16ul)&~3ul,16u);
     uint4 d=p ? uint4(p[0],p[1],p[2],p[3]) : uint4(0u);
-    if(vertex>=d.z)return uint4(0u);
-    ulong address=dc_vbase(d.x,d.y)+ulong(vertex)*ulong(dc_vstride(d.y));
+    if(vertex_index>=d.z)return uint4(0u);
+    ulong address=dc_vbase(d.x,d.y)+ulong(vertex_index)*ulong(dc_vstride(d.y));
     return dc_swizzle(dc_load_fmt(mem,address,(d.w>>15)&15u,(d.w>>12)&7u),d.w);
 }
 static inline void dc_native_tess_put(thread DcNativeTess& out,uint at,uint4 value) {
@@ -38,32 +38,32 @@ static inline void dc_native_tess_init(thread DcNativeTess& out,thread const DcM
         constant uint* local_ud,constant uint* hull_ud,constant DcTess& params,
         uint patch,uint layout,uint outer_factor) {
     for(uint i=0;i<36;++i)out.words[i]=0u;
-    uint vertex=patch;
+    uint vertex_index=patch;
     if(params.index_size) {
-        vertex=dc_ld(mem,params.index_base+ulong(patch)*params.index_size);
-        if(params.index_size==2u)vertex&=0xffffu;
+        vertex_index=dc_ld(mem,params.index_base+ulong(patch)*params.index_size);
+        if(params.index_size==2u)vertex_index&=0xffffu;
     }
-    vertex+=params.base_vertex;
+    vertex_index+=params.base_vertex;
     ulong table=(ulong(local_ud[2])|(ulong(local_ud[3])<<32))&0xfffffffffffful;
-    uint4 p=dc_native_tess_fetch(mem,table,0u,vertex);
+    uint4 p=dc_native_tess_fetch(mem,table,0u,vertex_index);
     dc_native_tess_put(out,0u,uint4(p.xyz,0x3f800000u));
-    dc_native_tess_put(out,4u,dc_native_tess_fetch(mem,table,1u,vertex).zyxw);
-    dc_native_tess_put(out,8u,dc_native_tess_fetch(mem,table,2u,vertex));
+    dc_native_tess_put(out,4u,dc_native_tess_fetch(mem,table,1u,vertex_index).zyxw);
+    dc_native_tess_put(out,8u,dc_native_tess_fetch(mem,table,2u,vertex_index));
     if(layout==128u) {
-        dc_native_tess_put(out,12u,dc_native_tess_fetch(mem,table,5u,vertex));
-        dc_native_tess_put(out,16u,dc_native_tess_fetch(mem,table,6u,vertex));
-        dc_native_tess_put(out,20u,dc_native_tess_fetch(mem,table,7u,vertex));
-        p=dc_native_tess_fetch(mem,table,3u,vertex);
+        dc_native_tess_put(out,12u,dc_native_tess_fetch(mem,table,5u,vertex_index));
+        dc_native_tess_put(out,16u,dc_native_tess_fetch(mem,table,6u,vertex_index));
+        dc_native_tess_put(out,20u,dc_native_tess_fetch(mem,table,7u,vertex_index));
+        p=dc_native_tess_fetch(mem,table,3u,vertex_index);
         dc_native_tess_put(out,24u,uint4(p.xyz,0u));
-        p=dc_native_tess_fetch(mem,table,4u,vertex);
+        p=dc_native_tess_fetch(mem,table,4u,vertex_index);
         dc_native_tess_put(out,28u,uint4(p.xy,0u,0u));
     } else {
-        dc_native_tess_put(out,12u,dc_native_tess_fetch(mem,table,3u,vertex));
-        dc_native_tess_put(out,16u,dc_native_tess_fetch(mem,table,4u,vertex));
-        dc_native_tess_put(out,20u,dc_native_tess_fetch(mem,table,6u,vertex));
-        dc_native_tess_put(out,24u,dc_native_tess_fetch(mem,table,7u,vertex));
-        dc_native_tess_put(out,28u,dc_native_tess_fetch(mem,table,8u,vertex));
-        p=dc_native_tess_fetch(mem,table,5u,vertex);
+        dc_native_tess_put(out,12u,dc_native_tess_fetch(mem,table,3u,vertex_index));
+        dc_native_tess_put(out,16u,dc_native_tess_fetch(mem,table,4u,vertex_index));
+        dc_native_tess_put(out,20u,dc_native_tess_fetch(mem,table,6u,vertex_index));
+        dc_native_tess_put(out,24u,dc_native_tess_fetch(mem,table,7u,vertex_index));
+        dc_native_tess_put(out,28u,dc_native_tess_fetch(mem,table,8u,vertex_index));
+        p=dc_native_tess_fetch(mem,table,5u,vertex_index);
         dc_native_tess_put(out,32u,uint4(p.xy,0u,0u));
     }
     device uint* d=dc_ptr_n(mem,dc_vbase(hull_ud[4],hull_ud[5])&~3ul,16u);
