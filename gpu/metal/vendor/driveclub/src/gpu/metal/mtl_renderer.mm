@@ -2248,7 +2248,8 @@ struct MetalRenderer::Impl {
     Shader::GpuTessConsts params{};
   };
 
-  bool PrepareTessellation(const RegFile& r, const DrawCall& dc,u64 domain_hash,TessBuffers& out) {
+  bool PrepareTessellation(const RegFile& r, const DrawCall& dc,u64 domain_hash,
+                           bool allow_native,TessBuffers& out) {
     const u32 config = r[Reg::VGT_LS_HS_CONFIG], tf = r[Reg::VGT_TF_PARAM];
     // The light-volume shaders use one input/output control point and keep
     // their attributes in LDS. Other patch layouts still require integration.
@@ -2281,7 +2282,7 @@ struct MetalRenderer::Impl {
                             Bits(r[lo+2],24,2));
       if (!programs[k]) return false;
     }
-    const auto native=native_tessellation
+    const auto native=native_tessellation && allow_native
         ? NativeTessellation(programs[0]->hash,programs[1]->hash,domain_hash) : NativeTessellationConfig{};
     if (native && programs[0]->num_user_sgprs==6 && programs[1]->num_user_sgprs==8) {
       const u32 slot=native.outer_factor==3 ? 1 : 0;
@@ -3150,7 +3151,19 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
 
   TessBuffers tess;
-  if (tessellated && !PrepareTessellation(r,dc,vs->hash,tess)) return;
+  // Preserve a preparation boundary when a draw samples one of its own
+  // attachments. Fusing pure setup must not weaken a feedback dependency.
+  const auto texture_root=[](id<MTLTexture> texture) {
+    while(texture.parentTexture)texture=texture.parentTexture;
+    return texture;
+  };
+  bool allow_native_tess=true;
+  if(tessellated) for(const auto* resources:{&vs_res,&ps_res}) for(id<MTLTexture> sampled:resources->tex) {
+    const auto root=texture_root(sampled);
+    if(depth && root==texture_root(depth->tex))allow_native_tess=false;
+    for(auto* color:colors)if(color && root==texture_root(color->tex))allow_native_tess=false;
+  }
+  if (tessellated && !PrepareTessellation(r,dc,vs->hash,allow_native_tess,tess)) return;
 
   bool pending_clear = depth && depth->clear_pending;
   for (u32 k = 0; k < 8; ++k) {
