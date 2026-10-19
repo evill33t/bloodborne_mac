@@ -54,6 +54,8 @@ u64 MipLayout(u32 tile_index, u32 pitch, u32 height, u32 layers, u32 levels, u32
 // `height_el` elements with rows `width_el * bytes_per_el` apart. An element
 // is a texel, or a 4x4 block for block-compressed formats.
 // `z` is the z-plane within a thick micro tile (0..Thickness()-1).
+// BB_METAL_FAST_DETILE=1 enables the 1/2/4-byte macro-tile fast path;
+// other element sizes and tile modes keep the original address calculation.
 void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el,
                  u32 bytes_per_el, u32 z = 0);
 

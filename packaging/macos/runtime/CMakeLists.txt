@@ -146,6 +146,7 @@ add_library(bb-ps4-metal STATIC
     "${BB_ROOT}/gpu/metal/temporal_aa.mm"
     "${BB_ROOT}/gpu/metal/vendor/bbport/cp/cp_decoder.cpp"
     "${BB_ROOT}/gpu/metal/raw_texture_snapshot.mm"
+    "${BB_ROOT}/gpu/metal/gpu_texture_upload.mm"
     "${BB_ROOT}/gpu/metal/frontend_snapshot.cpp"
     "${BB_ROOT}/gpu/metal/game_bridge.mm")
 target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
@@ -321,6 +322,24 @@ target_link_options(bb-metal-texture-coherence-tests PRIVATE
     -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
 add_test(NAME darwin-metal-texture-coherence COMMAND bb-metal-texture-coherence-tests)
 set_tests_properties(darwin-metal-texture-coherence PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_test(NAME darwin-metal-texture-coherence-binding-cache COMMAND bb-metal-texture-coherence-tests)
+set_tests_properties(darwin-metal-texture-coherence-binding-cache PROPERTIES
+    ENVIRONMENT "BB_METAL_BINDING_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_test(NAME darwin-metal-depth-bounds-binding-cache COMMAND bb-metal-depth-bounds-tests)
+set_tests_properties(darwin-metal-depth-bounds-binding-cache PROPERTIES
+    ENVIRONMENT "BB_METAL_BINDING_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_executable(bb-metal-binding-cache-tests "${BB_ROOT}/gpu/metal/tests/game_binding_cache_tests.mm")
+target_include_directories(bb-metal-binding-cache-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-binding-cache-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-metal-binding-cache-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-binding-cache-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-binding-cache-cpu COMMAND bb-metal-binding-cache-tests --cpu-only)
+add_test(NAME darwin-metal-binding-cache COMMAND bb-metal-binding-cache-tests)
+add_test(NAME darwin-metal-binding-cache-reference COMMAND bb-metal-binding-cache-tests)
+set_tests_properties(darwin-binding-cache-cpu PROPERTIES TIMEOUT 10)
+set_tests_properties(darwin-metal-binding-cache PROPERTIES ENVIRONMENT "BB_METAL_BINDING_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 45)
+set_tests_properties(darwin-metal-binding-cache-reference PROPERTIES ENVIRONMENT "BB_METAL_BINDING_CACHE=0" SKIP_RETURN_CODE 77 TIMEOUT 45)
 add_executable(bb-metal-detile-tests "${BB_ROOT}/gpu/metal/tests/game_detile_tests.mm")
 target_include_directories(bb-metal-detile-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-metal-detile-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
@@ -330,9 +349,11 @@ target_link_options(bb-metal-detile-tests PRIVATE
 add_test(NAME darwin-detile-cpu COMMAND bb-metal-detile-tests --cpu-only)
 add_test(NAME darwin-metal-detile COMMAND bb-metal-detile-tests)
 add_test(NAME darwin-metal-detile-reference COMMAND bb-metal-detile-tests)
+add_test(NAME darwin-metal-gpu-texture-upload COMMAND bb-metal-detile-tests)
 set_tests_properties(darwin-detile-cpu PROPERTIES ENVIRONMENT "BB_METAL_FAST_DETILE=1" TIMEOUT 60)
 set_tests_properties(darwin-metal-detile PROPERTIES ENVIRONMENT "BB_METAL_FAST_DETILE=1" SKIP_RETURN_CODE 77 TIMEOUT 60)
 set_tests_properties(darwin-metal-detile-reference PROPERTIES ENVIRONMENT "BB_METAL_FAST_DETILE=0" SKIP_RETURN_CODE 77 TIMEOUT 60)
+set_tests_properties(darwin-metal-gpu-texture-upload PROPERTIES ENVIRONMENT "BB_METAL_FAST_DETILE=1;BB_METAL_GPU_TEXTURE_UPLOAD=1" SKIP_RETURN_CODE 77 TIMEOUT 60)
 add_executable(bb-macos-settings-tests "${BB_ROOT}/gpu/metal/tests/game_settings_tests.cpp"
     "${BB_ROOT}/gpu/metal/game_settings.cpp")
 target_include_directories(bb-macos-settings-tests PRIVATE "${BB_ROOT}")

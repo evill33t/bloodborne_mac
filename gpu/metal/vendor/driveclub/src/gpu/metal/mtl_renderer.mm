@@ -45,6 +45,7 @@
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
+#include "gpu/metal/gpu_texture_upload.h"
 
 namespace Gpu::Metal {
 
@@ -567,9 +568,15 @@ struct MetalRenderer::Impl {
   bool fast_typed_fills = true;
   bool native_tessellation = true;
   bool opaque_exports = true;
+  std::unique_ptr<GpuTextureUploader> texture_uploader;
+  u64 gpu_texture_uploads=0,gpu_texture_upload_bytes=0;
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
+  bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
+  bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
   std::unordered_map<const Program*,bool> static_smrd_programs;
+  std::unordered_map<u64,bool> simd_smrd_programs;
   u64 static_smrd_attempts=0,static_smrd_draws=0,static_smrd_rejects=0,static_smrd_bytes=0;
+  u64 direct_smrd_draws=0,direct_smrd_roots=0,direct_smrd_fallbacks=0;
   u64 native_tess_draws=0,translated_tess_draws=0;
   id<MTLBuffer> native_tess_factors[2]{};
   struct ProfileEntry {
@@ -599,9 +606,14 @@ struct MetalRenderer::Impl {
 #include "gpu/metal/renderer_capture.inc"
 #include "gpu/metal/htile_capture.inc"
 #include "gpu/metal/native_velocity.inc"
+#include "gpu/metal/renderer_binding_cache.inc"
 
   void Init() {
     InitCapture();
+    if(const char* option=std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"); option && !std::strcmp(option,"1")) {
+      texture_uploader=std::make_unique<GpuTextureUploader>((__bridge void*)device);
+      if(!texture_uploader->Ready()) texture_uploader.reset();
+    }
     dump_dir = std::getenv("DC_DUMP_SHADERS");
     dump_frames = std::getenv("DC_DUMP_FRAMES");
     trace_file = std::getenv("DC_TRACE_FILE");
@@ -895,6 +907,7 @@ struct MetalRenderer::Impl {
   }
 
   void EndPass() {
+    binding_cache.Reset();
     if (enc) {
       StutterTrace::Scope timing("render_pass_end",frame_count,last_vs,last_ps,1);
       [enc endEncoding];
@@ -1899,8 +1912,27 @@ struct MetalRenderer::Impl {
       for(unsigned k=0;k<8;++k) info<<(k?",":"")<<t[k];
       info<<"],\"scope\":\"Guest upload bytes and exact detiled planes before Metal upload\"}\n";
     }
+    bool gpu_uploaded=false;
+    if(texture_uploader && !fi.compressed && (fi.bytes_per_block==4 || fi.bytes_per_block==8) &&
+       tt.dim!=TexDim::Tex3D && !capture_guest && dump_texture!=addr &&
+       GpuTextureUploader::SupportsFormat(fi.format)) {
+      GpuTextureUploader::Upload upload{src,size,{}};
+      for(u32 lv=0;lv<levels;++lv) for(u32 l=0;l<layers;++l)
+        upload.levels.push_back({mips[lv].offset+mips[lv].slice_size*l,
+            std::max(width>>lv,1u),std::max(height>>lv,1u),mips[lv].pitch_el,
+            mips[lv].tile_index,tt.dim==TexDim::Tex2DArray ? l : 0,lv});
+      EndPass();EnsureCommandBuffer();
+      StutterTrace::Scope upload_timing("texture_gpu_upload_encode",frame_count,addr,size,1);
+      const auto result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload);
+      if(result==GpuTextureUploader::Result::Failed) {
+        execution->Fail(texture_uploader->Error());
+        return Dummy(tt);
+      }
+      gpu_uploaded=result==GpuTextureUploader::Result::Encoded;
+      if(gpu_uploaded) {++gpu_texture_uploads;gpu_texture_upload_bytes+=size;}
+    }
     std::vector<u8> linear;
-    for (u32 lv = 0; lv < levels; ++lv) {
+    for (u32 lv = 0; !gpu_uploaded && lv < levels; ++lv) {
       StutterTrace::Scope mip_timing("texture_mip_upload",frame_count,addr,
           (u64(lv)<<32)|layers,1);
       const Tiling::MipLevel &m = mips[lv];
@@ -2343,6 +2375,7 @@ struct MetalRenderer::Impl {
       StutterTrace::Scope encoder_timing("render_encoder_create",frame_count,last_vs,last_ps,1);
       enc = [cmd renderCommandEncoderWithDescriptor:rp];
     }
+    binding_cache.Reset(enc && cmd.retainedReferences);
     pass = ps;
     if (dump_passes && trace) {
       for (u32 k = 0; k < 8; ++k) {
@@ -3291,18 +3324,19 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
   SnapshotArena::Pin snapshot_pin(arena_pin);
   bool static_smrd_eligible=false;
-  if(static_smrd_enabled && ps && !probe_buf && !StaticSmrd::Layout(ps->hash).empty()) {
-    ++static_smrd_attempts;
+  if((static_smrd_enabled || direct_smrd_enabled) && ps && !probe_buf && !StaticSmrd::Layout(ps->hash).empty()) {
+    if(static_smrd_enabled) ++static_smrd_attempts;
     auto [entry,inserted]=static_smrd_programs.try_emplace(ps,false);
     if(inserted) entry->second=Shader::FragmentStaticSmrdEligible(*ps);
     static_smrd_eligible=entry->second;
   }
+  const bool use_direct_smrd=direct_smrd_enabled && !static_smrd_enabled && static_smrd_eligible;
   std::vector<StaticSmrd::Snapshot> static_smrd_sources;
-  if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),static_smrd_eligible ? &static_smrd_sources : nullptr)) return;
+  if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),static_smrd_enabled && static_smrd_eligible ? &static_smrd_sources : nullptr)) return;
   StaticSmrd::Packed static_smrd_packed;
-  const bool use_static_smrd=static_smrd_eligible && StaticSmrd::Pack(ps->hash,std::span<const u32,16>(pud),static_smrd_sources,
+  const bool use_static_smrd=static_smrd_enabled && !direct_smrd_enabled && static_smrd_eligible && StaticSmrd::Pack(ps->hash,std::span<const u32,16>(pud),static_smrd_sources,
       {arena_va,kArenaSize,arena_head,arena_commit_head,arena_pin},static_smrd_packed);
-  if(static_smrd_eligible) {
+  if(static_smrd_enabled && static_smrd_eligible) {
     if(use_static_smrd) {++static_smrd_draws;static_smrd_bytes+=u64(static_smrd_packed.count)*4;}
     else ++static_smrd_rejects;
   }
@@ -3424,6 +3458,13 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     // diagnostic probes on the original path; depth/coverage rules stay Metal's.
     fo.opaque_exports=opaque_exports && probe_slot<0;
     fo.static_smrd=use_static_smrd;
+    fo.direct_smrd=use_direct_smrd;
+    if(simd_smrd_enabled && !static_smrd_enabled && !direct_smrd_enabled && !probe_buf &&
+        (ps->hash==0x68fcb859536adcd4ull || ps->hash==0xaff190d9945a53e0ull)) {
+      auto [entry,inserted]=simd_smrd_programs.try_emplace(ps->hash,false);
+      if(inserted) entry->second=Shader::FragmentSimdSmrdEligible(*ps);
+      fo.simd_smrd=entry->second;
+    }
     if (probe_slot >= 0) {
       fo.probe_pc = probe.pc;
       fo.probe_x = probe.x;
@@ -3437,6 +3478,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     ps_key = Hash(fo.depth_bounds, ps_key);
     ps_key = Hash(fo.opaque_exports, ps_key);
     if(fo.static_smrd) ps_key=Hash(0x53534d524431ull,ps_key);
+    if(fo.direct_smrd) ps_key=Hash(StaticSmrd::AddressCacheTag,ps_key);
+    if(fo.simd_smrd) ps_key=Hash(0x53494d44534d5244ull,ps_key);
     ps_key = Fnv(fo.ps_input_cntl.data(), sizeof(fo.ps_input_cntl), ps_key);
     ps_key = Hash(fo.vs_param_mask, ps_key);
     ps_key = Hash(fo.ps_input_addr, ps_key);
@@ -3710,10 +3753,23 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
   StutterTrace::Scope binding_timing("draw_bind_resources",frame_count,vs_addr,ps_addr,1);
   UpdateMemMap();
+  id<MTLBuffer> draw_map=mem_map;
+  StaticSmrd::AddressBlock direct_addresses;
+  if(fo.direct_smrd && draw_map.length>=sizeof(Shader::GpuMemMap)) {
+    const auto* header=static_cast<const Shader::GpuMemMap*>(draw_map.contents);
+    const auto* pages=reinterpret_cast<const std::int32_t*>(header+1);
+    const auto count=(draw_map.length-sizeof(*header))/sizeof(*pages);
+    direct_addresses=StaticSmrd::TranslateRoots(ps->hash,std::span<const u32,16>(pud),*header,{pages,count});
+    ++direct_smrd_draws;direct_smrd_roots+=direct_addresses.ValidRoots();
+    direct_smrd_fallbacks+=2-direct_addresses.ValidRoots();
+  }
   [enc setVertexBytes:vud length:64 atIndex:Shader::Binding::UserData];
-  [enc setVertexBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
-  [enc setVertexBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
-  [enc setVertexBuffer:mem_map offset:0 atIndex:Shader::Binding::MemMap];
+  if(binding_cache.Buffer(false,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
+    [enc setVertexBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
+  if(binding_cache.Buffer(false,Shader::Binding::Mem1,(__bridge const void*)mem[1]))
+    [enc setVertexBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
+  if(binding_cache.Buffer(false,Shader::Binding::MemMap,(__bridge const void*)draw_map))
+    [enc setVertexBuffer:draw_map offset:0 atIndex:Shader::Binding::MemMap];
   [enc setVertexBytes:&consts
                length:sizeof(consts)
               atIndex:Shader::Binding::Draw];
@@ -3726,24 +3782,33 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
   for (u32 k = 0; k < vs_res.tex.size(); ++k) {
     StutterTrace::Scope timing("draw_vertex_texture_bind",frame_count,vs_addr,k,1);
-    [enc setVertexTexture:vs_res.tex[k] atIndex:k];
+    if(binding_cache.Texture(false,k,(__bridge const void*)vs_res.tex[k]))
+      [enc setVertexTexture:vs_res.tex[k] atIndex:k];
   }
   for (u32 u = 0; u < vs_res.smp.size() && u < 16; ++u) {
-    [enc setVertexSamplerState:vs_res.smp[u] atIndex:u];
+    if(binding_cache.Sampler(false,u,(__bridge const void*)vs_res.smp[u]))
+      [enc setVertexSamplerState:vs_res.smp[u] atIndex:u];
   }
   if (ps) {
     [enc setFragmentBytes:pud length:64 atIndex:Shader::Binding::UserData];
     if(fo.static_smrd) [enc setFragmentBytes:static_smrd_packed.words.data()
         length:static_smrd_packed.count*sizeof(u32) atIndex:Shader::Binding::StaticSmrd];
-    [enc setFragmentBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
-    [enc setFragmentBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
-    [enc setFragmentBuffer:mem_map offset:0 atIndex:Shader::Binding::MemMap];
+    if(fo.direct_smrd) [enc setFragmentBytes:&direct_addresses length:sizeof(direct_addresses)
+        atIndex:Shader::Binding::StaticSmrd];
+    if(binding_cache.Buffer(true,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
+      [enc setFragmentBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
+    if(binding_cache.Buffer(true,Shader::Binding::Mem1,(__bridge const void*)mem[1]))
+      [enc setFragmentBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
+    if(binding_cache.Buffer(true,Shader::Binding::MemMap,(__bridge const void*)draw_map))
+      [enc setFragmentBuffer:draw_map offset:0 atIndex:Shader::Binding::MemMap];
     for (u32 k = 0; k < ps_res.tex.size(); ++k) {
       StutterTrace::Scope timing("draw_fragment_texture_bind",frame_count,ps_addr,k,1);
-      [enc setFragmentTexture:ps_res.tex[k] atIndex:k];
+      if(binding_cache.Texture(true,k,(__bridge const void*)ps_res.tex[k]))
+        [enc setFragmentTexture:ps_res.tex[k] atIndex:k];
     }
     for (u32 u = 0; u < ps_res.smp.size() && u < 16; ++u) {
-      [enc setFragmentSamplerState:ps_res.smp[u] atIndex:u];
+      if(binding_cache.Sampler(true,u,(__bridge const void*)ps_res.smp[u]))
+        [enc setFragmentSamplerState:ps_res.smp[u] atIndex:u];
     }
     if (depth_bounds) {
       const float zb[2] = {r.F(Reg::DB_DEPTH_BOUNDS_MIN),
@@ -4392,6 +4457,14 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_tess_draws,translated_tess_draws);
       if(static_smrd_enabled) DC_INFO("gpu static SMRD: %llu attempts, %llu packed draws, %llu snapshot rejects, %llu bytes (cumulative)",
           static_smrd_attempts,static_smrd_draws,static_smrd_rejects,static_smrd_bytes);
+      if(texture_uploader) DC_INFO("gpu texture upload: %llu versions, %llu bytes (cumulative)",
+          gpu_texture_uploads,gpu_texture_upload_bytes);
+      if(direct_smrd_enabled) DC_INFO("gpu direct SMRD: %llu draws, %llu translated roots, %llu fallback roots (cumulative)",
+          direct_smrd_draws,direct_smrd_roots,direct_smrd_fallbacks);
+      if(binding_cache.enabled) DC_INFO("gpu binding cache: buffers %llu/%llu, textures %llu/%llu, samplers %llu/%llu APIs skipped/intended (cumulative)",
+          binding_cache.buffer_counts.skipped,binding_cache.buffer_counts.intended,
+          binding_cache.texture_counts.skipped,binding_cache.texture_counts.intended,
+          binding_cache.sampler_counts.skipped,binding_cache.sampler_counts.intended);
       stat_upload_base=upload_allocations.load(std::memory_order_relaxed);
       stat_hashed = 0;
       stat_depth_copies = 0;

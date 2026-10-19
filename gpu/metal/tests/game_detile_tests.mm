@@ -6,6 +6,7 @@
 #include "gpu/liverpool/registers.h"
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_renderer.h"
+#include "gpu/metal/gpu_texture_upload.h"
 #include "src/runtime_gpu_memory.h"
 #include <algorithm>
 #include <array>
@@ -54,11 +55,12 @@ static void CpuTests() {
         {1,1},{3,7},{8,8},{9,9},{63,65},{127,63},{129,65},{257,131},
         {1025,513},{4095,129},{4096,4096}}};
     unsigned cases=0;
-    for(unsigned tile:{0u,1u,2u,3u,4u,10u,14u}) for(const auto size:sizes)
-        for(unsigned alignment:{0u,1u,3u}) {
-            CpuCase(tile,size[0],size[1],size[0]+(alignment ? 17 : 0),4,alignment);++cases;
-        }
-    // Non-four-byte, linear, micro-tiled and thick callers retain the oracle.
+    for(unsigned bytes:{1u,2u,4u})
+        for(unsigned tile:{0u,1u,2u,3u,4u,10u,14u}) for(const auto size:sizes)
+            for(unsigned alignment:{0u,1u,3u}) {
+                CpuCase(tile,size[0],size[1],size[0]+(alignment ? 17 : 0),bytes,alignment);++cases;
+            }
+    // Also cover 8/16-byte, linear, micro-tiled and thick fallback callers.
     for(unsigned tile:{0u,4u,10u,14u,5u,9u,13u,8u,31u,19u})
         for(unsigned bytes:{1u,2u,4u,8u,16u})
             for(unsigned z=0;z<Tiling::Thickness(tile);++z) {
@@ -73,6 +75,120 @@ static std::array<unsigned char,4> Pattern(unsigned x,unsigned y,unsigned versio
     const unsigned char red=(x*17+y*29+version*61)&255;
     return {red,static_cast<unsigned char>(floating ? 0 : (x*43+y*7+version*37)&255),
         static_cast<unsigned char>(floating ? 0 : (x*11+y*53+version*83)&255),255};
+}
+
+static bool GpuUploadBitsTests() {
+    auto device=MTLCreateSystemDefaultDevice();
+    auto queue=[device newCommandQueue];
+    Gpu::Metal::GpuTextureUploader uploader((__bridge void*)device);
+    if(!uploader.Ready()) {fprintf(stderr,"%s\n",uploader.Error().c_str());return false;}
+    unsigned cases=0;
+    for(unsigned tile:{0u,1u,2u,3u,4u,10u,14u})
+    for(MTLPixelFormat format:{MTLPixelFormatR32Float,MTLPixelFormatRGBA8Unorm,
+            MTLPixelFormatRGBA8Unorm_sRGB,MTLPixelFormatBGRA8Unorm,MTLPixelFormatBGRA8Unorm_sRGB,
+            MTLPixelFormatRGBA16Float,MTLPixelFormatRG32Float}) {
+        constexpr unsigned width=1025,height=129,pitch=1041;
+        const unsigned bpe=Gpu::Metal::GpuTextureUploader::BytesPerPixel(format),words=bpe/4;
+        assert(bpe==4 || bpe==8);
+        const auto size=Tiling::SliceSize(tile,pitch,height,bpe);
+        std::vector<uint32_t> source(size/4),reference(width*height*words);
+        uint32_t random=0x918372aa;
+        for(auto& word:source) {random^=random<<13;random^=random>>17;random^=random<<5;word=random;}
+        // Include special float32 and packed float16 encodings. Typed loads
+        // could canonicalize NaNs/denormals or lose the second raw word.
+        const uint32_t special[]{0,0x80000000,1,0x007fffff,0x7f800000,0xff800000,0x7fc12345,0x7fa54321,
+            0x03ff0001,0x7c00fc00,0x7e017c01,0x3555bbff,0xfc007bff,0xfe017d55};
+        std::copy(std::begin(special),std::end(special),source.begin());
+        Tiling::DetileSliceReference(tile,reinterpret_cast<const unsigned char*>(source.data()),
+            reinterpret_cast<unsigned char*>(reference.data()),width,height,pitch,bpe);
+        auto descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+        descriptor.storageMode=MTLStorageModePrivate;
+        auto texture=[device newTextureWithDescriptor:descriptor];
+        const size_t row=(width*bpe+255)&~255u;
+        auto readback=[device newBufferWithLength:row*height options:MTLResourceStorageModeShared];
+        auto command=[queue commandBuffer];
+        Gpu::Metal::GpuTextureUploader::Upload upload{source.data(),size,{{0,width,height,pitch,tile,0,0}}};
+        using Result=Gpu::Metal::GpuTextureUploader::Result;
+        // Preflight rejects malformed coverage/ranges without poisoning the
+        // command buffer; the subsequent valid request must still execute.
+        auto invalid=upload;invalid.levels[0].src_offset=size;
+        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
+        invalid=upload;invalid.levels.push_back(invalid.levels[0]);
+        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
+        invalid=upload;invalid.levels[0].src_offset=bpe==8 ? 4 : 2;
+        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
+        if(uploader.Encode((__bridge void*)command,(__bridge void*)texture,upload)!=Result::Encoded) {
+            fprintf(stderr,"GPU upload rejected tile=%u format=%lu: %s\n",tile,(unsigned long)format,uploader.Error().c_str());return false;
+        }
+        // The GPU has not been submitted. A changed source must not change
+        // the immutable texture version recorded above.
+        std::fill(source.begin(),source.end(),0xdeadc0de);
+        auto blit=[command blitCommandEncoder];
+        [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+            sourceSize:MTLSizeMake(width,height,1) toBuffer:readback destinationOffset:0
+            destinationBytesPerRow:row destinationBytesPerImage:row*height];
+        [blit endEncoding];[command commit];[command waitUntilCompleted];
+        if(command.error) {fprintf(stderr,"%s\n",command.error.localizedDescription.UTF8String);return false;}
+        for(unsigned y=0;y<height;++y)
+            if(memcmp(static_cast<const unsigned char*>(readback.contents)+y*row,reference.data()+y*width*words,width*bpe)) {
+                fprintf(stderr,"GPU raw upload mismatch tile=%u format=%lu row=%u\n",tile,(unsigned long)format,y);return false;
+            }
+        ++cases;
+    }
+    // Six visible cube faces occupy eight physical slices per mip. Exercise
+    // that padding and independent mip dimensions in the generic upload path.
+    for(MTLPixelFormat format:{MTLPixelFormatR32Float,MTLPixelFormatRGBA8Unorm,
+            MTLPixelFormatRGBA16Float,MTLPixelFormatRG32Float}) {
+        constexpr unsigned width=257,height=129,levels=3,slices=6,storage=8;
+        const unsigned bpe=Gpu::Metal::GpuTextureUploader::BytesPerPixel(format),words=bpe/4;
+        Gpu::Metal::GpuTextureUploader::Upload upload;
+        std::vector<std::vector<uint32_t>> references;
+        size_t total=0;
+        for(unsigned lv=0;lv<levels;++lv) {
+            const unsigned w=width>>lv,h=height>>lv,pitch=w+17;
+            const auto bytes=Tiling::SliceSize(0,pitch,h,bpe);
+            for(unsigned slice=0;slice<slices;++slice)
+                upload.levels.push_back({total+bytes*slice,w,h,pitch,0,slice,lv});
+            total+=bytes*storage;
+        }
+        std::vector<uint32_t> source(total/4);
+        for(size_t n=0;n<source.size();++n)source[n]=uint32_t(n*0x9e3779b9u)^uint32_t(n>>7);
+        for(const auto& level:upload.levels) {
+            references.emplace_back(level.width*level.height*words);
+            Tiling::DetileSliceReference(level.tile,reinterpret_cast<const unsigned char*>(source.data())+level.src_offset,
+                reinterpret_cast<unsigned char*>(references.back().data()),level.width,level.height,level.pitch,bpe);
+        }
+        upload.source=source.data();upload.bytes=total;
+        auto descriptor=[MTLTextureDescriptor new];descriptor.textureType=MTLTextureType2DArray;
+        descriptor.pixelFormat=format;descriptor.width=width;descriptor.height=height;
+        descriptor.arrayLength=slices;descriptor.mipmapLevelCount=levels;descriptor.storageMode=MTLStorageModeManaged;
+        auto texture=[device newTextureWithDescriptor:descriptor];auto command=[queue commandBuffer];
+        using Result=Gpu::Metal::GpuTextureUploader::Result;
+        auto invalid=upload;invalid.levels.pop_back();
+        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
+        if(uploader.Encode((__bridge void*)command,(__bridge void*)texture,upload)!=Result::Encoded)return false;
+        std::fill(source.begin(),source.end(),0xbadc0ffe);
+        std::vector<id<MTLBuffer>> outputs;
+        auto blit=[command blitCommandEncoder];
+        for(const auto& level:upload.levels) {
+            const size_t row=(level.width*bpe+255)&~255u;
+            auto output=[device newBufferWithLength:row*level.height options:MTLResourceStorageModeShared];
+            outputs.push_back(output);
+            [blit copyFromTexture:texture sourceSlice:level.slice sourceLevel:level.level sourceOrigin:MTLOriginMake(0,0,0)
+                sourceSize:MTLSizeMake(level.width,level.height,1) toBuffer:output destinationOffset:0
+                destinationBytesPerRow:row destinationBytesPerImage:row*level.height];
+        }
+        [blit endEncoding];[command commit];[command waitUntilCompleted];if(command.error)return false;
+        for(size_t n=0;n<upload.levels.size();++n) {
+            const auto& level=upload.levels[n];const size_t row=(level.width*bpe+255)&~255u;
+            for(unsigned y=0;y<level.height;++y)
+                if(memcmp(static_cast<const unsigned char*>(outputs[n].contents)+y*row,
+                    references[n].data()+y*level.width*words,level.width*bpe))return false;
+            ++cases;
+        }
+    }
+    printf("GPU upload: %u raw-bit format/layout/slice/mip cases, bank boundaries, special floats, snapshot mutation and invalid-request fallback passed\n",cases);
+    return true;
 }
 
 static int GpuTests() {
@@ -197,5 +313,8 @@ int main(int argc,char** argv) {
     if(!std::getenv("BB_METAL_FAST_DETILE"))setenv("BB_METAL_FAST_DETILE","1",1);
     CpuTests();
     if(argc>1 && !std::strcmp(argv[1],"--cpu-only"))return 0;
-    @autoreleasepool {return GpuTests();}
+    @autoreleasepool {
+        if(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD") && !std::strcmp(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"),"1") && !GpuUploadBitsTests())return 1;
+        return GpuTests();
+    }
 }

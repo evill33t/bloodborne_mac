@@ -7,6 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 
 #include <pthread.h>
 #include <x86intrin.h>
@@ -65,11 +69,202 @@ bool Compare(u32 func, u32 value, u32 ref) {
 
 thread_local CommandProcessor::Ring* CommandProcessor::t_ring = nullptr;
 thread_local RegFile* CommandProcessor::t_regs = nullptr;
+thread_local CommandProcessor::AuditJob* CommandProcessor::t_audit_job = nullptr;
+thread_local u32 CommandProcessor::t_audit_buffer = 0;
+
+struct CommandProcessor::AuditJob {
+    struct Stream {
+        u64 address=0,dwords=0,submitted_ns=0,consumed_ns=0;
+        bool submit_mapped=false,consume_mapped=false;
+        std::vector<u32> submitted,consumed;
+    };
+    u64 id=0;
+    std::vector<std::array<Stream,2>> buffers;
+    std::vector<std::string> events;
+    u64 packet_address=0,packet_offset=0;
+    u32 packet_header=0;
+    int packet_depth=0;
+};
+struct CommandProcessor::AuditState {
+    // 64MiB of binary snapshots plus <=32MiB of event text and bounded
+    // manifests remain below 128MiB total output for one armed run.
+    static constexpr u64 ByteLimit=64ull<<20,StreamLimit=8ull<<20;
+    static constexpr u64 JobLimit=200,EventLimit=65536;
+    std::mutex lock;
+    std::filesystem::path root;
+    std::string trigger,token;
+    std::chrono::steady_clock::time_point poll{};
+    bool armed=false;
+    u64 jobs=0,reserved_bytes=0;
+    std::atomic<u64> events{0};
+    std::ofstream manifest,packets;
+};
+
+namespace {
+u64 AuditNow() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+u64 AuditHash(const std::vector<u32>& words) {
+    u64 value=14695981039346656037ull;
+    for(const u8 byte:std::span(reinterpret_cast<const u8*>(words.data()),words.size()*4))
+        value=(value^byte)*1099511628211ull;
+    return value;
+}
+std::string AuditToken(const std::string& path) {
+    std::ifstream file(path,std::ios::binary);char bytes[128]{};
+    file.read(bytes,sizeof(bytes));return {bytes,static_cast<std::size_t>(file.gcount())};
+}
+// Reject a symlink in any existing output component, and any destination in
+// either original-game root. Diagnostic files never belong in a game dump.
+bool AuditRoot(const std::filesystem::path& path) {
+    if(!path.is_absolute()) return false;
+    std::error_code error;std::filesystem::path prefix;
+    for(const auto& component:path.lexically_normal()) {
+        prefix/=component;
+        const auto status=std::filesystem::symlink_status(prefix,error);
+        if(error && error!=std::errc::no_such_file_or_directory) return false;
+        error.clear();if(std::filesystem::is_symlink(status)) return false;
+    }
+    const auto root=std::filesystem::weakly_canonical(path,error);if(error) return false;
+    for(const char* name:{"BB_SOURCE_GAME","BB_GAME_DIR"}) if(const char* value=std::getenv(name);value && *value) {
+        const auto game=std::filesystem::weakly_canonical(value,error);if(error) return false;
+        const auto relative=root.lexically_relative(game);
+        if(root==game || (!relative.empty() && *relative.begin()!="..")) return false;
+    }
+    return true;
+}
+}
+
+void CommandProcessor::InitAudit() {
+    const char* directory=std::getenv("BB_METAL_CP_AUDIT_DIR");
+    const char* trigger=std::getenv("DC_TRACE_FILE");
+    if(!directory || !*directory || !trigger || !*trigger || !AuditRoot(directory)) return;
+    try {
+        auto state=std::make_unique<AuditState>();
+        state->root=std::filesystem::path(directory).lexically_normal()/std::to_string(AuditNow());
+        std::filesystem::create_directories(state->root);
+        if(!AuditRoot(state->root)) return;
+        state->trigger=trigger;state->token=AuditToken(trigger);
+        state->manifest.open(state->root/"buffers.jsonl");state->packets.open(state->root/"packets.csv");
+        if(!state->manifest || !state->packets) return;
+        state->manifest<<"{\"kind\":\"cp_audit_config\",\"version\":1,\"byte_limit\":"<<AuditState::ByteLimit
+            <<",\"job_limit\":"<<AuditState::JobLimit<<",\"event_limit\":"<<AuditState::EventLimit
+            <<",\"hash\":\"fnv1a64\",\"execution\":\"original guest spans; diagnostic copies are never executed\"}\n";
+        state->packets<<"steady_ns,job,ring,buffer,kind,constant_engine,depth,address,offset_dwords,opcode,header,predicate,count,indexed,instances,index_offset,first_vertex,vs,ps,cb0,db_count_control,db_render_control,db_depth_control,cb_target_mask,depth_base,raw_words\n";
+        DC_INFO("gpu: CP audit waiting for DC_TRACE_FILE token change at %s",state->root.c_str());
+        audit=std::move(state);
+    } catch(const std::exception& e) {DC_WARN("gpu: CP audit setup failed: %s",e.what());}
+}
+
+std::shared_ptr<CommandProcessor::AuditJob> CommandProcessor::AuditSubmission(const std::vector<CmdBuffers>& buffers) {
+    if(!audit) return {};
+    std::lock_guard lock(audit->lock);
+    try {
+        if(!audit->armed) {
+            const auto now=std::chrono::steady_clock::now();if(now<audit->poll) return {};
+            audit->poll=now+std::chrono::milliseconds(100);
+            const auto token=AuditToken(audit->trigger);
+            if(token.empty() || token==audit->token) return {};
+            audit->armed=true;
+            audit->manifest<<"{\"kind\":\"armed\",\"steady_ns\":"<<AuditNow()<<"}\n";
+        }
+        if(audit->jobs>=AuditState::JobLimit || buffers.size()>64) return {};
+        u64 reserve=0;
+        for(const auto& buffer:buffers) for(const auto stream:{buffer.dcb,buffer.ccb}) {
+            if(stream.size_bytes()<=AuditState::StreamLimit) reserve+=stream.size_bytes()*2;
+        }
+        if(reserve>AuditState::ByteLimit-audit->reserved_bytes) return {};
+        auto job=std::make_shared<AuditJob>();job->id=++audit->jobs;job->buffers.resize(buffers.size());
+        audit->reserved_bytes+=reserve;
+        for(std::size_t n=0;n<buffers.size();++n) for(unsigned k=0;k<2;++k) {
+            const auto source=k ? buffers[n].ccb : buffers[n].dcb;auto& saved=job->buffers[n][k];
+            saved.address=reinterpret_cast<u64>(source.data());saved.dwords=source.size();saved.submitted_ns=AuditNow();
+            if(!source.empty() && source.size_bytes()<=AuditState::StreamLimit && Mapped(source.data(),source.size_bytes())) {
+                saved.submitted.assign(source.begin(),source.end());saved.submit_mapped=true;
+            }
+        }
+        return job;
+    } catch(const std::exception& e) {DC_WARN("gpu: CP submission audit stopped: %s",e.what());return {};}
+}
+
+void CommandProcessor::AuditConsume(AuditJob& job,const CmdBuffers& buffer,u32 index) {
+    try {
+        for(unsigned k=0;k<2;++k) {
+            const auto source=k ? buffer.ccb : buffer.dcb;auto& saved=job.buffers[index][k];saved.consumed_ns=AuditNow();
+            if(!source.empty() && source.size_bytes()<=AuditState::StreamLimit && Mapped(source.data(),source.size_bytes())) {
+                saved.consumed.assign(source.begin(),source.end());saved.consume_mapped=true;
+            }
+        }
+    } catch(const std::exception& e) {DC_WARN("gpu: CP consumption audit incomplete: %s",e.what());}
+}
+
+void CommandProcessor::AuditFinish(AuditJob& job) {
+    std::lock_guard lock(audit->lock);
+    try {
+        for(std::size_t n=0;n<job.buffers.size();++n) for(unsigned k=0;k<2;++k) {
+            const auto& stream=job.buffers[n][k];
+            const auto stem="job_"+std::to_string(job.id)+"_buffer_"+std::to_string(n)+(k?"_ccb":"_dcb");
+            bool saved=true;
+            for(unsigned phase=0;phase<2;++phase) {
+                const auto& words=phase ? stream.consumed : stream.submitted;if(words.empty()) continue;
+                std::ofstream file(audit->root/(stem+(phase?"_consume.bin":"_submit.bin")),std::ios::binary);
+                file.write(reinterpret_cast<const char*>(words.data()),words.size()*4);file.close();saved&=file.good();
+            }
+            u64 different=0;
+            for(std::size_t i=0;i<std::min(stream.submitted.size(),stream.consumed.size());++i)
+                different+=stream.submitted[i]!=stream.consumed[i];
+            audit->manifest<<"{\"kind\":\"command_stream\",\"job\":"<<job.id<<",\"buffer\":"<<n
+                <<",\"constant_engine\":"<<(k?"true":"false")<<",\"address\":"<<stream.address<<",\"dwords\":"<<stream.dwords
+                <<",\"submit_ns\":"<<stream.submitted_ns<<",\"consume_ns\":"<<stream.consumed_ns
+                <<",\"submit_captured\":"<<(stream.submit_mapped?"true":"false")<<",\"consume_captured\":"<<(stream.consume_mapped?"true":"false")
+                <<",\"submit_hash\":"<<AuditHash(stream.submitted)<<",\"consume_hash\":"<<AuditHash(stream.consumed)
+                <<",\"different_dwords\":"<<different<<",\"files_saved\":"<<(saved?"true":"false")<<",\"stem\":\""<<stem<<"\"}\n";
+        }
+        for(const auto& event:job.events) audit->packets<<event<<'\n';
+        audit->manifest.flush();audit->packets.flush();
+    } catch(const std::exception& e) {DC_WARN("gpu: CP audit write failed: %s",e.what());}
+}
+
+void CommandProcessor::AuditPacket(std::span<const u32> packet,u64 offset,int depth,bool constant) {
+    if(!t_audit_job || packet.empty()) return;
+    try {
+    auto& job=*t_audit_job;const u32 header=packet[0],op=HeaderOpcode(header);
+    if(!constant) {job.packet_address=reinterpret_cast<u64>(packet.data());job.packet_offset=offset;job.packet_header=header;job.packet_depth=depth;}
+    const bool selected=op==0x1f || op==0x20 || op==0x22 || op==Op::EventWrite ||
+        op==Op::EventWriteEop || op==Op::EventWriteEos || op==Op::ReleaseMem ||
+        op==Op::DrawIndirect || op==Op::DrawIndexIndirect || op==Op::DrawIndex2 ||
+        op==Op::DrawIndexOffset2 || op==Op::DrawIndexAuto || op==Op::IndirectBuffer || op==Op::IndirectBufferConst;
+    if(!selected || audit->events.fetch_add(1)>=AuditState::EventLimit) return;
+    const auto& registers=CurRegs();
+    std::ostringstream row;row<<AuditNow()<<','<<job.id<<','<<(t_ring?t_ring->index:0)<<','<<t_audit_buffer
+        <<",packet,"<<constant<<','<<depth<<','<<reinterpret_cast<u64>(packet.data())<<','<<offset<<','<<op<<','<<header<<','<<(header&1)
+        <<",,,,,,,,,"<<registers[0xa001]<<','<<registers[Reg::DB_RENDER_CONTROL]<<','<<registers[Reg::DB_DEPTH_CONTROL]
+        <<','<<registers[Reg::CB_TARGET_MASK]<<','<<(u64(registers[Reg::DB_Z_READ_BASE])<<8)<<",\"";
+    for(std::size_t i=0;i<std::min<std::size_t>(packet.size(),16);++i) row<<(i?" ":"")<<std::hex<<packet[i];
+    row<<'"';auto line=row.str();if(line.size()<=512) job.events.push_back(std::move(line));
+    } catch(const std::exception&) { /* Diagnostic allocation must not fail execution. */ }
+}
+
+void CommandProcessor::AuditDraw(bool indexed,u32 count,u32 offset,u32 first,u32 instances) {
+    if(!t_audit_job || audit->events.fetch_add(1)>=AuditState::EventLimit) return;
+    try {
+    const auto& job=*t_audit_job;const auto& registers=CurRegs();
+    std::ostringstream row;row<<AuditNow()<<','<<job.id<<','<<(t_ring?t_ring->index:0)<<','<<t_audit_buffer
+        <<",draw,0,"<<job.packet_depth<<','<<job.packet_address<<','<<job.packet_offset<<','<<HeaderOpcode(job.packet_header)
+        <<','<<job.packet_header<<','<<(job.packet_header&1)<<','<<count<<','<<indexed<<','<<(instances?instances:num_instances)
+        <<','<<offset<<','<<first<<','<<registers.ProgramAddr(Reg::SPI_SHADER_PGM_LO_VS)<<','<<registers.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS)
+        <<','<<(u64(registers[Reg::CB_COLOR0_BASE])<<8)<<','<<registers[0xa001]<<','<<registers[Reg::DB_RENDER_CONTROL]
+        <<','<<registers[Reg::DB_DEPTH_CONTROL]<<','<<registers[Reg::CB_TARGET_MASK]<<','<<(u64(registers[Reg::DB_Z_READ_BASE])<<8)<<",\"\"";
+    auto line=row.str();if(line.size()<=512) t_audit_job->events.push_back(std::move(line));
+    } catch(const std::exception&) { /* Diagnostic allocation must not fail execution. */ }
+}
 
 CommandProcessor::CommandProcessor() {
     trace = std::getenv("DC_CP_TRACE") != nullptr;
     const char* validation=std::getenv("BB_METAL_CP_VALIDATE");
     validate_registers=validation && !std::strcmp(validation,"1");
+    InitAudit();
     ClearState();
 }
 
@@ -176,7 +371,8 @@ void CommandProcessor::Push(u32 index, Job job) {
 
 void CommandProcessor::SubmitGraphics(std::vector<CmdBuffers> bufs, std::function<void()> after) {
     ++stats.submits;
-    Push(0, {std::move(bufs), std::move(after)});
+    auto evidence=AuditSubmission(bufs);
+    Push(0, {std::move(bufs), std::move(after),std::move(evidence)});
 }
 
 void CommandProcessor::SubmitCompute(u32 queue, std::span<const u32> acb) {
@@ -276,7 +472,9 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
             ring.jobs.pop_front();
             ring.busy = true;
         }
+        t_audit_job=job.audit.get();t_audit_buffer=0;
         for (const auto& buf : job.buffers) {
+            if(job.audit) AuditConsume(*job.audit,buf,t_audit_buffer);
             if (ring.index == 0) {
                 ce.stack.clear();
                 if (!buf.ccb.empty()) {
@@ -289,6 +487,7 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
             if (ring.index == 0) {
                 RunConstantEngine([] { return false; }); // whatever the CE has left
             }
+            ++t_audit_buffer;
         }
         if (job.after && !execution->Failed() && !stopping) {
             job.after();
@@ -312,6 +511,8 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
         if (renderer) {
             renderer->OnSubmit(); // hand everything, signals included, to the host GPU
         }
+        t_audit_job=nullptr;
+        if(job.audit) AuditFinish(*job.audit);
         {
             std::scoped_lock lk(ring.lock);
             ring.busy = false;
@@ -431,6 +632,7 @@ void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
         if (n<Metal::MinimumPacketBody(HeaderOpcode(header))) {
             ++stats.malformed_packets; ce.stack.pop_back(); continue;
         }
+        AuditPacket({body-1,std::size_t(n)+1},0,int(ce.stack.size())-1,true);
         switch (HeaderOpcode(header)) {
         case Op::WriteConstRam: {
             const u32 off = (body[0] & 0xFFFF) / 4;
@@ -486,6 +688,7 @@ void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
 }
 
 void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances) {
+    AuditDraw(indexed,count,index_offset,first_vertex,instances);
     ++stats.draws;
     if (!renderer || count == 0) {
         return;
@@ -586,6 +789,7 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
         }
         if (validation) validation->Prepare({p,size_t(body_n)+1});
         ++stats.packets;
+        AuditPacket({p,std::size_t(body_n)+1},u64(p-cmds.data()),depth,false);
 
         switch (op) {
         case Op::Nop:

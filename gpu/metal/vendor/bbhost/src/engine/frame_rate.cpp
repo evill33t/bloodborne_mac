@@ -92,6 +92,16 @@ constexpr std::uint32_t kModeSixty = 2;
 // back: 0x4c88688 (a count of 1/30 s frames in sub_11ca140's rate sums) and
 // the two shortest-duration floors max(t, 1/30) at 0x12f06f1 and 0x12f6992,
 // which at 1/60 let the durations they guard run at half length.
+// Also kept at 1/30: the disposal-duration minima 0x4cad65c/660/664.
+// Original ELF RVAs 0xf1e5e0/0xf1e630, 0xf201f0 and 0xf37a40 are
+// destructors: they convert an object's integer duration in authored frames
+// to seconds with frames * (1/30), then call 0x2301fa0/1fe0/2020. Those
+// wrappers reach 0xee5920/0xee5a40/0xee5b60, whose vmaxss at
+// 0xee596a/0xee5a8a/0xee5baa clamps that duration to these minima before
+// queuing disposal. This floor is an authored duration, not a simulation
+// step; halving it shortens zero-frame disposal even when elapsed time is
+// correct. The native instructions establish this duration contract, not a
+// connection between these objects and any particular fog draw group.
 // Three per-frame amounts the lists leave at 1/30 are made per-frame here
 // instead: the debug camera's step (0x1972a80), the target bank's refresh
 // accumulator (0x4d2577c, read through the frame's time below anyway), and
@@ -211,9 +221,6 @@ constexpr Constant kConstants[] = {
     {0x25df519, 0x3c888889, 0x3c088889},  // 0.0166667 -> 0.00833333
     {0x4befdcc, 0x3d088889, 0x3c888889},  // 0.0333333 -> 0.0166667
     {0x4c9f358, 0x41f00000, 0x42700000},  // 30 -> 60
-    {0x4cad65c, 0x3d088889, 0x3c888889},  // 0.0333333 -> 0.0166667
-    {0x4cad660, 0x3d088889, 0x3c888889},  // 0.0333333 -> 0.0166667
-    {0x4cad664, 0x3d088889, 0x3c888889},  // 0.0333333 -> 0.0166667
     {0x4ccc3f4, 0x3d088889, 0x3c888889},  // 0.0333333 -> 0.0166667
     {0x4cf6420, 0x3dcccccd, 0x3d4ccccd},  // 0.1 -> 0.05
     {0x4cf6424, 0x3dcccccd, 0x3d4ccccd},  // 0.1 -> 0.05

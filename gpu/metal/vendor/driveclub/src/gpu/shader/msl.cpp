@@ -356,11 +356,129 @@ bool ProveStaticSmrd(const Program& p) {
     return visited==layout.size();
 }
 
+// Nonzero tokens identify a value common to all lanes, rather than merely
+// marking it uniform on one CFG arm. A join keeps a token only when both arms
+// carry the same value identity. This deliberately does not reason about
+// equality of different arithmetic expressions or mutable memory contents.
+using SimdSmrdState = std::array<u64,128>;
+constexpr u64 SimdConstant(u32 value) { return (1ull<<32)|value; }
+u64 SimdRead(const SimdSmrdState& state,u16 code,u32 literal) {
+    if(code<state.size()) return state[code];
+    const auto constant=OpaqueRead(OpaqueState{},code,literal);
+    return constant ? SimdConstant(*constant) : 0;
+}
+bool SimdWrite(SimdSmrdState& state,u16 code,u32 words,u64 token=0) {
+    if(code>=state.size() || words>state.size()-code) return false;
+    for(u32 k=0;k<words;++k) state[code+k]=token ? token+k : 0;
+    return true;
+}
+bool SimdSmrdStep(SimdSmrdState& state,const Inst& i,size_t index,u32& loads) {
+    const char* name=OpName(i.enc,i.op);
+    if(!name) return false;
+    const u32 width=std::strstr(name,"64") ? 2 : 1;
+    switch(i.enc) {
+    case Enc::SMRD: {
+        const u32 words=i.op<=4 ? 1u<<i.op :
+            i.op>=8 && i.op<=12 ? 1u<<(i.op-8) : 0;
+        if(!words || i.sbase>=127 || !state[i.sbase] || !state[i.sbase+1] ||
+           (!i.imm && !SimdRead(state,u16(i.smrd_offset),0))) return false;
+        ++loads;
+        // No reachable instruction can write guest memory in this proof, so
+        // identical scalar addresses read the same GPU-time bytes. Different
+        // load sites intentionally receive different identities.
+        return SimdWrite(state,i.dst,words,(3ull<<32)|((index+1)<<8));
+    }
+    case Enc::SOP1: {
+        const auto op=static_cast<Sop1>(i.op);
+        if(op==Sop1::S_MOV_B32 || op==Sop1::S_MOV_FED_B32 || op==Sop1::S_WQM_B32)
+            return SimdWrite(state,i.dst,1,SimdRead(state,i.src[0],i.literal));
+        if(op==Sop1::S_MOV_B64 || op==Sop1::S_WQM_B64) {
+            const u64 lo=SimdRead(state,i.src[0],i.literal);
+            const u64 hi=i.src[0]<=Operand::SgprMax || i.src[0]==Operand::VccLo || i.src[0]==Operand::ExecLo ?
+                SimdRead(state,OpaqueHi(i.src[0]),i.literal) :
+                OpaqueRead64(OpaqueState{},i.src[0],i.literal)[1] ?
+                    SimdConstant(*OpaqueRead64(OpaqueState{},i.src[0],i.literal)[1]) : 0;
+            return SimdWrite(state,i.dst,1,lo) && SimdWrite(state,OpaqueHi(i.dst),1,hi);
+        }
+        if(op>=Sop1::S_AND_SAVEEXEC_B64 && op<=Sop1::S_XNOR_SAVEEXEC_B64) {
+            const u64 lo=state[Operand::ExecLo],hi=state[Operand::ExecHi];
+            return SimdWrite(state,i.dst,1,lo) && SimdWrite(state,OpaqueHi(i.dst),1,hi) &&
+                SimdWrite(state,Operand::ExecLo,2);
+        }
+        switch(op) {
+        case Sop1::S_SETPC_B64:case Sop1::S_SWAPPC_B64:case Sop1::S_RFE_B64:
+        case Sop1::S_MOVRELS_B32:case Sop1::S_MOVRELS_B64:
+        case Sop1::S_MOVRELD_B32:case Sop1::S_MOVRELD_B64:case Sop1::S_CBRANCH_JOIN:return false;
+        default:return SimdWrite(state,i.dst,width);
+        }
+    }
+    case Enc::SOP2:
+        return i.op!=u16(Sop2::S_CBRANCH_G_FORK) && SimdWrite(state,i.dst,width);
+    case Enc::SOPK:
+        if(i.op==u16(Sopk::S_CBRANCH_I_FORK)) return false;
+        if((i.op>=u16(Sopk::S_CMPK_EQ_I32) && i.op<=u16(Sopk::S_CMPK_LE_U32)) ||
+           i.op==u16(Sopk::S_SETREG_B32) || i.op==u16(Sopk::S_SETREG_IMM32_B32)) return true;
+        return SimdWrite(state,i.dst,1,i.op==u16(Sopk::S_MOVK_I32) ? SimdConstant(u32(s32(i.simm16))) : 0);
+    case Enc::VOPC:case Enc::VOP3:
+        if(i.op<256) return SimdWrite(state,i.sdst,2) &&
+            (!(i.op&0x10u) || SimdWrite(state,Operand::ExecLo,2));
+        [[fallthrough]];
+    case Enc::VOP1:case Enc::VOP2:
+        switch(static_cast<Vop>(i.op)) {
+        case Vop::V_READLANE_B32:case Vop::V_READFIRSTLANE_B32:return SimdWrite(state,i.dst,1);
+        case Vop::V_ADD_I32:case Vop::V_SUB_I32:case Vop::V_SUBREV_I32:
+        case Vop::V_ADDC_U32:case Vop::V_SUBB_U32:case Vop::V_SUBBREV_U32:
+        case Vop::V_DIV_SCALE_F32:case Vop::V_DIV_SCALE_F64:
+        case Vop::V_MAD_U64_U32:case Vop::V_MAD_I64_I32:return SimdWrite(state,i.sdst,2);
+        default:return true;
+        }
+    case Enc::SOPP:
+        return IsBranch(i) || i.op==u16(Sopp::S_ENDPGM) || i.op==u16(Sopp::S_NOP) ||
+            i.op==u16(Sopp::S_WAITCNT);
+    case Enc::MIMG:
+        return !std::strstr(name,"STORE") && !std::strstr(name,"ATOMIC");
+    case Enc::SOPC:case Enc::VINTRP:case Enc::EXP:return true;
+    // Buffer/DS writes, atomics and unhandled operations are not eligible.
+    default:return false;
+    }
+}
+bool ProveSimdSmrd(const Program& p) {
+    if(!ProveStaticSmrd(p)) return false;
+    std::unordered_map<u32,size_t> indices;
+    for(size_t k=0;k<p.code.size();++k) indices.emplace(p.code[k].pc,k);
+    indices.emplace(p.code.back().pc+4u*p.code.back().size,p.code.size());
+    SimdSmrdState initial;initial.fill(SimdConstant(0));
+    for(u32 k=0;k<p.num_user_sgprs && k<16;++k) initial[k]=(2ull<<32)|k;
+    initial[Operand::ExecLo]=initial[Operand::ExecHi]=SimdConstant(~0u);
+    std::vector<std::optional<SimdSmrdState>> incoming(p.code.size()+1);incoming[0]=initial;
+    auto merge=[&](size_t at,const SimdSmrdState& state) {
+        if(!incoming[at]) {incoming[at]=state;return;}
+        for(size_t k=0;k<state.size();++k) if((*incoming[at])[k]!=state[k]) (*incoming[at])[k]=0;
+    };
+    u32 loads=0;
+    for(size_t k=0;k<p.code.size();++k) {
+        if(!incoming[k]) continue;
+        auto state=*incoming[k];const auto& i=p.code[k];
+        if(!SimdSmrdStep(state,i,k,loads)) return false;
+        if(i.enc==Enc::SOPP && i.op==u16(Sopp::S_ENDPGM)) continue;
+        if(IsBranch(i)) {
+            const auto target=indices.find(BranchTarget(i));
+            if(target==indices.end() || target->second<=k) return false;
+            merge(target->second,state);
+            if(i.op==u16(Sopp::S_BRANCH)) continue;
+        }
+        merge(k+1,state);
+    }
+    return loads>0;
+}
+
 class Emitter {
 public:
     Emitter(const Program& p, const MslOptions& o) : p(p), o(o),
         opaque_exports(o.opaque_exports && ProveOpaqueExports(p)),
-        static_smrd(o.static_smrd && ProveStaticSmrd(p)) {}
+        static_smrd(o.static_smrd && !o.direct_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
+        direct_smrd(o.direct_smrd && !o.static_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
+        simd_smrd(o.simd_smrd && !o.static_smrd && !o.direct_smrd && ProveSimdSmrd(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -546,6 +664,8 @@ private:
     const MslOptions& o;
     const bool opaque_exports;
     const bool static_smrd;
+    const bool direct_smrd;
+    const bool simd_smrd;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -833,13 +953,34 @@ void Emitter::EmitSmrd(const Inst& i) {
     const std::string base = buffer ? "dc_vbase(" + b0 + ", " + b1 + ")"
                                     : "((ulong(" + b0 + ") | (ulong(" + b1 + ") << 32)) & 0xfffffffffffful)";
     const std::string off = i.imm ? Hex(i.smrd_offset * 4) : SName(static_cast<u16>(i.smrd_offset));
+    if(direct_smrd && !buffer) for(const auto& load:Gpu::Metal::StaticSmrd::Layout(p.hash)) {
+        if(load.pc!=i.pc) continue;
+        const u32 slot=load.root==2 ? 0 : 1;
+        std::string s="{ ulong root_ = dc_smrd_roots["+N(slot)+"u]; device uint* p_; ";
+        s+="if (root_ != ~0ul) p_ = ((root_ & 1ul) != 0ul ? gm1 : gm0) + (root_ >> 1) + "+N(load.offset/4)+"u; ";
+        s+="else p_ = dc_ptr_n(mem, ("+base+" + ulong("+off+")) & ~3ul, "+N(count*4)+"u);";
+        for(u32 k=0;k<count;++k)
+            s+=" "+SName(static_cast<u16>(i.dst+k))+" = p_ ? p_["+N(k)+"] : 0u;";
+        Line(s+" }");return;
+    }
     // Scalar loads ignore the low address bits: one translation for all dwords.
     std::string s = "{ device uint* p_ = dc_ptr_n(mem, (" + base + " + ulong(" + off + ")) & ~3ul, " +
                     N(count * 4) + "u);";
     for (u32 k = 0; k < count; ++k) {
         s += " " + SName(static_cast<u16>(i.dst + k)) + " = p_ ? p_[" + N(k) + "] : 0u;";
     }
-    Line(s + " }");
+    s += " }";
+    if(simd_smrd) {
+        // Helpers must retain the scalar values used by their texture/ALU
+        // derivatives, irrespective of their participation in SIMD election.
+        Line("if (simd_is_helper_thread()) " + s + " else {");
+        Line("if (simd_is_first()) " + s);
+        for(u32 k=0;k<count;++k) {
+            const auto reg=SName(static_cast<u16>(i.dst+k));
+            SetS(static_cast<u16>(i.dst+k),"simd_broadcast_first("+reg+")");
+        }
+        Line("}");
+    } else Line(s);
 }
 
 void Emitter::EmitVopc(const Inst& i) {
@@ -2154,7 +2295,8 @@ std::string Emitter::Run() {
             o.depth_bounds ? ", texture2d<float> dc_zb [[texture(" + N(kDepthBoundsTexture) + ")]], constant float2& dc_zbr [[buffer(" +
                                  N(kDepthBoundsBuffer) + ")]]"
                            : "";
-        const std::string smrd_param=static_smrd ? ", constant uint* dc_smrd [[buffer("+N(Binding::StaticSmrd)+")]]" : "";
+        const std::string smrd_param=static_smrd ? ", constant uint* dc_smrd [[buffer("+N(Binding::StaticSmrd)+")]]" :
+            direct_smrd ? ", constant ulong* dc_smrd_roots [[buffer("+N(Binding::StaticSmrd)+")]]" : "";
         src += "fragment PsOut main0(PsIn pin [[stage_in]], " + mem_params + probe_param + bounds_param + smrd_param + TexParams(true) +
                ") {\n";
         if (o.depth_bounds) {
@@ -2185,6 +2327,10 @@ bool FragmentExportsOpaque(const Program& p) {
 
 bool FragmentStaticSmrdEligible(const Program& p) {
     return ProveStaticSmrd(p);
+}
+
+bool FragmentSimdSmrdEligible(const Program& p) {
+    return ProveSimdSmrd(p);
 }
 
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {

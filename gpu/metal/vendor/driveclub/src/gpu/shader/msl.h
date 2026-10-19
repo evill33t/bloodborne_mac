@@ -32,7 +32,7 @@ constexpr u32 TessFactors = 9;
 constexpr u32 TessParams = 10;
 constexpr u32 TessLocalUserData = 11;
 constexpr u32 TessHullUserData = 12;
-constexpr u32 StaticSmrd = 13; // exact-layout, pinned-snapshot fragment constants
+constexpr u32 StaticSmrd = 13; // exact-layout snapshot words or GPU-time root addresses
 } // namespace Binding
 
 // Host-side mirrors of the MSL structs in the prelude.
@@ -132,6 +132,15 @@ struct MslOptions {
     // Default-disabled prototype. The caller must bind the corresponding
     // StaticSmrd::Packed block from currently pinned prepared snapshots.
     bool static_smrd = false;
+    // Address-only alternative: buffer 13 holds StaticSmrd::AddressBlock from
+    // the exact bound GPU map. Every table/payload value is still loaded on GPU.
+    // Mutually exclusive with static_smrd; both default to the original path.
+    bool direct_smrd = false;
+    // Exact-shader prototype: one ordinary active lane performs each proven
+    // uniform scalar load, then broadcasts it. Helper lanes retain their own
+    // original loads so derivatives never depend on helper SIMD participation.
+    // No CPU values or extra bindings; mutually exclusive with the above modes.
+    bool simd_smrd = false;
     // Register probe (debugging): before the instruction at `probe_pc`, the
     // fragment at pixel (probe_x, probe_y) -- for compute, the thread at that
     // global grid position -- writes its
@@ -155,5 +164,10 @@ bool FragmentExportsOpaque(const Program& p);
 // Exact original hash/layout plus conservative CFG proof that each selected
 // direct S_LOAD still reads its original UD2/UD12 root at that instruction.
 bool FragmentStaticSmrdEligible(const Program& p);
+
+// Exact hot fragment hashes plus CFG provenance proof for every SMRD address.
+// Distinct values at divergent joins lose uniformity, even if both inputs were
+// individually uniform. Memory writes and unknown control flow fail closed.
+bool FragmentSimdSmrdEligible(const Program& p);
 
 } // namespace Gpu::Shader

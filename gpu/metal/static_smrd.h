@@ -3,6 +3,8 @@
 // Exact retail shader layouts plus a pure, fail-closed snapshot packing contract.
 // Nested descriptor payloads are deliberately never read here.
 #include "gpu/metal/snapshot_arena.h"
+#include "gpu/shader/msl.h"
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +16,7 @@ using Word=std::uint32_t;
 using Address=std::uint64_t;
 constexpr Word MaxWords=104;
 inline constexpr Address CacheTag=0x53534d5244000001ull;
+inline constexpr Address AddressCacheTag=0x44534d5244000001ull;
 struct Load {Word pc,root,offset,words,destination;};
 inline constexpr std::array<Load,12> Gbuffer68{{
     {20,2,112,8,16},{380,2,48,8,24},{396,12,96,8,32},
@@ -89,5 +92,58 @@ inline bool Pack(Address hash,std::span<const Word,16> user_data,
     }
     output=candidate;
     return true;
+}
+
+// Address-only mode reads all actual table values on the GPU. Each entry is a
+// physical dword offset in mem[0/1], shifted left once with the buffer selector
+// in bit zero. The sentinel requests the unchanged virtual-memory load path.
+struct AddressBlock {
+    static constexpr Address Fallback=~Address(0);
+    std::array<Address,2> roots{Fallback,Fallback};
+    Word ValidRoots() const {return Word(roots[0]!=Fallback)+Word(roots[1]!=Fallback);}
+};
+static_assert(sizeof(AddressBlock)==16);
+
+inline AddressBlock TranslateRoots(Address hash,std::span<const Word,16> user_data,
+        const Shader::GpuMemMap& map,std::span<const std::int32_t> entries) {
+    AddressBlock result;
+    const auto layout=Layout(hash);
+    if(layout.empty() || map.shift<Shader::GpuMemMap::kMinShift ||
+       map.shift>Shader::GpuMemMap::kMaxShift || map.pages>entries.size() ||
+       !map.limit || map.split>map.limit || (map.split&3)) return result;
+    const Address page=Address(1)<<map.shift;
+    if(map.base&(page-1)) return result;
+    auto physical=[&](Address va) {
+        if(va<map.base) return AddressBlock::Fallback;
+        const Address index=(va-map.base)>>map.shift;
+        if(index>=map.pages) return AddressBlock::Fallback;
+        const auto entry=entries[static_cast<size_t>(index)];
+        if(entry==Shader::GpuMemMap::kUnmapped) return AddressBlock::Fallback;
+        // Multiplication avoids C++ undefined behavior for negative left shifts.
+        const Address phys=va+Address(std::int64_t(entry)*std::int64_t(Address(1)<<14));
+        return phys<map.limit ? phys : AddressBlock::Fallback;
+    };
+    for(Word slot=0;slot<2;++slot) {
+        const Word root=slot ? 12 : 2;
+        Address extent=0;
+        for(const auto& load:layout) if(load.root==root)
+            extent=std::max(extent,Address(load.offset)+Address(load.words)*4);
+        const Address va=((Address(user_data[root])|(Address(user_data[root+1])<<32))&0xffffffffffffull)&~Address(3);
+        if(!extent || va>~Address(0)-(extent-4)) continue;
+        const Address phys=physical(va),last=va+extent-4;
+        if(phys==AddressBlock::Fallback || extent>map.limit-phys) continue;
+        if(phys<map.split && extent>map.split-phys) continue;
+        bool contiguous=physical(last)==phys+extent-4;
+        // Check every crossed page, including gaps even if both endpoints map.
+        for(Address at=(va&~(page-1))+page;contiguous && at<=last;) {
+            contiguous=physical(at)==phys+(at-va);
+            if(at>~Address(0)-page) break;
+            at+=page;
+        }
+        const Address offset=phys<map.split ? phys : phys-map.split;
+        if(!contiguous || (offset&3) || (offset>>2)>=(AddressBlock::Fallback>>1)) continue;
+        result.roots[slot]=((offset>>2)<<1)|Address(phys>=map.split);
+    }
+    return result;
 }
 } // namespace Gpu::Metal::StaticSmrd

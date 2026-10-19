@@ -106,7 +106,7 @@ struct MacroParams {
 
 // Bank layout for single-sampled colour surfaces; the macro tile mode follows
 // from the micro tile size (64 elements x bytes per element).
-MacroParams Macro(u32 bytes_per_el) {
+constexpr MacroParams Macro(u32 bytes_per_el) {
     MacroParams m{};
     switch (bytes_per_el) {
     case 1: m = {16, 4, 4}; break;
@@ -152,6 +152,40 @@ u64 MacroOffset(u32 x, u32 y, u32 pitch, const MacroParams& m, const u32* micro_
     addr |= u64(Bank(x, y, m)) << (interleave_bits + pipe_bits);
     addr |= (total >> interleave_bits) << (interleave_bits + pipe_bits + Log2(m.banks));
     return addr;
+}
+
+template <u32 Bytes>
+void DetileMacro(Micro type, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el) {
+    constexpr MacroParams m = Macro(Bytes);
+    constexpr u32 micro_bytes = 64 * Bytes;
+    static_assert(Bytes == 1 || Bytes == 2 || Bytes == 4);
+    static_assert(m.bank_height * micro_bytes == kPipeInterleaveBytes);
+    static_assert(micro_bytes * (m.pitch / 8) * (m.height / 8) / (kPipes * m.banks) ==
+                  kPipeInterleaveBytes);
+
+    // A 1/2/4-byte micro tile occupies 64/128/256 bytes. MacroOffset's
+    // low byte starts at a multiple of that size: macro contributions are
+    // 256-byte aligned, and bank_height packs 4/2/1 complete micro tiles
+    // into one interleave block. Adding the intra-tile offset cannot carry
+    // into pipe/bank bits, which are constant throughout each 8x8 tile.
+    const u32 pitch = AlignUp(pitch_el, m.pitch);
+    u32 order[64];
+    for (u32 y = 0; y < 8; ++y)
+        for (u32 x = 0; x < 8; ++x)
+            order[y * 8 + x] = MicroIndex(type, Bytes, x, y);
+    const u64 row = u64(width_el) * Bytes;
+    for (u32 ty = 0; ty < height_el; ty += 8) {
+        const u32 rows = std::min(8u, height_el - ty);
+        for (u32 tx = 0; tx < width_el; tx += 8) {
+            const u32 columns = std::min(8u, width_el - tx);
+            const u8* tile = src + MacroOffset(tx, ty, pitch, m, order, Bytes);
+            for (u32 y = 0; y < rows; ++y) {
+                u8* out = dst + u64(ty + y) * row + u64(tx) * Bytes;
+                for (u32 x = 0; x < columns; ++x)
+                    std::memcpy(out + x * Bytes, tile + order[y * 8 + x] * Bytes, Bytes);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -328,34 +362,19 @@ void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 heigh
         return option && std::strcmp(option, "1") == 0;
     }();
     const Micro type = MicroType2D(tile_index);
-    if (!fast || bytes_per_el != 4 || type == Micro::None) {
+    if (!fast || type == Micro::None) {
         DetileSliceReference(tile_index, src, dst, width_el, height_el, pitch_el, bytes_per_el, z);
         return;
     }
 
-    // For four-byte Depth/Thin/Display elements, one 8x8 micro tile is
-    // exactly one 256-byte pipe-interleave block. Pipe, bank, macro offset
-    // and the upper address bits stay constant within that tile; only the
-    // existing six-bit micro order changes. Wider elements do not satisfy
-    // this contract and always retain the original per-element addressing.
-    const MacroParams m = Macro(4);
-    const u32 pitch = AlignUp(pitch_el, m.pitch);
-    u32 order[64];
-    for (u32 y = 0; y < 8; ++y)
-        for (u32 x = 0; x < 8; ++x)
-            order[y * 8 + x] = MicroIndex(type, 4, x, y);
-    const u64 row = u64(width_el) * 4;
-    for (u32 ty = 0; ty < height_el; ty += 8) {
-        const u32 rows = std::min(8u, height_el - ty);
-        for (u32 tx = 0; tx < width_el; tx += 8) {
-            const u32 columns = std::min(8u, width_el - tx);
-            const u8* tile = src + MacroOffset(tx, ty, pitch, m, order, 4);
-            for (u32 y = 0; y < rows; ++y) {
-                u8* out = dst + u64(ty + y) * row + u64(tx) * 4;
-                for (u32 x = 0; x < columns; ++x)
-                    std::memcpy(out + x * 4, tile + order[y * 8 + x] * 4, 4);
-            }
-        }
+    // Wider elements cross interleave blocks and retain per-element addressing.
+    switch (bytes_per_el) {
+    case 1: DetileMacro<1>(type, src, dst, width_el, height_el, pitch_el); break;
+    case 2: DetileMacro<2>(type, src, dst, width_el, height_el, pitch_el); break;
+    case 4: DetileMacro<4>(type, src, dst, width_el, height_el, pitch_el); break;
+    default:
+        DetileSliceReference(tile_index, src, dst, width_el, height_el, pitch_el, bytes_per_el, z);
+        break;
     }
 }
 
