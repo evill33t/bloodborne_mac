@@ -240,7 +240,7 @@ int main() {
         regs[Reg::CB_COLOR0_BASE+Reg::CB_BASE]=uint32_t((address+49152)>>8);
         // A Gnm buffer-fill dispatch must erase the private color texture as
         // well as its backing pool. Otherwise old bright pixels leave trails.
-        for (unsigned test=0;test<4;++test) {
+        for (unsigned test=0;test<7;++test) {
             const bool twice=test!=0, colored=test>=2;
             if (test==3) regs[Reg::CB_COLOR0_BASE+Reg::CB_INFO]|=6u<<8; // sRGB CB
             renderer.Draw(regs,Gpu::DrawCall{.count=2}); // red again
@@ -251,9 +251,14 @@ int main() {
             const uint32_t value[]{uint32_t(address+128),uint32_t(address>>32)|(16u<<16),1,0x77fac};
             memset(base+128,0,16);
             if (colored) {
-                const float values[]{.25f,.5f,1,1};
+                float values[]{.25f,.5f,1,1};
+                if(test==4) {values[0]=-.5f;values[1]=2;values[2]=.5f;values[3]=0;}
+                if(test==5) {values[0]=126.5f/255;values[1]=127.5f/255;values[2]=128.5f/255;values[3]=129.5f/255;}
+                if(test==6) {values[0]=.1f;values[1]=.9f;values[2]=1.f/255;values[3]=254.f/255;}
                 memcpy(base+128,values,sizeof(values));
             }
+            memset(base+49148,0xa5,4);memset(base+49152+64*4,0xa5,4);
+            memset(base+49152,0x6d,64*4);
             for (int i=0;i<4;++i) {
                 compute[Reg::COMPUTE_USER_DATA_0+4+i]=target[i];
                 compute[Reg::COMPUTE_USER_DATA_0+8+i]=value[i];
@@ -262,6 +267,10 @@ int main() {
             renderer.Flip(Gpu::FlipInfo{.address=address+49152,.width=8,.height=8,.pitch=8});
             renderer.WaitIdle();
             if (!colored) for (unsigned k=0;k<64*4;++k) assert(base[49152+k]==0);
+            const uint8_t expected[7][4]{{0,0,0,0},{0,0,0,0},{64,128,255,255},{64,128,255,255},
+                {0,255,128,0},{126,128,128,130},{26,230,1,254}};
+            for(unsigned k=0;k<4;++k)assert(base[49148+k]==0xa5 && base[49152+64*4+k]==0xa5);
+            for(unsigned k=0;k<64*4;++k)assert(base[49152+k]==expected[test][k%4]);
             frame=(__bridge id<MTLTexture>)renderer.LatestFrame(); assert(frame);
             command=[queue commandBuffer]; blit=[command blitCommandEncoder];
             [blit copyFromTexture:frame sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
@@ -269,8 +278,13 @@ int main() {
                 destinationBytesPerRow:32 destinationBytesPerImage:256];
             [blit endEncoding]; [command commit]; [command waitUntilCompleted]; assert(!command.error);
             for (int i=0;i<64;++i) {
-                if (pixels[i*4]!=(colored ? 64 : 0) || pixels[i*4+1]!=(colored ? 128 : 0) ||
-                    pixels[i*4+2]!=(colored ? 255 : 0)) {
+                // Metal attachment clears can differ by one UNORM step near
+                // halfway boundaries. That existing clear operation is identical
+                // in both paths; the backing-buffer check above stays bit exact.
+                const int tolerance=test>=5 ? 1 : 0;
+                if (std::abs(int(pixels[i*4])-expected[test][0])>tolerance ||
+                    std::abs(int(pixels[i*4+1])-expected[test][1])>tolerance ||
+                    std::abs(int(pixels[i*4+2])-expected[test][2])>tolerance) {
                     fprintf(stderr,"Fill test %u pixel %d: B=%u G=%u R=%u\n",test,i,pixels[i*4],pixels[i*4+1],pixels[i*4+2]);
                     std::abort();
                 }

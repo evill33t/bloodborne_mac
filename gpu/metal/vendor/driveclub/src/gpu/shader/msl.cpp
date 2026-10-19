@@ -8,6 +8,7 @@
 #include <unordered_map>
 
 #include "gpu/shader/msl_prelude.h"
+#include "gpu/metal/native_tessellation.h"
 
 namespace Gpu::Shader {
 
@@ -878,7 +879,10 @@ void Emitter::EmitDs(const Inst& i) {
     const std::string a = VName(i.vaddr);
     const u32 off16 = (u32(i.offset1) << 8) | i.offset0;
     const std::string guard = p.writes_exec ? "if (exec_lo != 0u) " : "";
-    auto at = [&](u32 byte_off) { return "lds[(" + a + " + " + N(byte_off) + "u) >> 2]"; };
+    auto at = [&](u32 byte_off) {
+        if (o.native_tess_layout) return "dc_native_tess_load(lds, " + a + " + " + N(byte_off) + "u)";
+        return "lds[(" + a + " + " + N(byte_off) + "u) >> 2]";
+    };
     auto atomic = [&](const char* fn, bool rtn, bool sign) {
         const std::string space = o.tess_stage == TessStage::None ? "threadgroup" : "device";
         const std::string ty = space + (sign ? " atomic_int*" : " atomic_uint*");
@@ -1692,6 +1696,7 @@ std::string Emitter::Run() {
     }
 
     std::string src = kMslPrelude;
+    if (o.native_tess_layout) src += Gpu::Metal::NativeTessellationMsl();
     src += "\n";
     const std::string mem_params =
         "constant uint* ud [[buffer(0)]], device uint* gm0 [[buffer(1)]], device uint* gm1 [[buffer(2)]], "
@@ -1725,7 +1730,9 @@ std::string Emitter::Run() {
         }
         src += "};\n\n";
         const bool domain = o.tess_stage == TessStage::Domain;
-        const std::string tess_params = domain ? ", float2 dc_uv, uint dc_patch, device uint* lds" : "";
+        const std::string tess_params = !domain ? "" : o.native_tess_layout
+            ? ", float2 dc_uv, uint dc_patch, thread const DcNativeTess& lds"
+            : ", float2 dc_uv, uint dc_patch, device uint* lds";
         src += "static VsOut dc_run(uint vid, uint iid, constant uint* ud, thread const DcMem& mem" + tess_params + TexParams(false) +
                ") {\n    VsOut out = {};\n" + (o.points ? "    out.psize = 1.0f;\n" : "") + decl + wrapped + "}\n\n";
         const std::string args = "ud, mem" + TexArgs();
@@ -1733,11 +1740,16 @@ std::string Emitter::Run() {
             : "vertex VsOut main0(uint vid [[vertex_id]], uint iid [[instance_id]], ";
         src += mem_params +
                ", constant DcDraw& draw [[buffer(4)]]" + (o.debug_capture ? ", device float4* dbg [[buffer(6)]]" : "") +
-               (domain ? ", device uint* dc_lds [[buffer(8)]]" : "") +
+               (domain ? (o.native_tess_layout ? ", constant uint* dc_lud [[buffer(11)]], constant uint* dc_hud [[buffer(12)]], constant DcTess& dc_tp [[buffer(10)]]"
+                                              : ", device uint* dc_lds [[buffer(8)]]") : "") +
                TexParams(true) + ") {\n";
         src += "    DcMem mem = {gm0, gm1, &gmap};\n    VsOut o;\n";
         if (domain) {
-            src += "    o = dc_run(0u, 0u, ud, mem, dc_uv, dc_patch, dc_lds + dc_patch * " +
+            if (o.native_tess_layout) {
+                src += "    DcNativeTess dc_local;\n    dc_native_tess_init(dc_local, mem, dc_lud, dc_hud, dc_tp, dc_patch, " +
+                    N(o.native_tess_layout) + "u, " + N(o.native_tess_factor) + "u);\n";
+                src += "    o = dc_run(0u, 0u, ud, mem, dc_uv, dc_patch, dc_local" + TexArgs() + ");\n";
+            } else src += "    o = dc_run(0u, 0u, ud, mem, dc_uv, dc_patch, dc_lds + dc_patch * " +
                 N(kTessLdsWords) + "u" + TexArgs() + ");\n";
         } else if (o.rect_list) {
             // As shadPS4's rect list TCS: the vertex whose x matches one neighbour and y

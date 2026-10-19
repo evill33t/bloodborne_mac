@@ -152,7 +152,7 @@ target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features
     "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
-foreach(fixture IN ITEMS pipeline_cache temporal_aa native_motion input worklist)
+foreach(fixture IN ITEMS pipeline_cache temporal_aa native_motion native_tessellation input worklist)
     add_executable(bb-metal-${fixture}-tests "${BB_ROOT}/gpu/metal/tests/game_${fixture}_tests.mm")
     target_include_directories(bb-metal-${fixture}-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
     target_compile_options(bb-metal-${fixture}-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)

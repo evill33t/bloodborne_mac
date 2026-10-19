@@ -42,6 +42,7 @@
 #include "gpu/metal/temporal_aa.h"
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/native_tessellation.h"
 
 namespace Gpu::Metal {
 
@@ -52,6 +53,23 @@ using Shader::Stage;
 using Shader::TexDim;
 using Shader::TexSample;
 using Shader::TextureType;
+
+// Match dc_pack's float32 UNORM8 conversion, including ties to even. This is
+// deliberately limited to the four-byte typed format observed in scene fills.
+std::optional<u32> PackedRgba8Fill(u32 format,u32 number,u32 stride,const u32* words) {
+  if (format!=10 || number!=NumFormat::Unorm || stride!=4) return std::nullopt;
+  u32 packed=0;
+  for (u32 k=0;k<4;++k) {
+    const float value=std::bit_cast<float>(words[k]);
+    if (!std::isfinite(value)) return std::nullopt;
+    const float scaled=std::clamp(value,0.f,1.f)*255.f;
+    u32 channel=static_cast<u32>(scaled);
+    const float fraction=scaled-float(channel);
+    if (fraction>.5f || (fraction==.5f && (channel&1))) ++channel;
+    packed|=channel<<(8*k);
+  }
+  return packed;
+}
 
 namespace {
 
@@ -540,6 +558,12 @@ struct MetalRenderer::Impl {
   bool profile = false; // DC_GPU_PROFILE: GPU time per shader (one command
                         // buffer per call)
   bool profile_passes = false; // DC_GPU_PROFILE=passes: less intrusive per-pass timing
+  bool profile_trace_only = false; // DC_GPU_PROFILE=trace: only requested trace frames
+  bool Profiling() const { return profile && (!profile_trace_only || trace); }
+  bool fast_typed_fills = true;
+  bool native_tessellation = true;
+  u64 native_tess_draws=0,translated_tess_draws=0;
+  id<MTLBuffer> native_tess_factors[2]{};
   struct ProfileEntry {
     double seconds = 0;
     u64 calls = 0;
@@ -621,7 +645,12 @@ struct MetalRenderer::Impl {
     }
     stats = std::getenv("DC_GPU_STATS") != nullptr;
     profile = std::getenv("DC_GPU_PROFILE") != nullptr;
-    profile_passes = profile && std::strcmp(std::getenv("DC_GPU_PROFILE"),"passes")==0;
+    profile_trace_only = profile && (!std::strcmp(std::getenv("DC_GPU_PROFILE"),"trace") ||
+        !std::strcmp(std::getenv("DC_GPU_PROFILE"),"trace-draws"));
+    profile_passes = profile && (!std::strcmp(std::getenv("DC_GPU_PROFILE"),"trace") ||
+        !std::strcmp(std::getenv("DC_GPU_PROFILE"),"passes"));
+    if (const char* option=std::getenv("BB_METAL_TYPED_FILL")) fast_typed_fills=std::strcmp(option,"0")!=0;
+    if (const char* option=std::getenv("BB_METAL_NATIVE_TESSELLATION")) native_tessellation=std::strcmp(option,"0")!=0;
     compiler = std::make_unique<ShaderCompiler>(device, 4,ShaderCompiler::CacheMode::DriverManaged);
     compiler->EnablePrewarming();
     signal_event = [device newSharedEvent];
@@ -861,7 +890,7 @@ struct MetalRenderer::Impl {
       if (dump_passes && trace && dump_frames) {
         DumpPass();
       }
-      if (profile_passes && cmd) {
+      if (Profiling() && profile_passes && cmd) {
         const auto* target=reinterpret_cast<RenderTarget*>(pass.color[0]);
         const auto* depth=reinterpret_cast<RenderTarget*>(pass.depth);
         const std::string what="pass color "+Hex(target ? target->addr : 0)+
@@ -2214,9 +2243,12 @@ struct MetalRenderer::Impl {
   struct TessBuffers {
     id<MTLBuffer> lds = nil, factors = nil;
     u64 lds_offset = 0, factor_offset = 0;
+    NativeTessellationConfig native;
+    std::array<u32,16> local_ud{},hull_ud{};
+    Shader::GpuTessConsts params{};
   };
 
-  bool PrepareTessellation(const RegFile& r, const DrawCall& dc, TessBuffers& out) {
+  bool PrepareTessellation(const RegFile& r, const DrawCall& dc,u64 domain_hash,TessBuffers& out) {
     const u32 config = r[Reg::VGT_LS_HS_CONFIG], tf = r[Reg::VGT_TF_PARAM];
     // The light-volume shaders use one input/output control point and keep
     // their attributes in LDS. Other patch layouts still require integration.
@@ -2248,6 +2280,31 @@ struct MetalRenderer::Impl {
       programs[k]=GetProgram(Stage::Vertex,address,user[k],Bits(r[lo+3],1,5),
                             Bits(r[lo+2],24,2));
       if (!programs[k]) return false;
+    }
+    const auto native=native_tessellation
+        ? NativeTessellation(programs[0]->hash,programs[1]->hash,domain_hash) : NativeTessellationConfig{};
+    if (native && programs[0]->num_user_sgprs==6 && programs[1]->num_user_sgprs==8) {
+      const u32 slot=native.outer_factor==3 ? 1 : 0;
+      if (!native_tess_factors[slot]) {
+        // One immutable factor record for all patches. Hardware tessellation,
+        // winding and partitioning are retained exactly; no readback or compute.
+        std::array<std::uint16_t,128> factors{};
+        for (u32 k=0;k<6;++k) factors[k]=k<4 && slot ? 0x4200 : 0x3c00;
+        native_tess_factors[slot]=[device newBufferWithBytes:factors.data() length:sizeof(factors)
+            options:MTLResourceStorageModeShared];
+      }
+      if (native_tess_factors[slot]) {
+        out.native=native;out.factors=native_tess_factors[slot];
+        out.params={r[Reg::VGT_INDX_OFFSET],dc.count,dc.indexed ? dc.index_size : 0u,0,dc.indexed ? index_base : 0};
+        std::memcpy(out.local_ud.data(),user[0],64);std::memcpy(out.hull_ud.data(),user[1],64);
+        PatchUserData(out.local_ud.data());PatchUserData(out.hull_ud.data());
+        ++native_tess_draws;
+        return true;
+      }
+    }
+    ++translated_tess_draws;
+    for (u32 k=0;k<2;++k) {
+      const u64 address=r.ProgramAddr(registers[k]);
       Resolve(*programs[k],user[k],types[k],resources[k]);
       Shader::MslOptions options;
       options.tess_stage=k==0 ? Shader::TessStage::Local : Shader::TessStage::Hull;
@@ -2305,7 +2362,7 @@ struct MetalRenderer::Impl {
       [compute dispatchThreads:MTLSizeMake(dc.count,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
     }
     [compute endEncoding];
-    out={lds,factors,lds_offset,factor_offset};
+    out.lds=lds;out.factors=factors;out.lds_offset=lds_offset;out.factor_offset=factor_offset;
     return true;
   }
 
@@ -3093,7 +3150,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
 
   TessBuffers tess;
-  if (tessellated && !PrepareTessellation(r,dc,tess)) return;
+  if (tessellated && !PrepareTessellation(r,dc,vs->hash,tess)) return;
 
   bool pending_clear = depth && depth->clear_pending;
   for (u32 k = 0; k < 8; ++k) {
@@ -3158,6 +3215,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   const bool rect = prim == PrimType::RectList;
   Shader::MslOptions vo;
   vo.tess_stage = tessellated ? Shader::TessStage::Domain : Shader::TessStage::None;
+  vo.native_tess_layout=tess.native.local_layout;
+  vo.native_tess_factor=tess.native.outer_factor;
   vo.rect_list = rect;
   vo.points = prim == PrimType::PointList;
   vo.vtx_point_size = vo.points && (r[Reg::PA_CL_VS_OUT_CNTL] & 1);
@@ -3166,6 +3225,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   vo.textures = vs_types;
   u64 vs_key = Hash(vs->hash);
   vs_key = Hash(vo.tess_stage, vs_key);
+  vs_key = Hash(vo.native_tess_layout,vs_key);
+  vs_key = Hash(vo.native_tess_factor,vs_key);
   vs_key = Hash(rect, vs_key);
   vs_key = Hash(u32(vo.points) | (u32(vo.vtx_point_size) << 1), vs_key);
   vs_key = Hash(capture, vs_key);
@@ -3276,7 +3337,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
         d.tessellationPartitionMode=partition[Bits(tf,2,3)];
         d.maxTessellationFactor=64;
         d.tessellationFactorFormat=MTLTessellationFactorFormatHalf;
-        d.tessellationFactorStepFunction=MTLTessellationFactorStepFunctionPerPatch;
+        d.tessellationFactorStepFunction=tess.native ? MTLTessellationFactorStepFunctionConstant
+                                                   : MTLTessellationFactorStepFunctionPerPatch;
         d.tessellationOutputWindingOrder=Bits(tf,5,3)==2 ? MTLWindingClockwise : MTLWindingCounterClockwise;
       }
       if (depth_fmt == MTLPixelFormatDepth32Float_Stencil8) {
@@ -3479,7 +3541,13 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   [enc setVertexBytes:&consts
                length:sizeof(consts)
               atIndex:Shader::Binding::Draw];
-  if (tessellated) [enc setVertexBuffer:tess.lds offset:tess.lds_offset atIndex:Shader::Binding::TessLds];
+  if (tessellated) {
+    if (tess.native) {
+      [enc setVertexBytes:tess.local_ud.data() length:64 atIndex:Shader::Binding::TessLocalUserData];
+      [enc setVertexBytes:tess.hull_ud.data() length:64 atIndex:Shader::Binding::TessHullUserData];
+      [enc setVertexBytes:&tess.params length:sizeof(tess.params) atIndex:Shader::Binding::TessParams];
+    } else [enc setVertexBuffer:tess.lds offset:tess.lds_offset atIndex:Shader::Binding::TessLds];
+  }
   for (u32 k = 0; k < vs_res.tex.size(); ++k) {
     [enc setVertexTexture:vs_res.tex[k] atIndex:k];
   }
@@ -3823,6 +3891,25 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
         if (trace) DC_INFO("gpu: typed zero fill uses blit (%llu bytes)",bytes);
         return;
       }
+      // The original typed kernel performs page translation and format packing
+      // for every record. For a checked uniform RGBA8 fill, pack once and use
+      // the existing contiguous Metal fill kernel. Texture aliases were cleared
+      // above; the backing bytes (including descriptor padding) still change in
+      // queue order. Unknown formats/values/mappings retain the original kernel.
+      const auto packed=fast_typed_fills ? PackedRgba8Fill(format,number,stride,words) : std::nullopt;
+      if (packed && fill_pipeline && bytes && bytes<=UINT32_MAX && !(dst&3) &&
+          Locate(dst,bytes,&buffer,&offset)) {
+        EndPass(); EnsureCommandBuffer();
+        const u32 constants[]{*packed,u32(bytes/4)};
+        auto fill=[cmd computeCommandEncoder];
+        [fill setComputePipelineState:fill_pipeline];
+        [fill setBuffer:buffer offset:offset atIndex:0];
+        [fill setBytes:constants length:sizeof(constants) atIndex:1];
+        [fill dispatchThreads:MTLSizeMake(bytes/4,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        [fill endEncoding];
+        if (trace) DC_INFO("gpu: typed pattern fill uses Metal (%llu bytes, %08x)",bytes,*packed);
+        return;
+      }
     }
   }
   // GPU-only render targets have no current pixels in the CPU backing pool.
@@ -4046,6 +4133,9 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
 
 void MetalRenderer::Impl::Flip(const FlipInfo &f) {
   FinishNativeVelocityFrame();
+  // Finish the previous frame's last pass under its own trace flag before
+  // selecting the next request. Diagnostic profiling never cuts normal frames.
+  if (profile_trace_only) EndPass();
   ++frame_count;
   CollectTextures();
   temporal_active.store(temporal_resolved,std::memory_order_relaxed);
@@ -4107,6 +4197,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           temporal->ResolvedFrames(),temporal->NativeMotionFrames());
       if(NativeVelocityEnabled()) DC_INFO("gpu velocity: %llu clears, %llu producers, %llu camera matches, %llu filters (cumulative)",
           velocity_clears,velocity_producers,velocity_camera_matches,velocity_filters);
+      DC_INFO("gpu tessellation: %llu native draws, %llu translated preparation draws (cumulative)",
+          native_tess_draws,translated_tess_draws);
       stat_upload_base=upload_allocations.load(std::memory_order_relaxed);
       stat_hashed = 0;
       stat_depth_copies = 0;
@@ -4269,7 +4361,7 @@ void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
   StutterTrace::Scope timing("draw_record",impl->frame_count,impl->last_vs,impl->last_ps);
   @autoreleasepool {
     impl->Draw(regs, draw);
-    if (impl->profile && !impl->profile_passes) {
+    if (impl->Profiling() && !impl->profile_passes) {
       char what[64];
       std::snprintf(what, sizeof(what), "vs %#llx ps %#llx",
                     regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_VS),
@@ -4287,7 +4379,7 @@ void MetalRenderer::Dispatch(const RegFile &regs, std::uint32_t x,
   StutterTrace::Scope timing("dispatch_record",impl->frame_count,impl->last_cs);
   @autoreleasepool {
     impl->Dispatch(regs, x, y, z);
-    if (impl->profile) {
+    if (impl->Profiling()) {
       char what[64];
       std::snprintf(what, sizeof(what), "cs %#llx %ux%ux%u",
                     regs.ProgramAddr(Liverpool::Reg::COMPUTE_PGM_LO), x, y, z);
