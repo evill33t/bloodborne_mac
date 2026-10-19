@@ -355,11 +355,11 @@ void DetileSliceReference(u32 tile_index, const u8* src, u8* dst, u32 width_el, 
 
 void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el,
                  u32 bytes_per_el, u32 z) {
-    // Explicit opt-in until the production upload/queued-frame fixture and
-    // live cold-upload comparison have passed. Read once for consistent runs.
+    // Validated against the reference for padded/unaligned macro tiles. Keep
+    // an explicit reference-path override for diagnostics and comparisons.
     static const bool fast = [] {
         const char* option = std::getenv("BB_METAL_FAST_DETILE");
-        return option && std::strcmp(option, "1") == 0;
+        return !option || std::strcmp(option, "0") != 0;
     }();
     const Micro type = MicroType2D(tile_index);
     if (!fast || type == Micro::None) {

@@ -46,6 +46,7 @@
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/gpu_texture_upload.h"
+#include "gpu/metal/native_vertex_fetch.h"
 
 namespace Gpu::Metal {
 
@@ -442,7 +443,7 @@ struct MetalRenderer::Impl {
   // hashes of its 64 KB chunks; a texture that never changed has one chunk
   // checked per frame in turn, one that did (glyph caches, streamed or
   // CPU-animated textures) is checked in full every frame it is used.
-  static constexpr u64 kChunk = 64 << 10;
+  static constexpr u64 kChunk = ContentHash::kChunkBytes;
   struct TextureEntry {
     id<MTLTexture> tex = nil;
     id<MTLTexture> base_view = nil; // levels from the T# BASE_LEVEL
@@ -573,6 +574,9 @@ struct MetalRenderer::Impl {
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
+  bool native_vertex_fetch_enabled=std::getenv("BB_METAL_NATIVE_VERTEX_FETCH") && std::strcmp(std::getenv("BB_METAL_NATIVE_VERTEX_FETCH"),"1")==0;
+  std::unordered_map<u64,bool> native_vertex_fetch_programs;
+  u64 native_vertex_fetch_draws=0;
   std::unordered_map<const Program*,bool> static_smrd_programs;
   std::unordered_map<u64,bool> simd_smrd_programs;
   u64 static_smrd_attempts=0,static_smrd_draws=0,static_smrd_rejects=0,static_smrd_bytes=0;
@@ -610,7 +614,10 @@ struct MetalRenderer::Impl {
 
   void Init() {
     InitCapture();
-    if(const char* option=std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"); option && !std::strcmp(option,"1")) {
+    // Immutable snapshots and raw GPU detiling avoid the large CPU upload
+    // stalls. Unsupported layouts retain the reference uploader; 0 disables
+    // this path for diagnostics without changing the game's source files.
+    if(const char* option=std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"); !option || std::strcmp(option,"0")) {
       texture_uploader=std::make_unique<GpuTextureUploader>((__bridge void*)device);
       if(!texture_uploader->Ready()) texture_uploader.reset();
     }
@@ -1913,6 +1920,7 @@ struct MetalRenderer::Impl {
       info<<"],\"scope\":\"Guest upload bytes and exact detiled planes before Metal upload\"}\n";
     }
     bool gpu_uploaded=false;
+    GpuTextureUploader::InitialHashes snapshot_hashes;
     if(texture_uploader && !fi.compressed && (fi.bytes_per_block==4 || fi.bytes_per_block==8) &&
        tt.dim!=TexDim::Tex3D && !capture_guest && dump_texture!=addr &&
        GpuTextureUploader::SupportsFormat(fi.format)) {
@@ -1923,7 +1931,8 @@ struct MetalRenderer::Impl {
             mips[lv].tile_index,tt.dim==TexDim::Tex2DArray ? l : 0,lv});
       EndPass();EnsureCommandBuffer();
       StutterTrace::Scope upload_timing("texture_gpu_upload_encode",frame_count,addr,size,1);
-      const auto result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload);
+      const auto result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload,&snapshot_hashes);
+      stat_hashed+=snapshot_hashes.bytes_hashed;
       if(result==GpuTextureUploader::Result::Failed) {
         execution->Fail(texture_uploader->Error());
         return Dummy(tt);
@@ -1981,9 +1990,15 @@ struct MetalRenderer::Impl {
     (void)thick;
     {
       StutterTrace::Scope timing("texture_hash_initial",frame_count,addr,size,1);
-      e.chunks.resize((size + kChunk - 1) / kChunk);
-      for (u32 c = 0; c < e.chunks.size(); ++c) {
-        e.chunks[c] = ChunkHash(addr, size, c);
+      if(gpu_uploaded) {
+        // Match the uploaded version even if the guest rewrites its source
+        // after the immutable snapshot. This scan was counted inside Encode.
+        e.chunks=std::move(snapshot_hashes.chunks);
+      } else {
+        e.chunks.resize((size + kChunk - 1) / kChunk);
+        for (u32 c = 0; c < e.chunks.size(); ++c) {
+          e.chunks[c] = ChunkHash(addr, size, c);
+        }
       }
     }
     e.frame = frame_count;
@@ -3428,7 +3443,16 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   const bool capture = !tessellated && debug_vsout && vs_addr == debug_vsout && !debug_vs_buf;
   vo.debug_capture = capture;
   vo.textures = vs_types;
+  if(native_vertex_fetch_enabled && vo.tess_stage==Shader::TessStage::None &&
+      !vo.native_tess_layout && !rect && !vo.points && !debug_vsout && !probe_buf &&
+      NativeVertexFetch::Layout(vs->hash)) {
+    auto [entry,inserted]=native_vertex_fetch_programs.try_emplace(vs->hash,false);
+    if(inserted) entry->second=Shader::VertexNativeFetchEligible(*vs);
+    vo.native_vertex_fetch=entry->second;
+    if(vo.native_vertex_fetch) ++native_vertex_fetch_draws;
+  }
   u64 vs_key = Hash(vs->hash);
+  if(vo.native_vertex_fetch) vs_key=Hash(NativeVertexFetch::CacheTag,vs_key);
   vs_key = Hash(vo.tess_stage, vs_key);
   vs_key = Hash(vo.native_tess_layout,vs_key);
   vs_key = Hash(vo.native_tess_factor,vs_key);
@@ -4459,6 +4483,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           static_smrd_attempts,static_smrd_draws,static_smrd_rejects,static_smrd_bytes);
       if(texture_uploader) DC_INFO("gpu texture upload: %llu versions, %llu bytes (cumulative)",
           gpu_texture_uploads,gpu_texture_upload_bytes);
+      if(native_vertex_fetch_enabled) DC_INFO("gpu native vertex fetch: %llu guarded candidate draws (cumulative)",
+          native_vertex_fetch_draws);
       if(direct_smrd_enabled) DC_INFO("gpu direct SMRD: %llu draws, %llu translated roots, %llu fallback roots (cumulative)",
           direct_smrd_draws,direct_smrd_roots,direct_smrd_fallbacks);
       if(binding_cache.enabled) DC_INFO("gpu binding cache: buffers %llu/%llu, textures %llu/%llu, samplers %llu/%llu APIs skipped/intended (cumulative)",

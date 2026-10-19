@@ -115,6 +115,10 @@ struct MslOptions {
     bool debug_capture = false; // write positions to buffer(6) (debugging)
     bool points = false;          // point list: VsOut carries [[point_size]]
     bool vtx_point_size = false;  // PA_CL_VS_OUT_CNTL.USE_VTX_POINT_SIZE: POS1.x is the size
+    // Default-disabled exact-hash interleaved fetch fusion. Descriptors and
+    // packed records remain GPU-time loads; every failed layout/map guard
+    // executes the original individual typed fetches.
+    bool native_vertex_fetch = false;
     // Fragment.
     std::array<u32, 32> ps_input_cntl{}; // SPI_PS_INPUT_CNTL_n
     u32 vs_param_mask = 0;               // params the paired VS exports
@@ -169,5 +173,8 @@ bool FragmentStaticSmrdEligible(const Program& p);
 // Distinct values at divergent joins lose uniformity, even if both inputs were
 // individually uniform. Memory writes and unknown control flow fail closed.
 bool FragmentSimdSmrdEligible(const Program& p,std::string* failure=nullptr);
+
+// Exact original vertex/fetch hashes and register/opcode/PC contract.
+bool VertexNativeFetchEligible(const Program& p,std::string* failure=nullptr);
 
 } // namespace Gpu::Shader

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #if defined(__x86_64__)
 #include <nmmintrin.h>
 #elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
@@ -11,6 +12,8 @@
 #endif
 
 namespace Gpu::ContentHash {
+// Texture change checks and immutable upload snapshots use the same chunks.
+inline constexpr std::size_t kChunkBytes=64u<<10;
 inline std::uint64_t Scalar(const void* data,std::size_t size) {
     const auto* p=static_cast<const unsigned char*>(data);
     std::uint64_t h[4]={0x9e3779b97f4a7c15ull,0xc2b2ae3d27d4eb4full,
@@ -73,5 +76,15 @@ inline std::uint64_t Bytes(const void* data,std::size_t size) {
     if (HasHardware()) return Hardware(data,size);
 #endif
     return Scalar(data,size);
+}
+inline std::vector<std::uint64_t> Chunks(const void* data,std::size_t size) {
+    const auto* bytes=static_cast<const unsigned char*>(data);
+    std::vector<std::uint64_t> hashes;
+    hashes.reserve(size/kChunkBytes+(size%kChunkBytes!=0));
+    for(std::size_t offset=0;offset<size;offset+=kChunkBytes) {
+        const auto remaining=size-offset;
+        hashes.push_back(Bytes(bytes+offset,remaining<kChunkBytes ? remaining : kChunkBytes));
+    }
+    return hashes;
 }
 } // namespace Gpu::ContentHash

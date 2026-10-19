@@ -6,7 +6,9 @@
 #include "gpu/metal/mtl_renderer.h"
 #include "gpu/liverpool/registers.h"
 #include "gpu/liverpool/tiling.h"
+#include "common/content_hash.h"
 #include "src/runtime_gpu_memory.h"
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cassert>
@@ -15,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 extern "C" void runtime_restart() { std::abort(); }
 int main() {
@@ -115,6 +118,58 @@ int main() {
         };
         if (!check(first,1) || !check(second,2)) return 1;
         puts("Metal uploaded textures: queued frames preserve their own pixels without CPU/GPU waits");
+
+        // A macro texture spans multiple hash chunks and a final partial one.
+        // First change chunk0 to make the existing cache hot, then change only
+        // the sampled pixel in the final partial chunk. The next draw must see
+        // that edit, while the already queued draw keeps the prior upload.
+        constexpr unsigned large_width=1025,large_height=129,large_pitch=1041,tile=14;
+        const size_t large_size=Tiling::SliceSize(tile,large_pitch,large_height,4);
+        uint64_t large_physical=0;
+        assert(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),large_size,16384,0,&large_physical));
+        uintptr_t large_address=0;
+        assert(!runtime_gpu_memory_map(&large_address,large_size,3,0,large_physical,16384));
+        auto* large_source=reinterpret_cast<uint32_t*>(large_address);
+        std::fill(large_source,large_source+large_size/4,0xff0000ffu); // red RGBA
+        std::vector<uint32_t> index_source(large_size/4),linear_indices(large_width*large_height);
+        for(unsigned k=0;k<index_source.size();++k)index_source[k]=k;
+        Tiling::DetileSliceReference(tile,reinterpret_cast<const unsigned char*>(index_source.data()),
+            reinterpret_cast<unsigned char*>(linear_indices.data()),large_width,large_height,large_pitch,4);
+        const size_t last_pixel_offset=size_t(linear_indices.back())*4;
+        assert(large_size%Gpu::ContentHash::kChunkBytes);
+        assert(last_pixel_offset/Gpu::ContentHash::kChunkBytes==large_size/Gpu::ContentHash::kChunkBytes);
+        const uint32_t coordinate_ps[]{0x7e00020c,0x7e02020d,
+            0xf0000000u|(32u<<18)|(15u<<8),(2u<<21)|(2u<<8),
+            0xf800080f,0x05040302,0xbf810000};
+        memcpy(shader+64,coordinate_ps,sizeof(coordinate_ps));
+        regs[Reg::SPI_SHADER_PGM_RSRC2_PS]=14u<<1;
+        const uint32_t large_texture[]{uint32_t(large_address>>8),uint32_t(large_address>>40)|(10u<<20),
+            (large_width-1)|((large_height-1)<<14),(9u<<28)|(tile<<20)|0xfacu,
+            (large_pitch-1)<<13,0,0,0};
+        for(unsigned k=0;k<8;++k)regs[Reg::SPI_SHADER_USER_DATA_PS_0+k]=large_texture[k];
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+8]=2u|(2u<<3); // clamp edge, nearest
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+9]=0xfffu<<12;
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+10]=regs[Reg::SPI_SHADER_USER_DATA_PS_0+11]=0;
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+12]=std::bit_cast<uint32_t>((large_width-.5f)/large_width);
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+13]=std::bit_cast<uint32_t>((large_height-.5f)/large_height);
+        id<MTLTexture> warm_large=draw();renderer.WaitIdle();
+        if(!check(warm_large,0))return 1;
+        auto chunk_gate=[metal newSharedEvent];assert(chunk_gate);
+        auto chunk_blocked=[queue commandBuffer];[chunk_blocked encodeWaitForEvent:chunk_gate value:1];[chunk_blocked commit];
+        std::atomic<bool> chunk_timeout{false};
+        std::jthread chunk_watchdog([chunk_gate,&chunk_timeout](std::stop_token stop) {
+            for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if(!stop.stop_requested()){chunk_timeout=true;chunk_gate.signaledValue=1;}
+        });
+        large_source[0]^=0xff00u; // detected by the first cold chunk check
+        id<MTLTexture> old_partial=draw();
+        large_source[last_pixel_offset/4]=0xff00ff00u; // green, only in last partial chunk
+        id<MTLTexture> new_partial=draw();
+        chunk_gate.signaledValue=1;chunk_watchdog.request_stop();chunk_watchdog.join();renderer.WaitIdle();
+        if(chunk_timeout){fputs("Snapshot hash regeneration waited for queued GPU work\n",stderr);return 1;}
+        if(!check(old_partial,0) || !check(new_partial,1))return 1;
+        puts("Metal snapshot hashes: next-draw changes in first and final partial chunks regenerate immutable queued versions");
 
         // Sample every visible face at every mip from physical array storage.
         // The padding faces have distinct colours, so using the view's face

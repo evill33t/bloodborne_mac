@@ -21,6 +21,12 @@ public:
         std::uint64_t bytes=0; // full physical allocation, including padding
         std::vector<Level> levels; // every visible slice/mip exactly once
     };
+    struct InitialHashes {
+        // Published only for Encoded. Fallback/Failed leave this empty.
+        std::vector<std::uint64_t> chunks;
+        // Actual CPU bytes hashed, even if a later encoder cannot be created.
+        std::uint64_t bytes_hashed=0;
+    };
     enum class Result {
         Fallback, // no GPU commands encoded; the CPU path remains safe
         Encoded,
@@ -32,7 +38,10 @@ public:
     // Exact raw-copy formats only; zero means the CPU fallback is required.
     static std::uint32_t BytesPerPixel(std::uint64_t pixel_format);
     static bool SupportsFormat(std::uint64_t pixel_format);
-    Result Encode(void* command_buffer,void* destination_texture,const Upload&);
+    // Optional hashes cover the immutable snapshot, including its final partial
+    // ContentHash chunk. Omitting this output avoids the additional CPU scan.
+    Result Encode(void* command_buffer,void* destination_texture,const Upload&,
+                  InitialHashes* initial_hashes=nullptr);
     const std::string& Error() const;
 private:
     struct Impl;

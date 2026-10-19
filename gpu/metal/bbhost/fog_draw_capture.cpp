@@ -31,6 +31,7 @@ namespace MacFeatures {
 namespace {
 constexpr std::uint64_t kWriterRva=0x10741b0;
 constexpr std::uint64_t kProducerRva=0x28ec760;
+constexpr std::uint64_t kAllocationRva=0x26db1b0,kAllocationResultRva=0x26db2d4;
 constexpr std::size_t kLimit=4096,kDepth=12;
 constexpr std::uint64_t kStackWindow=1ull<<20;
 constexpr auto kDuration=std::chrono::seconds(30);
@@ -40,6 +41,12 @@ constexpr std::uint8_t kPrologue[]{0x55,0x48,0x89,0xe5,0x41,0x56,0x53,
     0x41,0x89,0xf6,0x48,0x89,0xfb,0x48,0x8b,0x4b,0x08};
 constexpr std::uint8_t kProducerPrologue[]{0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
     0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x01,0,0};
+constexpr std::uint8_t kAllocationPrologue[]{0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+    0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28,0x49,0x89,0xd7};
+// mov rcx,[r13]; cmp rcx,[rbp-0x30]; jne26db2ed; add rsp,0x28.
+// This is the common EAX result, before the original stack-canary check.
+constexpr std::uint8_t kAllocationResult[]{0x49,0x8b,0x4d,0x00,0x48,0x3b,0x4d,0xd0,
+    0x75,0x0f,0x48,0x83,0xc4,0x28};
 
 struct Frame { std::uint64_t rbp=0,return_ip=0; };
 struct Record {
@@ -68,18 +75,53 @@ struct Packet {
     std::uint32_t count=0;
 };
 struct PacketSlot { Packet value; std::atomic<bool> ready{false}; };
+struct ArenaNode {
+    std::uint64_t address=0,status_word=0,start=0,end=0,next=0;
+    std::uint32_t status=0,read_mask=0;
+};
+struct ArenaSnapshot {
+    std::uint64_t arena=0,begin=0,end=0,outstanding=0,free_bytes=0,free_head=0;
+    std::array<std::uint64_t,4> pending_heads{};
+    std::array<ArenaNode,32> free_nodes{},pending_nodes{};
+    std::array<unsigned,4> pending_stops{};
+    unsigned read_mask=0,free_count=0,pending_count=0,free_stop=0;
+};
+struct Allocation {
+    std::uint64_t steady_ns=0,producer_sequence=0,entry_rsp=0,return_ip=0;
+    std::uint64_t descriptor=0,output=0,gx_context=0,resource=0;
+    std::uint64_t provider_manager=0,provider=0,provider_vtable=0,provider_allocate=0;
+    std::uint32_t thread_id=0,requested_bytes=0,capacity=0,alignment=0,offset=0,last_offset=0,read_mask=0;
+    std::array<std::uint8_t,80> resource_bytes{};
+    ArenaSnapshot arena;
+};
+struct AllocationSlot { Allocation value;std::atomic<bool> ready{false}; };
+struct AllocationResult {
+    std::uint64_t steady_ns=0,allocation_sequence=0,producer_sequence=0,output_value=0;
+    std::uint32_t thread_id=0,status=0;bool output_readable=false;
+    bool resource_readable=false;
+    std::array<std::uint8_t,80> resource_bytes{};
+    ArenaSnapshot arena;
+};
+struct AllocationResultSlot { AllocationResult value;std::atomic<bool> ready{false}; };
 struct EntryLink { std::uint64_t sequence=0,expected_rbp=0,return_ip=0; };
 thread_local EntryLink latest_entry;
+struct AllocationLink {std::uint64_t sequence=0,expected_rbp=0,return_ip=0,output=0,producer=0,provider=0,resource=0;};
+thread_local AllocationLink latest_allocation;
 struct State {
     std::array<Slot,kLimit> slots{};
     std::array<EntrySlot,kLimit> entries{};
     std::array<PacketSlot,kLimit> packets{};
+    std::array<AllocationSlot,kLimit> allocations{};
+    std::array<AllocationResultSlot,kLimit> allocation_results{};
     std::atomic<std::size_t> next{0};
     std::atomic<std::size_t> entry_next{0};
     std::atomic<std::size_t> packet_next{0};
+    std::atomic<std::size_t> allocation_next{0},allocation_result_next{0};
+    std::atomic<unsigned> failure_details{0};
     std::atomic<unsigned> inflight{0};
     std::atomic<bool> armed{false};
     bool producer_enabled=false;
+    bool allocation_enabled=false;
     std::uint64_t slide=0;
     std::array<std::pair<std::uint64_t,std::uint64_t>,8> executable{};
     std::size_t executable_count=0;
@@ -165,6 +207,154 @@ bool Code(const State& s,std::uint64_t address) {
         if(address>=s.executable[n].first && address<s.executable[n].second) return true;
     return false;
 }
+bool ProducerPC(const State& s,std::uint64_t ip) {
+    // Exact28ec760 FDE. Matching stack addresses alone is insufficient:
+    // another virtual producer can later reuse both RBP and caller return.
+    return ip>=s.slide+kProducerRva && ip<s.slide+0x28ed327;
+}
+bool ActiveProducer(const State& s,std::uint64_t rbp,std::uint64_t rsp) {
+    if(!latest_entry.sequence || rsp>UINT64_MAX-kStackWindow) return false;
+    std::uint64_t last=rsp-1,preceding_return=0;
+    for(unsigned n=0;n<kDepth;++n) {
+        Frame f;
+        if((rbp&7) || rbp<=last || rbp<rsp || rbp>rsp+kStackWindow-sizeof(f) || !Read(rbp,f)) return false;
+        if(rbp==latest_entry.expected_rbp && f.return_ip==latest_entry.return_ip && ProducerPC(s,preceding_return)) return true;
+        last=rbp;rbp=f.rbp;preceding_return=f.return_ip;
+    }
+    return false;
+}
+bool SnapshotNode(std::uint64_t address,ArenaNode& n) {
+    n.address=address;std::array<std::uint64_t,6> words{};
+    if(!Read(address,words)) return false;
+    n.read_mask|=1;n.status_word=words[0];n.start=words[1];n.next=words[5];
+    if(Field(words[3],8,n.end)) n.read_mask|=2;
+    // Original26aa970..981: tagged status means a pointed-to DWORD,
+    // otherwise the low DWORD of the node itself is its state enum.
+    if(!(n.status_word&1)) {n.status=std::uint32_t(n.status_word);n.read_mask|=4;}
+    else if(Read(n.status_word&~1ull,n.status)) n.read_mask|=4;
+    return true;
+}
+void SnapshotArena(std::uint64_t provider,ArenaSnapshot& a,bool detailed=false) {
+    if(!Field(provider,8,a.arena)) return;
+    a.read_mask|=1;
+    // One bounded read captures sentinel/free heads, pending heads and
+    // range/counters from exact native26a9b50/26a9db0/26aa860 layouts.
+    std::array<std::uint64_t,14> fields{};
+    if(!Field(a.arena,0x68,fields)) return;
+    a.read_mask|=2;a.free_head=fields[5];
+    for(unsigned n=0;n<4;++n) a.pending_heads[n]=fields[6+n];
+    a.begin=fields[10];a.end=fields[11];a.outstanding=fields[12];a.free_bytes=fields[13];
+    if(!detailed) return;
+    a.read_mask|=4;
+    const auto sentinel=a.arena<=UINT64_MAX-0x68 ? a.arena+0x68 : 0;
+    auto at=a.free_head;
+    while(at!=sentinel) {
+        if(!at) {a.free_stop=4;break;}
+        if(a.free_count==a.free_nodes.size()) {a.free_stop=1;break;}
+        bool seen=false;for(unsigned n=0;n<a.free_count;++n) seen|=a.free_nodes[n].address==at;
+        if(seen) {a.free_stop=3;break;}
+        auto& node=a.free_nodes[a.free_count++];
+        if(!SnapshotNode(at,node)) {a.free_stop=2;break;}
+        at=node.next;
+    }
+    // Collector has four singly linked pending lists, each advanced at+0x28.
+    // The combined pending budget is32 nodes, separately from32 free nodes.
+    for(unsigned list=0;list<4;++list) {
+        at=a.pending_heads[list];
+        while(at) {
+            if(a.pending_count==a.pending_nodes.size()) {a.pending_stops[list]=1;break;}
+            bool seen=false;for(unsigned n=0;n<a.pending_count;++n) seen|=a.pending_nodes[n].address==at;
+            if(seen) {a.pending_stops[list]=3;break;}
+            auto& node=a.pending_nodes[a.pending_count++];
+            if(!SnapshotNode(at,node)) {a.pending_stops[list]=2;break;}
+            at=node.next;
+        }
+    }
+    // These are unsynchronized diagnostic snapshots, never allocation inputs.
+}
+__attribute__((noinline)) GUEST_ABI std::int64_t ObserveAllocation(std::uint64_t,const std::uint64_t* saved) noexcept {
+    latest_allocation={};
+    State* s=state.load(std::memory_order_acquire);
+    if(!s || !s->allocation_enabled || !s->armed.load(std::memory_order_acquire) || !saved) return 0;
+    CaptureScope active(*s);if(!active.entered) return 0;
+    const auto rsp=reinterpret_cast<std::uint64_t>(saved+6);
+    std::uint64_t ret=0,rbp=0;
+    if(!Read(rsp,ret) || (ret!=s->slide+0x28f89f1 && ret!=s->slide+0x28f8a09) ||
+       !Read(reinterpret_cast<std::uint64_t>(__builtin_frame_address(0)),rbp) || !ActiveProducer(*s,rbp,rsp)) return 0;
+    if(s->allocation_next.load(std::memory_order_relaxed)>=kLimit) return 0;
+    const auto index=s->allocation_next.fetch_add(1,std::memory_order_relaxed);if(index>=kLimit) return 0;
+    Allocation& a=s->allocations[index].value;
+    a.steady_ns=SteadyNs();a.thread_id=std::uint32_t(pthread_mach_thread_np(pthread_self()));
+    a.producer_sequence=latest_entry.sequence;a.entry_rsp=rsp;a.return_ip=ret;
+    a.descriptor=saved[5];a.output=saved[4];a.gx_context=saved[3];a.requested_bytes=std::uint32_t(saved[2]);
+    std::array<std::uint64_t,3> descriptor{};
+    if(Read(a.descriptor,descriptor)) {
+        a.read_mask|=1;a.resource=descriptor[0];
+        a.capacity=std::uint32_t(descriptor[1]);a.alignment=std::uint32_t(descriptor[1]>>32);
+        a.offset=std::uint32_t(descriptor[2]);a.last_offset=std::uint32_t(descriptor[2]>>32);
+        if(Read(a.resource,a.resource_bytes)) a.read_mask|=2;
+    }
+    // Exact native discard path:2169c30 passes GX+0x10 to26d0d30,
+    // which loads [writer+0xb490]->+8 and calls that provider's vtable+0x18.
+    if(Field(a.gx_context,0xb4a0,a.provider_manager) && Field(a.provider_manager,8,a.provider) &&
+       Read(a.provider,a.provider_vtable) && Field(a.provider_vtable,0x18,a.provider_allocate)) a.read_mask|=4;
+    SnapshotArena(a.provider,a.arena);
+    latest_allocation={index+1,rsp-8,ret,a.output,a.producer_sequence,a.provider,a.resource};
+    s->allocations[index].ready.store(true,std::memory_order_release);
+    return 0;
+}
+// Custom result stub saves all integer registers and RFLAGS. Unlike an entry
+// hook, this point has RSP%16==0 and a live EAX result. saved[8] is original
+// RAX; __builtin_frame_address recovers the unchanged guest allocation RBP.
+__attribute__((noinline)) GUEST_ABI void ObserveAllocationResult(const std::uint64_t* saved) noexcept {
+    State* s=state.load(std::memory_order_acquire);
+    if(!s || !s->allocation_enabled || !saved || !latest_allocation.sequence) return;
+    CaptureScope active(*s);if(!active.entered) return;
+    std::uint64_t rbp=0,ret=0;
+    if(!Read(reinterpret_cast<std::uint64_t>(__builtin_frame_address(0)),rbp) ||
+       rbp!=latest_allocation.expected_rbp || !Field(rbp,8,ret) || ret!=latest_allocation.return_ip) return;
+    const auto link=latest_allocation;latest_allocation={};
+    if(s->allocation_result_next.load(std::memory_order_relaxed)>=kLimit) return;
+    const auto index=s->allocation_result_next.fetch_add(1,std::memory_order_relaxed);if(index>=kLimit) return;
+    auto& r=s->allocation_results[index].value;
+    r.steady_ns=SteadyNs();r.thread_id=std::uint32_t(pthread_mach_thread_np(pthread_self()));
+    r.allocation_sequence=link.sequence;r.producer_sequence=link.producer;r.status=std::uint32_t(saved[8]);
+    r.output_readable=Read(link.output,r.output_value);
+    r.resource_readable=Read(link.resource,r.resource_bytes);
+    // Keep ordinary observations cheap. Traversal happens only after a real
+    // failure, for the first16 failures in this bounded run.
+    const bool detailed=r.status!=0 && s->failure_details.fetch_add(1,std::memory_order_relaxed)<16;
+    SnapshotArena(link.provider,r.arena,detailed);
+    s->allocation_results[index].ready.store(true,std::memory_order_release);
+}
+bool InstallAllocationResult(ElfImage* image) {
+    auto* code=static_cast<std::uint8_t*>(host_page_alloc(4096,true));if(!code) return false;
+    auto* c=code;
+    const auto emit=[&](const auto& bytes){std::memcpy(c,bytes,sizeof(bytes));c+=sizeof(bytes);};
+    const auto quad=[&](std::uint64_t value){std::memcpy(c,&value,8);c+=8;};
+    // Original RSP%16==0. Ten pushes preserve alignment before the host call.
+    // The host ABI preserves RBX/RBP/R12..15; the stub preserves remaining
+    // GPRs, original integer return and flags. This native helper returns int.
+    constexpr std::uint8_t save[]{0x9c,0x50,0x57,0x56,0x52,0x51,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
+    constexpr std::uint8_t arg[]{0x48,0x89,0xe7,0x48,0xb8}; // mov rdi,rsp; movabs rax,host
+    constexpr std::uint8_t call[]{0xff,0xd0};
+    constexpr std::uint8_t restore[]{0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x59,0x5a,0x5e,0x5f,0x58,0x9d};
+    constexpr std::uint8_t compare[]{0x49,0x8b,0x4d,0x00,0x48,0x3b,0x4d,0xd0,0x74,0x0e};
+    constexpr std::uint8_t jump[]{0xff,0x25,0,0,0,0};
+    constexpr std::uint8_t stackadd[]{0x48,0x83,0xc4,0x28};
+    emit(save);emit(arg);quad(reinterpret_cast<std::uint64_t>(&ObserveAllocationResult));emit(call);emit(restore);
+    // Replay the original canary branch, relocating its short displacement.
+    // The success path then performs the original stack add and resumes pops.
+    emit(compare);emit(jump);quad(image->mem.slide+0x26db2ed);
+    emit(stackadd);emit(jump);quad(image->mem.slide+0x26db2e2);
+    const auto at=image->mem.slide+kAllocationResultRva;
+    if(!guest_protect_rwx(&image->mem,at,sizeof(kAllocationResult))) {host_page_free(code,4096);return false;}
+    auto* target=static_cast<std::uint8_t*>(guest_ptr(image->mem,at));
+    std::memcpy(target,jump,sizeof(jump));const auto address=reinterpret_cast<std::uint64_t>(code);
+    std::memcpy(target+sizeof(jump),&address,8);
+    // Installed code is process lifetime, including if the diagnostic disarms.
+    return guest_protect_rx(&image->mem,at,sizeof(kAllocationResult));
+}
 bool Inside(const std::filesystem::path& path,const std::filesystem::path& parent) {
     const auto relative=path.lexically_relative(parent);
     return path==parent || (!relative.empty() && *relative.begin()!="..");
@@ -244,8 +434,9 @@ __attribute__((noinline)) GUEST_ABI std::int64_t Observe(std::uint64_t,const std
     }
     if(s->producer_enabled) {
         const auto entry=latest_entry;
-        for(unsigned n=0;entry.sequence && n<r.frame_count;++n)
-            if(r.frames[n].rbp==entry.expected_rbp && r.frames[n].return_ip==entry.return_ip) {
+        for(unsigned n=1;entry.sequence && n<r.frame_count;++n)
+            if(r.frames[n].rbp==entry.expected_rbp && r.frames[n].return_ip==entry.return_ip &&
+               ProducerPC(*s,r.frames[n-1].return_ip)) {
                 r.producer_entry_sequence=entry.sequence;break;
             }
     }
@@ -307,8 +498,60 @@ void WritePacket(State& s,std::size_t index,const Packet& p) {
     Address(f,"packet_address",p.address);Address(f,"ps",p.ps);Address(f,"vs",p.vs);
     std::fprintf(f,"\"cb0\":\"0x%llx\"}\n",static_cast<unsigned long long>(p.cb0));
 }
+void WriteArena(std::FILE* f,const ArenaSnapshot& a) {
+    std::fputs("\"arena_snapshot\":{",f);
+    Address(f,"arena",a.arena);Address(f,"begin",a.begin);Address(f,"end",a.end);Address(f,"free_head",a.free_head);
+    std::fprintf(f,"\"outstanding\":%llu,\"free_bytes\":%llu,\"read_mask\":%u,\"free_stop\":%u,"
+        "\"pending_heads\":[",static_cast<unsigned long long>(a.outstanding),
+        static_cast<unsigned long long>(a.free_bytes),a.read_mask,a.free_stop);
+    for(unsigned n=0;n<4;++n) std::fprintf(f,"%s\"0x%llx\"",n?",":"",static_cast<unsigned long long>(a.pending_heads[n]));
+    std::fprintf(f,"],\"pending_stops\":[%u,%u,%u,%u]",a.pending_stops[0],a.pending_stops[1],a.pending_stops[2],a.pending_stops[3]);
+    const auto nodes=[&](const char* name,const auto& values,unsigned count) {
+        std::fprintf(f,",\"%s\":[",name);
+        for(unsigned n=0;n<count;++n) {
+            const auto& v=values[n];
+            std::fprintf(f,"%s[\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",\"0x%llx\",%u,%u]",
+                n?",":"",static_cast<unsigned long long>(v.address),static_cast<unsigned long long>(v.status_word),
+                static_cast<unsigned long long>(v.start),static_cast<unsigned long long>(v.end),
+                static_cast<unsigned long long>(v.next),v.status,v.read_mask);
+        }
+        std::fputc(']',f);
+    };
+    nodes("free_nodes",a.free_nodes,a.free_count);nodes("pending_nodes",a.pending_nodes,a.pending_count);
+    std::fputc('}',f);
+}
+void WriteAllocation(State& s,std::size_t index,const Allocation& a) {
+    auto* f=s.output;
+    std::fprintf(f,"{\"kind\":\"fog-allocation-entry\",\"sequence\":%zu,\"steady_ns\":%llu,"
+        "\"thread_id\":%u,\"producer_entry_sequence\":%llu,\"requested_bytes\":%u,",
+        index+1,static_cast<unsigned long long>(a.steady_ns),a.thread_id,
+        static_cast<unsigned long long>(a.producer_sequence),a.requested_bytes);
+    Address(f,"entry_rsp",a.entry_rsp);Address(f,"return_ip",a.return_ip);
+    Address(f,"descriptor",a.descriptor);Address(f,"output",a.output);
+    Address(f,"gx_context",a.gx_context);Address(f,"resource",a.resource);
+    Address(f,"provider_manager",a.provider_manager);Address(f,"provider",a.provider);
+    Address(f,"provider_vtable",a.provider_vtable);Address(f,"provider_allocate",a.provider_allocate);
+    std::fprintf(f,"\"capacity\":%u,\"alignment\":%u,\"offset\":%u,\"last_offset\":%u,"
+        "\"read_mask\":%u,\"resource_bytes\":\"",a.capacity,a.alignment,a.offset,a.last_offset,a.read_mask);
+    for(auto byte:a.resource_bytes) std::fprintf(f,"%02x",unsigned(byte));
+    std::fputs("\",",f);WriteArena(f,a.arena);std::fputs("}\n",f);
+}
+void WriteAllocationResult(State& s,std::size_t index,const AllocationResult& r) {
+    auto* f=s.output;
+    std::fprintf(f,"{\"kind\":\"fog-allocation-result\",\"sequence\":%zu,\"steady_ns\":%llu,"
+        "\"thread_id\":%u,\"allocation_sequence\":%llu,\"producer_entry_sequence\":%llu,"
+        "\"status\":%u,\"output_readable\":%s,\"output_value\":\"0x%llx\",\"resource_readable\":%s,\"resource_bytes\":\"",
+        index+1,static_cast<unsigned long long>(r.steady_ns),r.thread_id,
+        static_cast<unsigned long long>(r.allocation_sequence),static_cast<unsigned long long>(r.producer_sequence),
+        r.status,r.output_readable?"true":"false",static_cast<unsigned long long>(r.output_value),r.resource_readable?"true":"false");
+    for(auto byte:r.resource_bytes) std::fprintf(f,"%02x",unsigned(byte));
+    std::fputs("\",",f);WriteArena(f,r.arena);std::fputs("}\n",f);
+}
+bool OutputRoom(const State& s) {
+    const auto offset=std::ftell(s.output);return offset>=0 && offset<64l*1024*1024;
+}
 void Worker(State* s) noexcept {
-    std::size_t written=0,entry_written=0,packet_written=0;
+    std::size_t written=0,entry_written=0,packet_written=0,allocation_written=0,result_written=0;
     try {
         // No GPU calls or waits, no file operations on the native draw path.
         // Only a changed nonempty token arms this one run; startup is ignored.
@@ -327,6 +570,8 @@ void Worker(State* s) noexcept {
             const auto claimed=std::min(s->next.load(std::memory_order_acquire),kLimit);
             const auto entry_claimed=std::min(s->entry_next.load(std::memory_order_acquire),kLimit);
             const auto packet_claimed=std::min(s->packet_next.load(std::memory_order_acquire),kLimit);
+            const auto allocation_claimed=std::min(s->allocation_next.load(std::memory_order_acquire),kLimit);
+            const auto result_claimed=std::min(s->allocation_result_next.load(std::memory_order_acquire),kLimit);
             while(written<claimed && s->slots[written].ready.load(std::memory_order_acquire)) {
                 Write(*s,written,s->slots[written].value);++written;
             }
@@ -336,12 +581,20 @@ void Worker(State* s) noexcept {
             while(packet_written<packet_claimed && s->packets[packet_written].ready.load(std::memory_order_acquire)) {
                 WritePacket(*s,packet_written,s->packets[packet_written].value);++packet_written;
             }
+            while(allocation_written<allocation_claimed && s->allocations[allocation_written].ready.load(std::memory_order_acquire) && OutputRoom(*s)) {
+                WriteAllocation(*s,allocation_written,s->allocations[allocation_written].value);++allocation_written;
+            }
+            while(result_written<result_claimed && s->allocation_results[result_written].ready.load(std::memory_order_acquire) && OutputRoom(*s)) {
+                WriteAllocationResult(*s,result_written,s->allocation_results[result_written].value);++result_written;
+            }
             if(!stopped && (claimed>=kLimit || entry_claimed>=kLimit || packet_claimed>=kLimit ||
-                now>=deadline || std::ferror(s->output))) {
+                allocation_claimed>=kLimit || result_claimed>=kLimit ||
+                now>=deadline || std::ferror(s->output) || !OutputRoom(*s))) {
                 s->armed.store(false,std::memory_order_release);stopped=true;grace=now+std::chrono::seconds(1);
                 continue; // Resnapshot both high-water marks after disarming.
             }
             if(stopped && ((written==claimed && entry_written==entry_claimed && packet_written==packet_claimed &&
+                allocation_written==allocation_claimed && result_written==result_claimed &&
                 s->inflight.load(std::memory_order_acquire)==0) || now>=grace)) break;
             std::fflush(s->output);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -352,6 +605,10 @@ void Worker(State* s) noexcept {
             std::min(s->entry_next.load(std::memory_order_relaxed),kLimit),std::ferror(s->output)?"true":"false");
         std::fprintf(s->output,"{\"kind\":\"packet-complete\",\"packets\":%zu,\"claimed\":%zu}\n",
             packet_written,std::min(s->packet_next.load(std::memory_order_relaxed),kLimit));
+        std::fprintf(s->output,"{\"kind\":\"allocation-complete\",\"entries\":%zu,\"results\":%zu,"
+            "\"entry_claimed\":%zu,\"result_claimed\":%zu}\n",allocation_written,result_written,
+            std::min(s->allocation_next.load(std::memory_order_relaxed),kLimit),
+            std::min(s->allocation_result_next.load(std::memory_order_relaxed),kLimit));
         host_log("Native fog draw capture completed: %zu count2..16 observations, %zu producer entries",written,entry_written);
     } catch(...) {
         s->armed.store(false,std::memory_order_release);
@@ -383,6 +640,11 @@ void InstallFogDrawCapture(ElfImage* image) {
     try {
         const char* entry_flag=std::getenv("BBHOST_FOG_ENTRY_CAPTURE");
         const bool producer_on=entry_flag && !std::strcmp(entry_flag,"1");
+        const char* allocation_flag=std::getenv("BBHOST_FOG_ALLOCATION_CAPTURE");
+        const bool allocation_on=allocation_flag && !std::strcmp(allocation_flag,"1");
+        if(allocation_on && !producer_on) {
+            host_log("Native fog allocation capture refused: producer capture is required");return;
+        }
         const std::filesystem::path root=std::filesystem::path(directory).lexically_normal();
         if(!RootAllowed(root) || !std::filesystem::path(trigger).is_absolute()) {
             host_log("Native fog draw capture refused: absolute nonsymlink output outside known game roots required");return;
@@ -394,8 +656,9 @@ void InstallFogDrawCapture(ElfImage* image) {
                 !std::memcmp(bytes.data(),expected,sizeof(expected));
         };
         // Validate both original prologues before changing either code site.
-        if(!matches(kWriterRva,kPrologue) || (producer_on && !matches(kProducerRva,kProducerPrologue))) {
-            host_log("Native fog draw capture refused: exact writer/producer prologue differs");return;
+        if(!matches(kWriterRva,kPrologue) || (producer_on && !matches(kProducerRva,kProducerPrologue)) ||
+           (allocation_on && (!matches(kAllocationRva,kAllocationPrologue) || !matches(kAllocationResultRva,kAllocationResult)))) {
+            host_log("Native fog draw capture refused: exact writer/producer/allocation bytes differ");return;
         }
         const auto run=root/(std::to_string(host_clock_monotonic_ns())+"-"+std::to_string(::getpid()));
         std::filesystem::create_directories(root);
@@ -405,6 +668,7 @@ void InstallFogDrawCapture(ElfImage* image) {
         if(fd<0) return;
         auto* output=::fdopen(fd,"w");if(!output) {::close(fd);return;}
         auto* s=new State;s->output=output;s->slide=image->mem.slide;s->producer_enabled=producer_on;
+        s->allocation_enabled=allocation_on;
         s->trigger=trigger;s->initial_token=Token(s->trigger);
         for(const auto& segment:image->segments) if((segment.flags&1) && segment.memsz &&
             s->executable_count<s->executable.size() && segment.va<=UINT64_MAX-s->slide &&
@@ -421,6 +685,10 @@ void InstallFogDrawCapture(ElfImage* image) {
         const auto rollback=[&] {
             bool ok=restore(kWriterRva,kPrologue);
             if(producer_on) ok=restore(kProducerRva,kProducerPrologue) && ok;
+            if(allocation_on) {
+                ok=restore(kAllocationRva,kAllocationPrologue) && ok;
+                ok=restore(kAllocationResultRva,kAllocationResult) && ok;
+            }
             if(!ok) host_log("Native fog draw capture: original-byte protection restore failed");
         };
         bool installed=false;
@@ -430,6 +698,11 @@ void InstallFogDrawCapture(ElfImage* image) {
             if(installed && producer_on)
                 installed=engine_prologue_hook(image,s->slide+kProducerRva,kProducerPrologue,sizeof(kProducerPrologue),
                     reinterpret_cast<void*>(&ObserveProducer));
+            if(installed && allocation_on) {
+                installed=engine_prologue_hook(image,s->slide+kAllocationRva,kAllocationPrologue,sizeof(kAllocationPrologue),
+                    reinterpret_cast<void*>(&ObserveAllocation));
+                if(installed) installed=InstallAllocationResult(image);
+            }
             if(!installed) rollback();
         }
         if(!installed) {
@@ -438,10 +711,15 @@ void InstallFogDrawCapture(ElfImage* image) {
         std::fprintf(output,"{\"kind\":\"config\",\"version\":1,\"writer_rva\":\"0x10741b0\","
             "\"image_sha256\":\"%s\",\"slide\":\"0x%llx\",\"record_limit\":4096,\"stack_depth\":12,"
             "\"stack_window_bytes\":1048576,\"capture_seconds\":30,\"producer_enabled\":%s,"
-            "\"producer_rva\":\"0x28ec760\",\"producer_limit\":4096,"
+            "\"producer_rva\":\"0x28ec760\",\"producer_limit\":4096,\"allocation_enabled\":%s,"
+            "\"allocation_rva\":\"0x26db1b0\",\"allocation_result_rva\":\"0x26db2d4\",\"allocation_limit\":4096,"
+            "\"file_limit_bytes\":67108864,\"arena_free_node_limit\":32,\"arena_pending_node_limit\":32,"
+            "\"arena_detailed_failure_limit\":16,\"arena_scope\":\"cheap header before/after; detailed unsynchronized lists after first16 nonzero returns only\","
+            "\"arena_node_columns\":[\"address\",\"status_word\",\"start\",\"end\",\"next\",\"resolved_status\",\"read_mask\"],"
+            "\"arena_stop_codes\":[\"end\",\"limit\",\"unreadable\",\"cycle\",\"unexpected_null\"],"
             "\"packet_limit\":4096,\"packet_ps_filter\":\"0x80d537b100\",\"packet_cb0_filter\":\"0x806b240000\","
             "\"scope\":\"count2..16 writers, optional producer entries and selected CP packet identities; shared horizon ends at any4096 limit or30s; original execution preserved\"}\n",
-            image->sha256.c_str(),static_cast<unsigned long long>(s->slide),producer_on?"true":"false");
+            image->sha256.c_str(),static_cast<unsigned long long>(s->slide),producer_on?"true":"false",allocation_on?"true":"false");
         std::fflush(output);state.store(s,std::memory_order_release);
         try { std::thread(Worker,s).detach(); }
         catch(...) {state.store(nullptr,std::memory_order_release);rollback();std::fclose(output);s->output=nullptr;throw;}

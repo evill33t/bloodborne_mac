@@ -7,6 +7,7 @@
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_renderer.h"
 #include "gpu/metal/gpu_texture_upload.h"
+#include "common/content_hash.h"
 #include "src/runtime_gpu_memory.h"
 #include <algorithm>
 #include <array>
@@ -66,6 +67,16 @@ static void CpuTests() {
             for(unsigned z=0;z<Tiling::Thickness(tile);++z) {
                 CpuCase(tile,37,19,53,bytes,1,z);++cases;
             }
+    // Include an odd final fragment, not only whole macro-tile allocations.
+    std::vector<unsigned char> hash_bytes(Gpu::ContentHash::kChunkBytes+37,0x19);
+    const auto old_hashes=Gpu::ContentHash::Chunks(hash_bytes.data(),hash_bytes.size());
+    assert(old_hashes.size()==2);
+    assert(old_hashes[0]==Gpu::ContentHash::Bytes(hash_bytes.data(),Gpu::ContentHash::kChunkBytes));
+    assert(old_hashes[1]==Gpu::ContentHash::Bytes(hash_bytes.data()+Gpu::ContentHash::kChunkBytes,37));
+    hash_bytes.back()^=0x80;
+    const auto new_hashes=Gpu::ContentHash::Chunks(hash_bytes.data(),hash_bytes.size());
+    assert(old_hashes[0]==new_hashes[0] && old_hashes[1]!=new_hashes[1]);
+    assert(Gpu::ContentHash::Chunks(nullptr,0).empty());
     printf("Detile: %u byte-exact CPU cases, odd/large edges, padded pitches, unaligned pointers and canaries (%.3fs; mode=%s)\n",
         cases,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),
         std::getenv("BB_METAL_FAST_DETILE"));
@@ -108,21 +119,33 @@ static bool GpuUploadBitsTests() {
         auto readback=[device newBufferWithLength:row*height options:MTLResourceStorageModeShared];
         auto command=[queue commandBuffer];
         Gpu::Metal::GpuTextureUploader::Upload upload{source.data(),size,{{0,width,height,pitch,tile,0,0}}};
+        Gpu::Metal::GpuTextureUploader::InitialHashes snapshot_hashes;
+        const auto expected_hashes=Gpu::ContentHash::Chunks(source.data(),size);
         using Result=Gpu::Metal::GpuTextureUploader::Result;
         // Preflight rejects malformed coverage/ranges without poisoning the
         // command buffer; the subsequent valid request must still execute.
         auto invalid=upload;invalid.levels[0].src_offset=size;
-        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
+        snapshot_hashes.chunks={123};snapshot_hashes.bytes_hashed=999;
+        assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid,&snapshot_hashes)==Result::Fallback);
+        assert(snapshot_hashes.chunks.empty() && !snapshot_hashes.bytes_hashed);
         invalid=upload;invalid.levels.push_back(invalid.levels[0]);
         assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
         invalid=upload;invalid.levels[0].src_offset=bpe==8 ? 4 : 2;
         assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid)==Result::Fallback);
-        if(uploader.Encode((__bridge void*)command,(__bridge void*)texture,upload)!=Result::Encoded) {
+        if(!tile && format==MTLPixelFormatR32Float) {
+            invalid=upload;invalid.source=reinterpret_cast<const void*>(1);
+            assert(uploader.Encode((__bridge void*)command,(__bridge void*)texture,invalid,&snapshot_hashes)==Result::Fallback);
+            assert(snapshot_hashes.chunks.empty() && !snapshot_hashes.bytes_hashed);
+            assert(size%Gpu::ContentHash::kChunkBytes); // this allocation ends in a partial chunk
+        }
+        if(uploader.Encode((__bridge void*)command,(__bridge void*)texture,upload,&snapshot_hashes)!=Result::Encoded) {
             fprintf(stderr,"GPU upload rejected tile=%u format=%lu: %s\n",tile,(unsigned long)format,uploader.Error().c_str());return false;
         }
         // The GPU has not been submitted. A changed source must not change
-        // the immutable texture version recorded above.
+        // the immutable texture version or its corresponding hash baseline.
+        assert(snapshot_hashes.chunks==expected_hashes && snapshot_hashes.bytes_hashed==size);
         std::fill(source.begin(),source.end(),0xdeadc0de);
+        assert(snapshot_hashes.chunks!=Gpu::ContentHash::Chunks(source.data(),size));
         auto blit=[command blitCommandEncoder];
         [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
             sourceSize:MTLSizeMake(width,height,1) toBuffer:readback destinationOffset:0

@@ -11,6 +11,7 @@
 #include "gpu/shader/msl_prelude.h"
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/static_smrd.h"
+#include "gpu/metal/native_vertex_fetch.h"
 
 namespace Gpu::Shader {
 
@@ -492,13 +493,57 @@ bool ProveSimdSmrd(const Program& p,std::string* failure=nullptr) {
     return loads>0;
 }
 
+bool ProveNativeVertexFetch(const Program& p,std::string* failure=nullptr) {
+    if(failure) failure->clear();
+    const auto* layout=Gpu::Metal::NativeVertexFetch::Layout(p.hash);
+    const auto reject=[&](const char* reason) {if(failure) *failure=reason;return false;};
+    if(!layout || p.stage!=Stage::Vertex || p.num_user_sgprs!=16 || p.vgpr_comp_cnt!=3 ||
+       p.compute_rsrc2 || p.fetch_ud!=0 || p.fetch_bytes!=layout->fetch_bytes ||
+       p.has_branches || p.writes_exec || !p.labels.empty() || !p.unsupported.empty() || !p.images.empty())
+        return reject("Original vertex hash/stage/metadata mismatch");
+    const u32 n=layout->attributes;
+    if(p.code.size()<2*n+4) return reject("Truncated original fetch cluster");
+    const auto& prefix=p.code[0];
+    if(prefix.pc || prefix.enc!=Enc::SOP1 || prefix.op!=u16(Sop1::S_MOV_B32) ||
+       prefix.dst!=Operand::VccHi || prefix.src[0]!=Operand::Literal || prefix.size!=2 ||
+       prefix.literal!=(n==5 ? 0x4eu : 0x57u)) return reject("Fetch prefix can change vertex inputs");
+    for(u32 k=0;k<n;++k) {
+        const auto& i=p.code[1+k];
+        if(i.pc!=kFetchPcBase+4*k || i.enc!=Enc::SMRD || i.op!=u16(Smrd::S_LOAD_DWORDX4) ||
+           i.dst!=16+4*k || i.sbase!=2 || !i.imm || i.smrd_offset!=4*k || i.size!=1)
+            return reject("Original descriptor load cluster changed");
+    }
+    const auto wait=[&](const Inst& i,u32 pc) {
+        return i.pc==pc && i.enc==Enc::SOPP && i.op==u16(Sopp::S_WAITCNT) && i.size==1;
+    };
+    if(!wait(p.code[1+n],kFetchPcBase+4*n)) return reject("Descriptor/fetch boundary changed");
+    for(u32 k=0;k<n;++k) {
+        const auto& i=p.code[2+n+k];
+        const u16 op=k==0 ? u16(Mubuf::BUFFER_LOAD_FORMAT_XYZ) : k==5 ?
+            u16(Mubuf::BUFFER_LOAD_FORMAT_XY) : u16(Mubuf::BUFFER_LOAD_FORMAT_XYZW);
+        if(i.pc!=layout->first_pc+8*k || i.enc!=Enc::MUBUF || i.op!=op || i.size!=2 ||
+           i.vaddr || i.vdata!=4+4*k || i.srsrc!=16+4*k || i.soffset!=Operand::Zero ||
+           i.offset || !i.idxen || i.offen || i.addr64 || i.glc || i.slc || i.tfe || i.lds)
+            return reject("Original typed fetch cluster changed");
+    }
+    if(!wait(p.code[2+2*n],layout->last_pc+8)) return reject("Original fetch exit changed");
+    // No second fetch range or hidden branch may enter the fused cluster.
+    for(size_t k=3+2*n;k<p.code.size();++k)
+        if(p.code[k].pc>=kFetchPcBase || IsBranch(p.code[k]) ||
+           (p.code[k].enc==Enc::SOP1 && (p.code[k].op==u16(Sop1::S_SWAPPC_B64) ||
+            p.code[k].op==u16(Sop1::S_SETPC_B64)))) return reject("Unexpected additional fetch/control flow");
+    return true;
+}
+
 class Emitter {
 public:
     Emitter(const Program& p, const MslOptions& o) : p(p), o(o),
         opaque_exports(o.opaque_exports && ProveOpaqueExports(p)),
         static_smrd(o.static_smrd && !o.direct_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
         direct_smrd(o.direct_smrd && !o.static_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
-        simd_smrd(o.simd_smrd && !o.static_smrd && !o.direct_smrd && ProveSimdSmrd(p)) {}
+        simd_smrd(o.simd_smrd && !o.static_smrd && !o.direct_smrd && ProveSimdSmrd(p)),
+        native_vertex_fetch(o.native_vertex_fetch && o.tess_stage==TessStage::None && !o.native_tess_layout &&
+            !o.rect_list && !o.points && !o.debug_capture && ProveNativeVertexFetch(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -686,6 +731,7 @@ private:
     const bool static_smrd;
     const bool direct_smrd;
     const bool simd_smrd;
+    const bool native_vertex_fetch;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -701,6 +747,24 @@ private:
 };
 
 void Emitter::Emit(const Inst& i) {
+    const auto* fetch=native_vertex_fetch ? Gpu::Metal::NativeVertexFetch::Layout(p.hash) : nullptr;
+    if(fetch && i.pc==fetch->first_pc) {
+        std::string descriptors;
+        for(u32 k=0;k<6;++k) {
+            descriptors+=", uint4(";
+            for(u32 j=0;j<4;++j) {
+                if(j) descriptors+=", ";
+                descriptors+=k<fetch->attributes ? SName(u16(16+4*k+j)) : "0u";
+            }
+            descriptors+=")";
+        }
+        Line("{ DcVertexFetch dc_vf_; if (dc_native_vertex_fetch(dc_vf_, mem, v0, "+N(fetch->stride)+"u"+descriptors+")) {");
+        for(u32 k=0;k<fetch->attributes;++k) {
+            const u32 components=k==0 ? 3 : k==5 ? 2 : 4;
+            for(u32 j=0;j<components;++j) SetV(4+4*k+j,"dc_vf_.a"+N(k)+"["+N(j)+"]");
+        }
+        Line("} else {");
+    }
     if (i.pc == o.probe_pc && p.stage != Stage::Vertex) {
         body += "    /*DC_PROBE*/\n";
     }
@@ -733,6 +797,7 @@ void Emitter::Emit(const Inst& i) {
     case Enc::EXP: EmitExp(i); break;
     default: Unsupported(i); break;
     }
+    if(fetch && i.pc==fetch->last_pc) Line("} }");
 }
 
 void Emitter::EmitSop2(const Inst& i) {
@@ -2191,6 +2256,7 @@ std::string Emitter::Run() {
 
     std::string src = kMslPrelude;
     if (o.native_tess_layout) src += Gpu::Metal::NativeTessellationMsl();
+    if(native_vertex_fetch) src += Gpu::Metal::NativeVertexFetch::Msl();
     src += "\n";
     const std::string mem_params =
         "constant uint* ud [[buffer(0)]], device uint* gm0 [[buffer(1)]], device uint* gm1 [[buffer(2)]], "
@@ -2351,6 +2417,10 @@ bool FragmentStaticSmrdEligible(const Program& p) {
 
 bool FragmentSimdSmrdEligible(const Program& p,std::string* failure) {
     return ProveSimdSmrd(p,failure);
+}
+
+bool VertexNativeFetchEligible(const Program& p,std::string* failure) {
+    return ProveNativeVertexFetch(p,failure);
 }
 
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {

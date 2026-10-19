@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "gpu/metal/gpu_texture_upload.h"
+#include "gpu/metal/stutter_trace.h"
 #include "gpu/liverpool/tiling.h"
+#include "common/content_hash.h"
 #import <Metal/Metal.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace Gpu::Metal {
 namespace {
@@ -99,7 +102,8 @@ std::uint32_t GpuTextureUploader::BytesPerPixel(std::uint64_t format) {
 bool GpuTextureUploader::SupportsFormat(std::uint64_t format) {return BytesPerPixel(format)!=0;}
 
 GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void* texture_handle,
-                                                     const Upload& upload) {
+                                                     const Upload& upload,InitialHashes* initial_hashes) {
+    if(initial_hashes)*initial_hashes={};
     if(!Ready())return Result::Fallback;
     impl->error.clear();
     auto command=(__bridge id<MTLCommandBuffer>)command_handle;
@@ -147,17 +151,39 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
     }
     if(!scratch_bytes || scratch_bytes>impl->device.maxBufferLength)
         return reject("GPU texture upload scratch allocation exceeds its bounds.");
-    auto snapshot=[impl->device newBufferWithLength:upload.bytes options:MTLResourceStorageModeShared];
-    auto scratch=[impl->device newBufferWithLength:scratch_bytes options:MTLResourceStorageModePrivate];
+    // The renderer's outer scope supplies the frame. Match these narrower
+    // optional scopes by source address and time; zero is the unknown frame.
+    const auto source_address=reinterpret_cast<std::uintptr_t>(upload.source);
+    id<MTLBuffer> snapshot=nil,scratch=nil;
+    {
+        StutterTrace::Scope timing("texture_gpu_snapshot_allocate",0,source_address,upload.bytes,1);
+        snapshot=[impl->device newBufferWithLength:upload.bytes options:MTLResourceStorageModeShared];
+    }
+    {
+        StutterTrace::Scope timing("texture_gpu_scratch_allocate",0,source_address,scratch_bytes,1);
+        scratch=[impl->device newBufferWithLength:scratch_bytes options:MTLResourceStorageModePrivate];
+    }
     if(!snapshot || !snapshot.contents || !scratch)
         return reject("GPU texture upload could not allocate its immutable snapshot and scratch.");
     mach_vm_size_t copied=0;
-    if(mach_vm_read_overwrite(mach_task_self(),reinterpret_cast<mach_vm_address_t>(upload.source),
-        upload.bytes,reinterpret_cast<mach_vm_address_t>(snapshot.contents),&copied)!=KERN_SUCCESS || copied!=upload.bytes)
+    kern_return_t copy_result;
+    {
+        StutterTrace::Scope timing("texture_gpu_source_copy",0,source_address,upload.bytes,1);
+        copy_result=mach_vm_read_overwrite(mach_task_self(),reinterpret_cast<mach_vm_address_t>(upload.source),
+            upload.bytes,reinterpret_cast<mach_vm_address_t>(snapshot.contents),&copied);
+    }
+    if(copy_result!=KERN_SUCCESS || copied!=upload.bytes)
         return reject("GPU texture upload source snapshot was not readable.");
+    std::vector<std::uint64_t> snapshot_chunks;
+    if(initial_hashes) {
+        StutterTrace::Scope timing("texture_gpu_snapshot_hash",0,source_address,upload.bytes,1);
+        snapshot_chunks=ContentHash::Chunks(snapshot.contents,upload.bytes);
+        initial_hashes->bytes_hashed=upload.bytes;
+    }
 
     // All validation, allocation and the one CPU snapshot finish before the
     // first encoder. Resource retention belongs to this existing command buffer.
+    StutterTrace::Scope compute_timing("texture_gpu_compute_encode",0,source_address,upload.bytes,1);
     auto compute=[command computeCommandEncoder];
     if(!compute)return reject("GPU texture upload could not create its compute encoder.");
     [compute setComputePipelineState:impl->pipeline];
@@ -169,6 +195,8 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
             threadsPerThreadgroup:MTLSizeMake(8,8,1)];
     }
     [compute endEncoding];
+    compute_timing.End();
+    StutterTrace::Scope blit_timing("texture_gpu_blit_encode",0,source_address,upload.bytes,1);
     auto blit=[command blitCommandEncoder];
     if(!blit) {impl->error="GPU texture upload lost its blit encoder after encoding detile work.";return Result::Failed;}
     for(const auto& job:jobs) {
@@ -179,6 +207,7 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
             destinationSlice:job.slice destinationLevel:job.level destinationOrigin:MTLOriginMake(0,0,0)];
     }
     [blit endEncoding];
+    if(initial_hashes)initial_hashes->chunks=std::move(snapshot_chunks);
     return Result::Encoded;
 }
 } // namespace Gpu::Metal
