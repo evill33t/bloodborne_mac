@@ -221,7 +221,9 @@ Shader::MslOptions Options(const Shader::Program& p,bool enabled,bool addresses=
     o.textures.resize(p.images.size());return o;
 }
 void CapturedSimdProof(const Shader::Program& original) {
-    Require(Shader::FragmentSimdSmrdEligible(original),"Original scalar addresses failed uniform provenance proof");
+    std::string failure;
+    const bool eligible=Shader::FragmentSimdSmrdEligible(original,&failure);
+    Require(eligible,"Original scalar addresses failed uniform provenance proof: "+failure);
     auto options=Options(original,false);options.simd_smrd=true;
     std::vector<std::string> unsupported;
     const auto source=Shader::GenerateMsl(original,options,&unsupported);
@@ -259,6 +261,17 @@ void CapturedSimdProof(const Shader::Program& original) {
         }
         Require(inserted && Shader::FragmentStaticSmrdEligible(changed),"Nested-address negative fixture invalid");
         Require(!Shader::FragmentSimdSmrdEligible(changed),"Varying descriptor or guest memory write was accepted");
+    }
+    {
+        auto changed=original;
+        auto typed=std::find_if(changed.code.begin(),changed.code.end(),[](const Inst& i){return i.enc==Enc::MTBUF;});
+        Require(typed!=changed.code.end() && typed->op<=u16(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW),
+            "Original read-only typed-buffer fixture missing");
+        const u32 pc=typed->pc;typed->op=u16(Mtbuf::TBUFFER_STORE_FORMAT_X);
+        std::string reason;
+        Require(Shader::FragmentStaticSmrdEligible(changed) &&
+            !Shader::FragmentSimdSmrdEligible(changed,&reason) && reason.find("pc="+std::to_string(pc))!=std::string::npos,
+            "Typed-buffer store was admitted or lacked its rejecting instruction diagnostic");
     }
     // Two paths assigning distinct scalar constants are individually uniform
     // but become varying at their divergent join. Preserve a real forward

@@ -437,13 +437,22 @@ bool SimdSmrdStep(SimdSmrdState& state,const Inst& i,size_t index,u32& loads) {
             i.op==u16(Sopp::S_WAITCNT);
     case Enc::MIMG:
         return !std::strstr(name,"STORE") && !std::strstr(name,"ATOMIC");
+    case Enc::MTBUF:
+        // Typed buffer loads only write VGPRs. Their vector addresses may vary
+        // without affecting the scalar-load address proof. Stores remain
+        // ineligible because they could mutate a later scalar payload.
+        return i.op<=u16(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW);
     case Enc::SOPC:case Enc::VINTRP:case Enc::EXP:return true;
-    // Buffer/DS writes, atomics and unhandled operations are not eligible.
+    // Other buffer/DS operations, atomics and unhandled operations are ineligible.
     default:return false;
     }
 }
-bool ProveSimdSmrd(const Program& p) {
-    if(!ProveStaticSmrd(p)) return false;
+bool ProveSimdSmrd(const Program& p,std::string* failure=nullptr) {
+    if(failure) failure->clear();
+    if(!ProveStaticSmrd(p)) {
+        if(failure) *failure="Original hash/layout/CFG proof failed";
+        return false;
+    }
     std::unordered_map<u32,size_t> indices;
     for(size_t k=0;k<p.code.size();++k) indices.emplace(p.code[k].pc,k);
     indices.emplace(p.code.back().pc+4u*p.code.back().size,p.code.size());
@@ -459,7 +468,18 @@ bool ProveSimdSmrd(const Program& p) {
     for(size_t k=0;k<p.code.size();++k) {
         if(!incoming[k]) continue;
         auto state=*incoming[k];const auto& i=p.code[k];
-        if(!SimdSmrdStep(state,i,k,loads)) return false;
+        if(!SimdSmrdStep(state,i,k,loads)) {
+            if(failure) {
+                *failure="pc="+N(i.pc)+" "+Disassemble(i);
+                if(i.enc==Enc::SMRD) {
+                    *failure+=" base s"+N(i.sbase)+" token="+std::to_string(i.sbase<128 ? state[i.sbase] : 0)+
+                        "/"+std::to_string(i.sbase<127 ? state[i.sbase+1] : 0);
+                    if(!i.imm) *failure+=" offset operand="+N(i.smrd_offset)+
+                        " token="+std::to_string(SimdRead(state,u16(i.smrd_offset),0));
+                } else *failure+=" (unhandled operation or scalar destination)";
+            }
+            return false;
+        }
         if(i.enc==Enc::SOPP && i.op==u16(Sopp::S_ENDPGM)) continue;
         if(IsBranch(i)) {
             const auto target=indices.find(BranchTarget(i));
@@ -2329,8 +2349,8 @@ bool FragmentStaticSmrdEligible(const Program& p) {
     return ProveStaticSmrd(p);
 }
 
-bool FragmentSimdSmrdEligible(const Program& p) {
-    return ProveSimdSmrd(p);
+bool FragmentSimdSmrdEligible(const Program& p,std::string* failure) {
+    return ProveSimdSmrd(p,failure);
 }
 
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {

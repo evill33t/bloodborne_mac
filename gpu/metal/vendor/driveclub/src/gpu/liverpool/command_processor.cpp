@@ -20,6 +20,7 @@
 #include "gpu/renderer.h"
 #include "gpu/metal/command_validation.h"
 #include "gpu/metal/guest_label.h"
+#include "gpu/metal/bbhost/fog_draw_capture.h"
 
 namespace Gpu::Liverpool {
 
@@ -970,6 +971,9 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
             Draw(true, body[2], body[1], 0, 0);
             break;
         case Op::DrawIndexAuto:
+            if(!compute) MacFeatures::ObserveFogDrawPacket(reinterpret_cast<u64>(p),body[0],
+                regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS),regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_VS),
+                u64(regs[Reg::CB_COLOR0_BASE])<<8);
             Draw(false, body[0], 0, 0, 0);
             break;
         case Op::SetBase:

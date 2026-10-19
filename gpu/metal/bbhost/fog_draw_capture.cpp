@@ -63,13 +63,20 @@ struct Entry {
     std::uint32_t appearance_selector=0,appearance_bits=0,read_mask=0,observed_gate=0;
 };
 struct EntrySlot { Entry value; std::atomic<bool> ready{false}; };
+struct Packet {
+    std::uint64_t steady_ns=0,address=0,ps=0,vs=0,cb0=0;
+    std::uint32_t count=0;
+};
+struct PacketSlot { Packet value; std::atomic<bool> ready{false}; };
 struct EntryLink { std::uint64_t sequence=0,expected_rbp=0,return_ip=0; };
 thread_local EntryLink latest_entry;
 struct State {
     std::array<Slot,kLimit> slots{};
     std::array<EntrySlot,kLimit> entries{};
+    std::array<PacketSlot,kLimit> packets{};
     std::atomic<std::size_t> next{0};
     std::atomic<std::size_t> entry_next{0};
+    std::atomic<std::size_t> packet_next{0};
     std::atomic<unsigned> inflight{0};
     std::atomic<bool> armed{false};
     bool producer_enabled=false;
@@ -293,8 +300,15 @@ void WriteEntry(State& s,std::size_t index,const Entry& e) {
         "\"appearance_selector\":%u,\"appearance_bits\":%u,\"read_mask\":%u,\"observed_gate\":%u}\n",
         e.live_count,e.context_stamp,e.expected_stamp,e.appearance_selector,e.appearance_bits,e.read_mask,e.observed_gate);
 }
+void WritePacket(State& s,std::size_t index,const Packet& p) {
+    auto* f=s.output;
+    std::fprintf(f,"{\"kind\":\"fog-draw-packet\",\"sequence\":%zu,\"steady_ns\":%llu,\"count\":%u,",
+        index+1,static_cast<unsigned long long>(p.steady_ns),p.count);
+    Address(f,"packet_address",p.address);Address(f,"ps",p.ps);Address(f,"vs",p.vs);
+    std::fprintf(f,"\"cb0\":\"0x%llx\"}\n",static_cast<unsigned long long>(p.cb0));
+}
 void Worker(State* s) noexcept {
-    std::size_t written=0,entry_written=0;
+    std::size_t written=0,entry_written=0,packet_written=0;
     try {
         // No GPU calls or waits, no file operations on the native draw path.
         // Only a changed nonempty token arms this one run; startup is ignored.
@@ -312,17 +326,22 @@ void Worker(State* s) noexcept {
             const auto now=std::chrono::steady_clock::now();
             const auto claimed=std::min(s->next.load(std::memory_order_acquire),kLimit);
             const auto entry_claimed=std::min(s->entry_next.load(std::memory_order_acquire),kLimit);
+            const auto packet_claimed=std::min(s->packet_next.load(std::memory_order_acquire),kLimit);
             while(written<claimed && s->slots[written].ready.load(std::memory_order_acquire)) {
                 Write(*s,written,s->slots[written].value);++written;
             }
             while(entry_written<entry_claimed && s->entries[entry_written].ready.load(std::memory_order_acquire)) {
                 WriteEntry(*s,entry_written,s->entries[entry_written].value);++entry_written;
             }
-            if(!stopped && (claimed>=kLimit || entry_claimed>=kLimit || now>=deadline || std::ferror(s->output))) {
+            while(packet_written<packet_claimed && s->packets[packet_written].ready.load(std::memory_order_acquire)) {
+                WritePacket(*s,packet_written,s->packets[packet_written].value);++packet_written;
+            }
+            if(!stopped && (claimed>=kLimit || entry_claimed>=kLimit || packet_claimed>=kLimit ||
+                now>=deadline || std::ferror(s->output))) {
                 s->armed.store(false,std::memory_order_release);stopped=true;grace=now+std::chrono::seconds(1);
                 continue; // Resnapshot both high-water marks after disarming.
             }
-            if(stopped && ((written==claimed && entry_written==entry_claimed &&
+            if(stopped && ((written==claimed && entry_written==entry_claimed && packet_written==packet_claimed &&
                 s->inflight.load(std::memory_order_acquire)==0) || now>=grace)) break;
             std::fflush(s->output);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -331,6 +350,8 @@ void Worker(State* s) noexcept {
             "\"producer_entries\":%zu,\"producer_claimed\":%zu,\"file_error\":%s}\n",
             written,std::min(s->next.load(std::memory_order_relaxed),kLimit),entry_written,
             std::min(s->entry_next.load(std::memory_order_relaxed),kLimit),std::ferror(s->output)?"true":"false");
+        std::fprintf(s->output,"{\"kind\":\"packet-complete\",\"packets\":%zu,\"claimed\":%zu}\n",
+            packet_written,std::min(s->packet_next.load(std::memory_order_relaxed),kLimit));
         host_log("Native fog draw capture completed: %zu count2..16 observations, %zu producer entries",written,entry_written);
     } catch(...) {
         s->armed.store(false,std::memory_order_release);
@@ -338,6 +359,20 @@ void Worker(State* s) noexcept {
     }
     std::fclose(s->output);s->output=nullptr;
 }
+}
+
+void ObserveFogDrawPacket(std::uint64_t packet,std::uint32_t count,std::uint64_t ps,
+                         std::uint64_t vs,std::uint64_t cb0) noexcept {
+    State* s=state.load(std::memory_order_acquire);
+    if(!s || !s->armed.load(std::memory_order_acquire)) return;
+    // Addresses are diagnostic identities verified for this scene. Filtering
+    // them only limits observations; no command execution depends on this.
+    if(ps!=0x80d537b100ull || cb0!=0x806b240000ull ||
+        s->packet_next.load(std::memory_order_relaxed)>=kLimit) return;
+    CaptureScope active(*s);if(!active.entered) return;
+    const auto index=s->packet_next.fetch_add(1,std::memory_order_relaxed);if(index>=kLimit) return;
+    s->packets[index].value={SteadyNs(),packet,ps,vs,cb0,count};
+    s->packets[index].ready.store(true,std::memory_order_release);
 }
 
 void InstallFogDrawCapture(ElfImage* image) {
@@ -404,7 +439,8 @@ void InstallFogDrawCapture(ElfImage* image) {
             "\"image_sha256\":\"%s\",\"slide\":\"0x%llx\",\"record_limit\":4096,\"stack_depth\":12,"
             "\"stack_window_bytes\":1048576,\"capture_seconds\":30,\"producer_enabled\":%s,"
             "\"producer_rva\":\"0x28ec760\",\"producer_limit\":4096,"
-            "\"scope\":\"count2..16 writers and optional producer-entry snapshots; shared horizon ends at either4096 limit or30s; original execution preserved\"}\n",
+            "\"packet_limit\":4096,\"packet_ps_filter\":\"0x80d537b100\",\"packet_cb0_filter\":\"0x806b240000\","
+            "\"scope\":\"count2..16 writers, optional producer entries and selected CP packet identities; shared horizon ends at any4096 limit or30s; original execution preserved\"}\n",
             image->sha256.c_str(),static_cast<unsigned long long>(s->slide),producer_on?"true":"false");
         std::fflush(output);state.store(s,std::memory_order_release);
         try { std::thread(Worker,s).detach(); }

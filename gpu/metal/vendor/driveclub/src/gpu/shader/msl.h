@@ -168,6 +168,6 @@ bool FragmentStaticSmrdEligible(const Program& p);
 // Exact hot fragment hashes plus CFG provenance proof for every SMRD address.
 // Distinct values at divergent joins lose uniformity, even if both inputs were
 // individually uniform. Memory writes and unknown control flow fail closed.
-bool FragmentSimdSmrdEligible(const Program& p);
+bool FragmentSimdSmrdEligible(const Program& p,std::string* failure=nullptr);
 
 } // namespace Gpu::Shader
