@@ -19,6 +19,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/types.h"
@@ -26,7 +27,7 @@
 namespace Gpu::Metal {
 
 namespace PipelinePrewarmLimits {
-inline constexpr std::size_t Recipes=512;
+inline constexpr std::size_t Recipes=1024;
 inline constexpr std::uint64_t Bytes=128ull*1024*1024;
 inline constexpr std::uint64_t RecipeBytes=1024*1024;
 }
@@ -60,6 +61,7 @@ public:
     struct WarmupStats {
         u64 hits=0,loaded=0,ready=0;
         u64 retained=0,retained_bytes=0,pending=0,pending_bytes=0,queued=0,queued_bytes=0;
+        u64 pending_touches=0,recency_updates=0;
     };
     WarmupStats GetWarmupStats();
 
@@ -84,12 +86,15 @@ private:
     struct WarmPipeline {
         id<MTLRenderPipelineState> render=nil;id<MTLComputePipelineState> compute=nil;
         u64 bytes=0,used=0;
+        bool demand_seen=false;
     };
     std::unordered_map<std::string,WarmPipeline> warm_pipelines;
     struct PendingRecipe {NSData* data=nil;u64 queued=0;};
     std::unordered_map<std::string,PendingRecipe> recipe_writes;
+    std::unordered_set<std::string> recipe_touches;
     u64 warm_bytes=0,pending_recipe_bytes=0,warm_queued_bytes=0,warm_queued_count=0,warm_sequence=0;
     bool recipe_writer_queued=false;
+    bool recipe_touch_writer_queued=false;
     std::mutex recipe_write_lock;
     WarmupStats warm_stats;
     NSDictionary* RenderRecipe(MTLRenderPipelineDescriptor*);
@@ -97,6 +102,9 @@ private:
     void Remember(NSDictionary*,WarmPipeline);
     void WriteRecipe(const std::string&);
     void WritePendingRecipe();
+    bool QueueWarmUseLocked(const std::string&,WarmPipeline&);
+    bool TouchRecipe(const std::string&);
+    void TouchPendingRecipe();
     void StoreWarmLocked(const std::string&,WarmPipeline,u64 bytes);
     void Prewarm(NSDictionary*);
     id<MTLRenderPipelineState> NewRenderPipeline(MTLRenderPipelineDescriptor*,NSError**);

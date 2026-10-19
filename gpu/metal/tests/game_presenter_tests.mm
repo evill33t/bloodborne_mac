@@ -15,10 +15,54 @@
 #include <vector>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <unistd.h>
+
+// Validate timestamps from real command-buffer and drawable callbacks, rather
+// than assuming GPU completion means the compositor presented the drawable.
+static void CheckTiming(const char* path) {
+    FILE* file=std::fopen(path,"r");assert(file);
+    char line[2048];assert(std::fgets(line,sizeof(line),file));
+    unsigned link_records=0,legacy_records=0,dropped=0,scheduled_late=0;
+    while(std::fgets(line,sizeof(line),file)) {
+        unsigned long long sequence=0;int link=0;long status=0,error=0;
+        double callback,deadline,target,submitted,commit_begin,commit_end,scheduled;
+        double gpu_start,gpu_end,completed,presented_callback,presented;
+        const int fields=std::sscanf(line,"%llu,%d,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf,%ld,%ld",
+            &sequence,&link,&callback,&deadline,&target,&submitted,&commit_begin,&commit_end,
+            &scheduled,&gpu_start,&gpu_end,&completed,&presented_callback,&presented,&status,&error);
+        assert(fields==16 && sequence>0);
+        assert(status==MTLCommandBufferStatusCompleted && error==0);
+        assert(std::isfinite(gpu_start) && gpu_start>0 && gpu_end>=gpu_start);
+        assert(submitted>0 && commit_begin>=submitted && commit_end>=commit_begin);
+        assert(scheduled>=commit_begin && completed>=scheduled && presented_callback>0);
+        if(link) {
+            ++link_records;
+            assert(std::isfinite(callback) && callback>0 && deadline>0 && target>0);
+            assert(submitted>=callback);
+            scheduled_late+=scheduled>deadline;
+        } else {
+            ++legacy_records;assert(callback==0 && deadline==0 && target==0);
+        }
+        dropped+=presented==0;
+    }
+    std::fclose(file);
+    assert(link_records>=4 && legacy_records>0);
+    std::printf("Presentation timing: %u display-link / %u legacy records, %u scheduled after deadline, %u dropped\n",
+        link_records,legacy_records,scheduled_late,dropped);
+}
 
 int main(int argc,char** argv) {
     using namespace std::chrono_literals;
     const bool legacy=argc>1 && std::strcmp(argv[1],"--legacy")==0;
+    const bool latency2=argc>1 && std::strcmp(argv[1],"--latency2")==0;
+    char timing_path[]="/private/tmp/bb-presenter-timing-XXXXXX";
+    if(latency2) {
+        const int fd=mkstemp(timing_path);assert(fd>=0);close(fd);
+        assert(setenv("BB_METAL_DISPLAY_LINK_LATENCY","2",1)==0);
+        assert(setenv("BB_METAL_PRESENT_TIMING_CSV",timing_path,1)==0);
+    }
     @autoreleasepool {
         assert(SDL_Init(SDL_INIT_VIDEO));
         auto* window=SDL_CreateWindow("Metal presentation regression",640,360,SDL_WINDOW_METAL);
@@ -83,6 +127,8 @@ int main(int argc,char** argv) {
         if(before<8) {std::puts("No onscreen presentation timestamps; interactive fixture skipped");result=77;}
         else std::puts(legacy?"Legacy control reproduced UI-stall backpressure":"Metal presenter: UI-stall isolation, queue handoff, settings transitions and shutdown passed");
         }
+        if(latency2 && result==0)CheckTiming(timing_path);
+        if(latency2)unlink(timing_path);
         SDL_Metal_DestroyView(view);SDL_DestroyWindow(window);SDL_Quit();return result;
     }
 }

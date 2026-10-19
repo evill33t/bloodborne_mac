@@ -19,7 +19,7 @@ void Presenter::Impl::ApplySettings(bool threaded) {
             display_link.delegate=display_target;
             const float rate=std::clamp(next.refresh_rate,30.f,1000.f);
             display_link.preferredFrameRateRange=CAFrameRateRangeMake(rate,rate,rate);
-            display_link.preferredFrameLatency=1;
+            display_link.preferredFrameLatency=display_link_latency;
             display_link.paused=NO;
             last_display_update=StutterTrace::Now();
             [display_link addToRunLoop:NSRunLoop.currentRunLoop forMode:NSRunLoopCommonModes];
@@ -34,6 +34,7 @@ void Presenter::Impl::Run(std::stop_token stop) {
         display_target=[BBMetalDisplayTarget new];
         Impl* owner=this;
         display_target.render=^(CAMetalDisplayLinkUpdate* update) {
+            const double callback=owner->timing_log ? CACurrentMediaTime() : 0;
             ++owner->display_updates;
             owner->last_display_update=StutterTrace::Now();
             void* texture=owner->pending();
@@ -43,7 +44,8 @@ void Presenter::Impl::Run(std::stop_token stop) {
             if(dispatch_semaphore_wait(owner->frames_in_flight,DISPATCH_TIME_NOW)!=0)return;
             StutterTrace::Scope timing("display_link_encode",owner->next_sequence+1);
             @autoreleasepool {
-                owner->EncodeTexture((__bridge id<MTLTexture>)texture,update.drawable);
+                owner->EncodeTexture((__bridge id<MTLTexture>)texture,update.drawable,true,
+                    callback,update.targetTimestamp,update.targetPresentationTimestamp);
                 owner->queued();
             }
         };

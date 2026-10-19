@@ -15,6 +15,10 @@
 #include <thread>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <condition_variable>
+#include <string>
 #include <pthread.h>
 
 @interface BBMetalDisplayTarget : NSObject<CAMetalDisplayLinkDelegate>
@@ -74,6 +78,70 @@ struct PresentationState {
     std::deque<PresentedFrame> samples;
 };
 
+// Optional, independent of Presenter lifetime: a drawable's presentation
+// callback can follow GPU completion and destruction of the presenter.
+struct PresentationTimingLog {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<std::string> pending;
+    std::jthread writer;
+    unsigned dropped=0;
+    FILE* file=nullptr;
+    void Start() {
+        writer=std::jthread([this](std::stop_token stop) {
+            for(;;) {
+                std::string line;
+                {
+                    std::unique_lock lock(mutex);
+                    ready.wait(lock,[&] {return stop.stop_requested() || !pending.empty();});
+                    if(pending.empty())return;
+                    line=std::move(pending.front());pending.pop_front();
+                }
+                std::fputs(line.c_str(),file);std::fflush(file);
+            }
+        });
+    }
+    void Enqueue(const char* line) {
+        {
+            std::scoped_lock lock(mutex);
+            // A slow diagnostic disk must never hold up GPU/presentation
+            // callbacks or consume unbounded memory.
+            if(pending.size()==4096) {pending.pop_front();++dropped;}
+            pending.emplace_back(line);
+        }
+        ready.notify_one();
+    }
+    ~PresentationTimingLog() {
+        if(writer.joinable()) {writer.request_stop();ready.notify_one();writer.join();}
+        if(file)std::fclose(file);
+        if(dropped)NSLog(@"Optional presentation timing CSV dropped %u records",dropped);
+    }
+};
+
+struct PresentationTiming {
+    std::shared_ptr<PresentationTimingLog> log;
+    std::mutex mutex;
+    std::uint64_t sequence=0;
+    bool display_link=false,cpu_done=false,gpu_done=false,present_done=false,written=false;
+    double callback=0,deadline=0,target_presentation=0,submitted=0;
+    double commit_begin=0,commit_end=0,scheduled=0,gpu_start=0,gpu_end=0,completed=0;
+    double presented_callback=0,presented=0;
+    long status=0,error_code=0;
+
+    // Caller holds mutex. Report completed records only, regardless of which
+    // callback arrives first. No per-frame diagnostics exist unless enabled.
+    void WriteIfComplete() {
+        if(written || !cpu_done || !gpu_done || !present_done)return;
+        written=true;
+        char line[512];
+        std::snprintf(line,sizeof(line),"%llu,%d,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%ld,%ld\n",
+            (unsigned long long)sequence,int(display_link),callback,deadline,target_presentation,
+            submitted,commit_begin,commit_end,scheduled,gpu_start,gpu_end,completed,
+            presented_callback,presented,status,error_code);
+        log->Enqueue(line);
+    }
+};
+
 struct Presenter::Impl {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
@@ -99,18 +167,27 @@ struct Presenter::Impl {
     CAMetalDisplayLink* display_link=nil;
     BBMetalDisplayTarget* display_target=nil;
     double last_display_update=0;
+    float display_link_latency=1;
+    std::shared_ptr<PresentationTimingLog> timing_log;
 
     void ApplySettings(bool threaded);
-    void EncodeTexture(id<MTLTexture>,id<CAMetalDrawable>);
+    void EncodeTexture(id<MTLTexture>,id<CAMetalDrawable>,bool display_link,
+                       double callback=0,double deadline=0,double target_presentation=0);
     void PresentLegacy(void*);
     void Run(std::stop_token);
 
-    void Track(id<CAMetalDrawable> drawable) {
+    void Track(id<CAMetalDrawable> drawable,std::shared_ptr<PresentationTiming> timing={}) {
         auto state=presentations;
         const auto sequence=++next_sequence;
         const double submitted=CACurrentMediaTime();
+        if(timing) {timing->sequence=sequence;timing->submitted=submitted;}
         [drawable addPresentedHandler:^(id<MTLDrawable> frame) {
             const double presented=frame.presentedTime;
+            if(timing) {
+                std::scoped_lock lock(timing->mutex);
+                timing->presented=presented;timing->presented_callback=CACurrentMediaTime();
+                timing->present_done=true;timing->WriteIfComplete();
+            }
             if (presented>0) state->displayed.fetch_add(1,std::memory_order_relaxed);
             std::scoped_lock lock(state->mutex);
             // Keep memory bounded even if the UI thread is stalled.
@@ -138,6 +215,21 @@ Presenter::Presenter(Device& device, void* layer, const PresenterConfig& config)
     l.allowsNextDrawableTimeout = YES;
     impl->requested.vsync=config.vsync;
     impl->requested.refresh_rate=config.refresh_rate;
+    // CAMetalDisplayLink supports only 1 or 2 frames of preferred latency.
+    // Keep the existing default; 2 is an explicit pacing experiment.
+    if(const char* latency=std::getenv("BB_METAL_DISPLAY_LINK_LATENCY"))
+        if(!std::strcmp(latency,"2"))impl->display_link_latency=2;
+    if(const char* path=std::getenv("BB_METAL_PRESENT_TIMING_CSV")) {
+        if(*path) {
+            auto log=std::make_shared<PresentationTimingLog>();
+            log->file=std::fopen(path,"w");
+            if(log->file) {
+                std::fputs("sequence,display_link,callback_s,deadline_s,target_presentation_s,submitted_s,commit_begin_s,commit_end_s,scheduled_s,gpu_start_s,gpu_end_s,completed_s,presented_callback_s,presented_s,status,error_code\n",log->file);
+                log->Start();
+                impl->timing_log=std::move(log);
+            } else NSLog(@"Cannot open optional Metal presentation timing CSV: %s",path);
+        }
+    }
 
     // Create fullscreen present pipeline
     NSError* err = nil;
@@ -270,11 +362,18 @@ void Presenter::Impl::PresentLegacy(void* texture_handle) {
             return;
         }
 
-        EncodeTexture(tex,drawable);
+        EncodeTexture(tex,drawable,false);
     }
 }
 
-void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawable) {
+void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawable,bool from_display_link,
+                                  double callback,double deadline,double target_presentation) {
+        std::shared_ptr<PresentationTiming> timing;
+        if(timing_log) {
+            timing=std::make_shared<PresentationTiming>();timing->log=timing_log;
+            timing->display_link=from_display_link;timing->callback=callback;
+            timing->deadline=deadline;timing->target_presentation=target_presentation;
+        }
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
         pass.colorAttachments[0].texture = drawable.texture;
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -298,12 +397,30 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
         [enc endEncoding];
 
         dispatch_semaphore_t sem = frames_in_flight;
-        [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+          if(timing) {
+              std::scoped_lock lock(timing->mutex);
+              timing->gpu_start=buffer.GPUStartTime;timing->gpu_end=buffer.GPUEndTime;
+              timing->completed=CACurrentMediaTime();timing->status=long(buffer.status);
+              timing->error_code=long(buffer.error.code);timing->gpu_done=true;timing->WriteIfComplete();
+          }
           dispatch_semaphore_signal(sem);
         }];
-        Track(drawable);
+        if(timing) {
+            [cmd addScheduledHandler:^(id<MTLCommandBuffer>) {
+                std::scoped_lock lock(timing->mutex);timing->scheduled=CACurrentMediaTime();
+            }];
+        }
+        Track(drawable,timing);
+        // Apple's CAMetalDisplayLink sample uses command-buffer presentation.
+        // Timed presentation alternatives assert with CAMetalDisplayLink.
         [cmd presentDrawable:drawable];
+        if(timing)timing->commit_begin=CACurrentMediaTime();
         [cmd commit];
+        if(timing) {
+            std::scoped_lock lock(timing->mutex);timing->commit_end=CACurrentMediaTime();
+            timing->cpu_done=true;timing->WriteIfComplete();
+        }
     status.store(metalfx ? upscaler->Status() : "Bilinear scaling",std::memory_order_release);
 }
 

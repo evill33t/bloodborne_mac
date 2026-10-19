@@ -10,6 +10,7 @@
 #include <future>
 #include <string>
 #include <vector>
+#include <iterator>
 
 namespace {
 constexpr const char* kAreaCompute="#include <metal_stdlib>\nusing namespace metal; kernel void main0(uint i [[thread_position_in_grid]]) { }";
@@ -32,6 +33,19 @@ std::uint64_t RecipeBytes(const std::filesystem::path& directory) {
     std::uint64_t total=0;
     for(const auto& file:Recipes(directory))total+=std::filesystem::file_size(file);
     return total;
+}
+std::filesystem::path AreaRecipeFile(const std::filesystem::path& directory,unsigned group) {
+    for(const auto& path:Recipes(directory)) {
+        NSData* bytes=[NSData dataWithContentsOfFile:@(path.c_str())];
+        id recipe=bytes ? [NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] : nil;
+        if([recipe isKindOfClass:NSDictionary.class] && [recipe[@"kind"] isEqual:@"compute"] &&
+            [recipe[@"group"] unsignedIntValue]==group)return path;
+    }
+    return {};
+}
+std::string FileContents(const std::filesystem::path& path) {
+    std::ifstream input(path,std::ios::binary);
+    return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
 }
 std::filesystem::path RecipeRoot(const std::filesystem::path& directory,id<MTLDevice> device) {
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
@@ -185,10 +199,11 @@ int main() {
             changed.maxTotalThreadsPerThreadgroup=64;
             assert(compiler.ComputePipeline(changed,nil));assert(compiler.GetWarmupStats().hits==2);
         }
-        // A route visiting several areas must learn beyond the original 64
+        // A route visiting several areas must learn beyond the former 512
         // recipes. Hold the background worker to exercise pending admission,
         // rather than merely compiling/writing one descriptor at a time.
         char areas_directory[]="/tmp/bb-metal-areas-XXXXXX";assert(mkdtemp(areas_directory));
+        constexpr unsigned area_count=513;
         setenv("BB_DATA_DIR",areas_directory,1);
         {
             auto spy=[BBArchiveSpyDevice wrapping:device];
@@ -197,30 +212,91 @@ int main() {
             auto gate=release.get_future().share();
             compiler.Submit([&started,gate]{started.set_value();gate.wait();},true);
             started.get_future().wait();
-            for(unsigned group=1;group<=72;++group) AreaPipeline(compiler,group);
+            for(unsigned group=1;group<=area_count;++group) AreaPipeline(compiler,group);
             const auto stats=compiler.GetWarmupStats();
-            assert(stats.pending==72 && stats.retained==72);
+            assert(stats.pending==area_count && stats.retained==area_count);
             assert(stats.pending+stats.queued<=Gpu::Metal::PipelinePrewarmLimits::Recipes);
             assert(stats.pending_bytes+stats.queued_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
             assert(stats.retained_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
             release.set_value();assert(spy.archiveCalls==0);
         }
-        assert(Recipes(areas_directory).size()==72);
+        assert(Recipes(areas_directory).size()==area_count);
+        std::filesystem::path hot_recipe,cold_recipe;
+        std::string hot_contents;
         {
             auto spy=[BBArchiveSpyDevice wrapping:device];
             Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
-            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
-            while(compiler.GetWarmupStats().ready<72 && std::chrono::steady_clock::now()<deadline)
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+            while(compiler.GetWarmupStats().ready<area_count && std::chrono::steady_clock::now()<deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             const auto stats=compiler.GetWarmupStats();
-            assert(stats.loaded==72 && stats.ready==72 && stats.retained==72);
-            AreaPipeline(compiler,72);assert(compiler.GetWarmupStats().hits==1);
+            assert(stats.loaded==area_count && stats.ready==area_count && stats.retained==area_count);
+            hot_recipe=AreaRecipeFile(areas_directory,area_count);
+            cold_recipe=AreaRecipeFile(areas_directory,area_count-1);
+            assert(!hot_recipe.empty() && !cold_recipe.empty());
+            hot_contents=FileContents(hot_recipe);
+            const auto now=std::filesystem::file_time_type::clock::now();
+            std::filesystem::last_write_time(hot_recipe,now-std::chrono::hours(3));
+            std::filesystem::last_write_time(cold_recipe,now-std::chrono::hours(2));
+            const auto untouched=std::filesystem::last_write_time(hot_recipe);
+            std::promise<void> started,release;
+            auto gate=release.get_future().share();
+            compiler.Submit([&started,gate]{started.set_value();gate.wait();},true);
+            started.get_future().wait();
+            for(unsigned repeat=0;repeat<8;++repeat)AreaPipeline(compiler,area_count);
+            const auto pending=compiler.GetWarmupStats();
+            assert(pending.hits==8 && pending.pending_touches==1);
+            assert(std::filesystem::last_write_time(hot_recipe)==untouched); // no demand-thread disk I/O
+            release.set_value();
+            const auto touch_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+            while(!compiler.GetWarmupStats().recency_updates && std::chrono::steady_clock::now()<touch_deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            assert(compiler.GetWarmupStats().recency_updates==1);
+            assert(std::filesystem::last_write_time(hot_recipe)>std::filesystem::last_write_time(cold_recipe));
+            assert(FileContents(hot_recipe)==hot_contents);
+            // Fill only the remaining count budget. The promoted learned recipe
+            // must survive a new observation; an older unused recipe must go.
+            FillOldRecipes(RecipeRoot(areas_directory,device),
+                Gpu::Metal::PipelinePrewarmLimits::Recipes-area_count,1);
+            AreaPipeline(compiler,area_count+1);
             assert(spy.archiveCalls==0);
         }
+        assert(Recipes(areas_directory).size()==Gpu::Metal::PipelinePrewarmLimits::Recipes);
+        assert(std::filesystem::exists(hot_recipe) && !std::filesystem::exists(cold_recipe));
+        assert(FileContents(hot_recipe)==hot_contents && !AreaRecipeFile(areas_directory,area_count+1).empty());
         std::filesystem::remove_all(areas_directory);
+        // A cache entry replaced after loading must not redirect an asynchronous
+        // timestamp update into another file, through either link mechanism.
+        char touch_directory[]="/tmp/bb-metal-touch-XXXXXX";assert(mkdtemp(touch_directory));
+        setenv("BB_DATA_DIR",touch_directory,1);
+        {
+            Compiler compiler(device,2);compiler.EnablePrewarming();
+            for(unsigned group:{700u,701u,702u})AreaPipeline(compiler,group);
+        }
+        const auto sentinel=std::filesystem::path(touch_directory)/"protected.txt";
+        std::ofstream(sentinel)<<"untouched";
+        const auto old_time=std::filesystem::file_time_type::clock::now()-std::chrono::hours(1);
+        std::filesystem::last_write_time(sentinel,old_time);
+        {
+            auto spy=[BBArchiveSpyDevice wrapping:device];
+            Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(15);
+            while(compiler.GetWarmupStats().ready<3 && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            assert(compiler.GetWarmupStats().ready==3);
+            const auto linked=AreaRecipeFile(touch_directory,701),hardlinked=AreaRecipeFile(touch_directory,702);
+            assert(!linked.empty() && !hardlinked.empty());
+            std::filesystem::remove(linked);std::filesystem::create_symlink(sentinel,linked);
+            std::filesystem::remove(hardlinked);std::filesystem::create_hard_link(sentinel,hardlinked);
+            for(unsigned repeat=0;repeat<8;++repeat)
+                for(unsigned group:{700u,701u,702u})AreaPipeline(compiler,group);
+            assert(compiler.GetWarmupStats().pending_touches<=3 && spy.archiveCalls==0);
+        }
+        assert(FileContents(sentinel)=="untouched" && std::filesystem::last_write_time(sentinel)==old_time);
+        std::filesystem::remove_all(touch_directory);
         // A full count or byte budget must evict the oldest regular generated
         // recipe and retain the newly observed one. Sparse files make the
-        // 128 MiB disk boundary is inexpensive without compiling 512 shaders.
+        // 128 MiB disk boundary is inexpensive without compiling 1024 shaders.
         for(bool byte_limit:{false,true}) {
             char bounds_directory[]="/tmp/bb-metal-bounds-XXXXXX";assert(mkdtemp(bounds_directory));
             setenv("BB_DATA_DIR",bounds_directory,1);
@@ -263,6 +339,6 @@ int main() {
             compile(compiler);
         }
         std::filesystem::remove_all(warm_directory);
-        puts("Metal runtime: no binary archives; 72-recipe persistence/reload, warm hit beyond 64, bounded pending inputs, oldest-recipe count/byte eviction, source/symlink protection, opt-out and corruption recovery passed; offline archive fixture passed");
+        puts("Metal runtime: no binary archives; 513-recipe persistence/reload, coalesced background hit recency, hot-recipe retention at count bound, bounded pending inputs, count/byte eviction, source/symlink/hardlink protection, opt-out and corruption recovery passed; offline archive fixture passed");
     }
 }

@@ -64,6 +64,7 @@ ShaderCompiler::WarmupStats ShaderCompiler::GetWarmupStats() {
     result.retained=warm_pipelines.size();result.retained_bytes=warm_bytes;
     result.pending=recipe_writes.size();result.pending_bytes=pending_recipe_bytes;
     result.queued=warm_queued_count;result.queued_bytes=warm_queued_bytes;
+    result.pending_touches=recipe_touches.size();
     return result;
 }
 void ShaderCompiler::EnablePrewarming() {
@@ -146,6 +147,9 @@ void ShaderCompiler::Remember(NSDictionary* recipe,WarmPipeline pipeline) {
     bool schedule=false;
     {
         std::lock_guard guard(warm_lock);
+        // A demand compilation already queues an atomic recipe write, which
+        // refreshes disk recency. Warm hits need a separate bounded touch.
+        pipeline.demand_seen=true;
         StoreWarmLocked(key,pipeline,bytes.length);
         if(recipe_writes.contains(key)) return;
         while(recipe_writes.size()+warm_queued_count>=PipelinePrewarmLimits::Recipes ||
@@ -169,6 +173,7 @@ void ShaderCompiler::Remember(NSDictionary* recipe,WarmPipeline pipeline) {
 }
 void ShaderCompiler::StoreWarmLocked(const std::string& key,WarmPipeline pipeline,u64 bytes) {
     if(auto old=warm_pipelines.find(key);old!=warm_pipelines.end()) {
+        pipeline.demand_seen=pipeline.demand_seen || old->second.demand_seen;
         warm_bytes-=old->second.bytes;warm_pipelines.erase(old);
     }
     while(warm_pipelines.size()>=PipelinePrewarmLimits::Recipes ||
@@ -239,16 +244,67 @@ void ShaderCompiler::WriteRecipe(const std::string& key) {
     if(count>=PipelinePrewarmLimits::Recipes || total>PipelinePrewarmLimits::Bytes-bytes.length) return;
     [bytes writeToFile:path options:NSDataWritingAtomic error:nil];
 }
+bool ShaderCompiler::QueueWarmUseLocked(const std::string& key,WarmPipeline& pipeline) {
+    if(pipeline.demand_seen)return false;
+    pipeline.demand_seen=true;
+    if(recipe_writes.contains(key) || recipe_touches.size()>=PipelinePrewarmLimits::Recipes)return false;
+    recipe_touches.insert(key);
+    if(recipe_touch_writer_queued)return false;
+    recipe_touch_writer_queued=true;
+    return true;
+}
+bool ShaderCompiler::TouchRecipe(const std::string& key) {
+    std::lock_guard writer(recipe_write_lock);
+    NSString* name=[@(key.c_str()) stringByAppendingString:@".json"];
+    if(!warm_root || !RecipeFilename(name))return false;
+    NSString* path=[warm_root stringByAppendingPathComponent:name];
+    // Update the already opened file, never a symlink or a hard-linked source
+    // file substituted into the disposable cache. Do not rewrite its contents.
+    const int fd=::open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0)return false;
+    struct stat status{};
+    bool updated=false;
+    if(!::fstat(fd,&status) && S_ISREG(status.st_mode) && status.st_nlink==1) {
+        struct timespec times[2]{};
+        times[0].tv_nsec=UTIME_OMIT;
+        times[1].tv_nsec=UTIME_NOW;
+        updated=::futimens(fd,times)==0;
+    }
+    ::close(fd);
+    return updated;
+}
+void ShaderCompiler::TouchPendingRecipe() {
+    std::string key;
+    {
+        std::lock_guard guard(warm_lock);
+        if(recipe_touches.empty()){recipe_touch_writer_queued=false;return;}
+        key=*recipe_touches.begin();recipe_touches.erase(key);
+    }
+    const bool updated=TouchRecipe(key);
+    {
+        std::lock_guard guard(warm_lock);
+        if(updated)++warm_stats.recency_updates;
+        if(recipe_touches.empty()){recipe_touch_writer_queued=false;return;}
+    }
+    // One outstanding job; yield between files to retain demand-job priority.
+    Submit([this]{TouchPendingRecipe();},true);
+}
 id<MTLRenderPipelineState> ShaderCompiler::RenderPipeline(MTLRenderPipelineDescriptor* d,NSError** error) {
     NSDictionary* recipe=RenderRecipe(d);const auto key=RecipeKey(recipe);
+    id<MTLRenderPipelineState> hit=nil;bool touch=false;
     if(!key.empty()) {std::lock_guard guard(warm_lock);auto it=warm_pipelines.find(key);
-        if(it!=warm_pipelines.end() && it->second.render){it->second.used=++warm_sequence;++warm_stats.hits;if(error)*error=nil;return it->second.render;}}
+        if(it!=warm_pipelines.end() && it->second.render){it->second.used=++warm_sequence;++warm_stats.hits;
+            touch=QueueWarmUseLocked(key,it->second);hit=it->second.render;}}
+    if(hit){if(touch)Submit([this]{TouchPendingRecipe();},true);if(error)*error=nil;return hit;}
     auto result=NewRenderPipeline(d,error);Remember(recipe,{result,nil});return result;
 }
 id<MTLComputePipelineState> ShaderCompiler::ComputePipeline(MTLComputePipelineDescriptor* d,NSError** error) {
     NSDictionary* recipe=ComputeRecipe(d);const auto key=RecipeKey(recipe);
+    id<MTLComputePipelineState> hit=nil;bool touch=false;
     if(!key.empty()) {std::lock_guard guard(warm_lock);auto it=warm_pipelines.find(key);
-        if(it!=warm_pipelines.end() && it->second.compute){it->second.used=++warm_sequence;++warm_stats.hits;if(error)*error=nil;return it->second.compute;}}
+        if(it!=warm_pipelines.end() && it->second.compute){it->second.used=++warm_sequence;++warm_stats.hits;
+            touch=QueueWarmUseLocked(key,it->second);hit=it->second.compute;}}
+    if(hit){if(touch)Submit([this]{TouchPendingRecipe();},true);if(error)*error=nil;return hit;}
     auto result=NewComputePipeline(d,error);Remember(recipe,{nil,result});return result;
 }
 void ShaderCompiler::Prewarm(NSDictionary* r) {

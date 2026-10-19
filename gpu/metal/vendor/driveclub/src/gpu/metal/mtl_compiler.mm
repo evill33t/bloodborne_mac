@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <filesystem>
 
@@ -60,6 +63,10 @@ ShaderCompiler::~ShaderCompiler() {
     }
     // Cancel expensive queued prewarming at shutdown, but keep observed recipes.
     while(!recipe_writes.empty()) {const auto key=recipe_writes.begin()->first;WriteRecipe(key);}
+    while(!recipe_touches.empty()) {
+        const auto key=*recipe_touches.begin();recipe_touches.erase(key);
+        if(TouchRecipe(key))++warm_stats.recency_updates;
+    }
     FlushCache();
 }
 
