@@ -39,10 +39,10 @@ Shader::Program Synthetic(u64 hash) {
     prefix.src[0]=Operand::Literal;prefix.literal=layout->attributes==5 ? 0x4e : 0x57;prefix.size=2;
     p.code.push_back(prefix);
     for(u32 k=0;k<layout->attributes;++k) {
-        Inst i{};i.pc=kFetchPcBase+4*k;i.enc=Enc::SMRD;i.op=u16(Smrd::S_LOAD_DWORDX4);
+        Inst i{};i.pc=Shader::kFetchPcBase+4*k;i.enc=Enc::SMRD;i.op=u16(Smrd::S_LOAD_DWORDX4);
         i.dst=u16(16+4*k);i.sbase=2;i.imm=true;i.smrd_offset=4*k;p.code.push_back(i);
     }
-    Inst wait{};wait.enc=Enc::SOPP;wait.op=u16(Sopp::S_WAITCNT);wait.pc=kFetchPcBase+4*layout->attributes;
+    Inst wait{};wait.enc=Enc::SOPP;wait.op=u16(Sopp::S_WAITCNT);wait.pc=Shader::kFetchPcBase+4*layout->attributes;
     p.code.push_back(wait);
     for(u32 k=0;k<layout->attributes;++k) {
         Inst i{};i.pc=layout->first_pc+8*k;i.enc=Enc::MUBUF;i.size=2;
@@ -162,7 +162,7 @@ std::string VertexCompute(const Shader::Program& p,bool native) {
     return source+="}\n";
 }
 struct Mapping {Shader::GpuMemMap header{};std::array<s32,MemoryBytes/PageBytes> pages{};};
-struct alignas(16) RawInput {u64 table;u32 vertex,stride;};
+struct alignas(16) RawInput {u64 table;u32 vertex_index,stride;};
 struct alignas(16) Mutation {u64 table,base;u32 stride,attributes,kind,seed;};
 using Descriptor=std::array<u32,4>;
 struct Guest {
@@ -217,7 +217,7 @@ struct Guest {
 
 std::string RawSource() {
     return std::string(Shader::kMslPrelude)+Native::Msl()+R"MSL(
-struct RawInput {ulong table;uint vertex;uint stride;};
+struct RawInput {ulong table;uint vertex_index;uint stride;};
 struct Mutation {ulong table;ulong base;uint stride;uint attributes;uint kind;uint seed;};
 kernel void raw(constant RawInput& p [[buffer(0)]],device uint* lo [[buffer(1)]],device uint* hi [[buffer(2)]],
         device const DcMap& map [[buffer(3)]],device uint* result [[buffer(5)]]) {
@@ -229,10 +229,10 @@ kernel void raw(constant RawInput& p [[buffer(0)]],device uint* lo [[buffer(1)]]
     uint4 reference[6];
     for(uint k=0;k<6u;++k) {
         reference[k]=uint4(0u);if(k>=attributes) continue;
-        ulong address=dc_vbase(d[k].x,d[k].y)+ulong(p.vertex)*ulong(dc_vstride(d[k].y));
-        if(p.vertex<d[k].z) reference[k]=dc_swizzle(dc_load_fmt(mem,address,(d[k].w>>15)&15u,(d[k].w>>12)&7u),d[k].w);
+        ulong address=dc_vbase(d[k].x,d[k].y)+ulong(p.vertex_index)*ulong(dc_vstride(d[k].y));
+        if(p.vertex_index<d[k].z) reference[k]=dc_swizzle(dc_load_fmt(mem,address,(d[k].w>>15)&15u,(d[k].w>>12)&7u),d[k].w);
     }
-    DcVertexFetch fetched;bool hit=dc_native_vertex_fetch(fetched,mem,p.vertex,p.stride,d[0],d[1],d[2],d[3],d[4],d[5]);
+    DcVertexFetch fetched;bool hit=dc_native_vertex_fetch(fetched,mem,p.vertex_index,p.stride,d[0],d[1],d[2],d[3],d[4],d[5]);
     uint4 optimized[6];
     optimized[0]=hit ? fetched.a0 : reference[0];optimized[1]=hit ? fetched.a1 : reference[1];
     optimized[2]=hit ? fetched.a2 : reference[2];optimized[3]=hit ? fetched.a3 : reference[3];

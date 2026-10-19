@@ -20,6 +20,12 @@ an error after partial encoding fails that execution instead of mixing paths.
 Resources remain owned by their command buffer until GPU completion. The
 uploader adds no command-buffer submission or CPU/GPU wait.
 
+Initial texture-cache chunk hashes now describe that immutable snapshot too.
+They no longer reread the guest source after recording its upload. This keeps
+the cache baseline tied to the pixels actually uploaded when the guest changes
+its source concurrently. Hash scanning still reads every byte; any timing gain
+from snapshot locality must be measured rather than assumed.
+
 The GPU fixture covers 121 format/layout/slice/mip cases and queued versions
 whose CPU source changes before submission. Production renderer tests also
 cover nonuniform texture data, sampler changes, memory-map refresh inside a
@@ -74,7 +80,24 @@ presentation timestamps or GPU errors. This is consistent with the prior
 49.663 FPS warm baseline; it does not establish an FPS gain from binding caches.
 The cache remains optional.
 
-## Fog investigation
+The guarded native vertex-fetch path targets the two dominant interleaved
+layouts, with 32- and 36-byte records. Original descriptor loads and transform
+math remain intact. Exact shader/fetch proofs and GPU-time descriptor guards
+permit one bounds-checked record translation instead of five or six separate
+payload translations and dynamic format decodes. A different layout, unaligned
+record, page crossing, mapping gap or physical-buffer boundary retains the
+original fetches. No guest values are frozen on the CPU.
+
+Public synthetic and original captured-shader GPU fixtures passed 141 cases:
+23 fast-path cases per layout, 45/50 fallback cases, exact raw fetched values
+and complete original VS outputs, untouched XYZ/XY destination components,
+and descriptor/vertex changes from earlier queued GPU work. The first live
+candidate's eight missing presentation timestamps exclude that run from the
+final FPS comparison. A repeated 90-second reference with the fog fix measured
+50.506 FPS, p99 25.002 ms and maximum 25.006 ms, with every submitted frame
+presented and zero GPU errors. No measured CPU stage exceeded 10 ms.
+
+## Fog allocation fix
 
 The remaining fog loss is reproducible in the original saved view at faster
 rendering rates. A 30 Hz control is smooth; keeping all conversion patches
@@ -110,9 +133,37 @@ versus 62 in its healthy reference: its 13 missing object identities exactly
 match the 13 genuine fog allocation failures in that preparation window. The
 pre-particle image is unchanged, while normal fog contribution falls by about
 33.7 percent in the measured left region. This establishes a causal allocation
-abort, rather than a shader-color workaround. The native backing allocator and
-small bookkeeping allocator can both produce status 9; the branch and lifetime
-cause still require bounded allocation-pool observations.
+abort. Subsequent bounded snapshots show that all six providers share a fixed
+160 MiB arena. Several failures have less than four MiB total free, insufficient
+for the resource's four-MiB backing request, while reclamation still progresses.
+
+The fix changes the original creation configuration's capacity from 160 to
+320 MiB in loaded process memory. Both backing allocation and arena setup read
+that same field. The supported image hash, exact original prologue, original
+caller and original capacity are checked before writing its four-byte value.
+The original allocator, mapping, disposal and retirement code continues to
+execute. The override `BBHOST_TRANSIENT_GPU_MB=160` preserves the control path;
+the larger arena reserves an additional 160 MiB.
+
+In the matched 320 MiB capture, all 1,762 completed allocations succeed, with
+zero status-9 returns. One final input crosses the diagnostic stop and its
+return is unknown. All 26 complete CP frames have 61 fog draws, with 1,423
+unique producer/writer/packet links. Peak observed use is 171,871,056 bytes,
+which exceeds the original capacity. The 400 before/after HDR buffers contain
+200 validated frame pairs with no layout, padding or finite-value errors.
+
+| Region | Worst neighboring-frame fog loss, 160 MiB | 320 MiB |
+| --- | ---: | ---: |
+| Far city | 26.17% | 0.623% |
+| Left fog | 72.47% | 1.469% |
+| Arch intrados | 1.830% | 0.860% |
+
+No fixed-capture frame loses more than five percent in these regions after the
+fix. This measures sudden contribution loss, allowing natural fog animation
+between runs. Increasing the arena relocates the HDR target; diagnostics now
+follow the exact shader hash and full-HD half-float target. The old unverified
+depth-copy address is omitted after relocation. Detailed proof is in ignored
+output at `fog-audit/budget-320-roi/findings.md` and `acceptance.json`.
 
 ## Validation boundaries
 
@@ -124,13 +175,18 @@ correction. Logs reside under `out/metal-refinement-2026-10-19/`.
 The full 66-test suite was repeated after enabling the upload defaults and
 adding the finer upload scopes: again 64 passed, two expected skips, no failures
 (`defaults-ctest.log`, 103.68 seconds).
+The subsequent snapshot-hash change passed all six targeted CPU/GPU detile,
+upload and production coherence tests (`snapshot-hash-tests.log`, 79.69 seconds).
+These include old-snapshot hashes and pixels after a pre-submit source change,
+and a later edit confined to the final partial chunk of a hot texture.
 
 A single startup fault occurred in the guest's embedded inflate routine during
 one timing diagnostic. Its retry completed without the fault. The available
 registers do not identify the input asset or establish a cause; no speculative
 file-I/O workaround was added, and this is not claimed fixed.
 
-Sustained 60 FPS at native 1080p, a complete fog fix and removal of every
-area-transition stall remain separate acceptance criteria. Earlier warm
+Sustained 60 FPS at native 1080p and removal of every area-transition stall
+remain separate acceptance criteria. The fog fix is proven in the saved view;
+extended movement and retirement bounds are validated separately. Earlier warm
 native-1080p performance and Hunter's Dream cubemap verification are recorded
 in `MACOS_METAL_GAMEPLAY_2026-10-19.md`.

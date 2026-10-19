@@ -364,7 +364,8 @@ bool CaptureFogAsyncTarget(const RenderTarget* target,const char* phase,const Pr
 void CaptureFogAsyncBoundary(const Program* pixel,const RenderTarget* color) {
   if(!fog_async_frames || fog_async_root.empty()) return;
   const bool first_particle=pixel && pixel->hash==0x33a4610f6f19410dull && color &&
-      color->addr==0x806b240000ull && color->tex.pixelFormat==MTLPixelFormatRGBA16Float;
+      color->tex && color->tex.pixelFormat==MTLPixelFormatRGBA16Float &&
+      color->tex.textureType==MTLTextureType2D && color->tex.width==1920 && color->tex.height==1080;
   if(!fog_async_started) {
     if(!trace || !first_particle) return;
     fog_async_started=true;
@@ -377,7 +378,7 @@ void CaptureFogAsyncBoundary(const Program* pixel,const RenderTarget* color) {
   if(first_particle && !fog_async_particles && fog_async_frame!=frame_count) {
     fog_async_frame=frame_count;fog_async_target=color->addr;fog_async_particles=true;
     CaptureFogAsyncTarget(color,"before_particles",pixel);
-    if(fog_async_frames && fog_async_depth_frame!=frame_count) {
+    if(fog_async_frames && fog_async_depth_frame!=frame_count && fog_async_target==0x806b240000ull) {
       auto* depth=Latest(depth_targets,0x806a6c8000ull);
       auto* other=Latest(color_targets,0x806a6c8000ull);
       if(other && (!depth || other->written>depth->written)) depth=other;
@@ -398,7 +399,8 @@ void CaptureFogBoundary(const Program* pixel,const RenderTarget* color) {
   if(fog_async_frames || fog_async_started) {CaptureFogAsyncBoundary(pixel,color);return;}
   if(!fog_capture_frames || capture_root.empty()) return;
   const bool first_particle=pixel && pixel->hash==0x33a4610f6f19410dull && color &&
-      color->addr==0x806b240000ull && color->tex.pixelFormat==MTLPixelFormatRGBA16Float;
+      color->tex && color->tex.pixelFormat==MTLPixelFormatRGBA16Float &&
+      color->tex.textureType==MTLTextureType2D && color->tex.width==1920 && color->tex.height==1080;
   if(!fog_capture_started) {
     if(!trace || !first_particle) return;
     fog_capture_started=true;
@@ -407,8 +409,9 @@ void CaptureFogBoundary(const Program* pixel,const RenderTarget* color) {
   if(first_particle && !fog_capture_particles) {
     fog_capture_target=color->addr;fog_capture_particles=true;
     CaptureRaw(color->tex,"fog_before_particles");
-    if(auto* depth=Latest(depth_targets,0x804f3f0000ull);depth && depth->initialized && !depth->clear_pending)
-      CaptureRaw(depth->tex,"fog_scene_depth");
+    if(fog_capture_target==0x806b240000ull)
+      if(auto* depth=Latest(depth_targets,0x804f3f0000ull);depth && depth->initialized && !depth->clear_pending)
+        CaptureRaw(depth->tex,"fog_scene_depth");
   } else if(fog_capture_particles && (!color || color->addr!=fog_capture_target)) {
     if(auto* target=Latest(color_targets,fog_capture_target);target && target->initialized && !target->clear_pending)
       CaptureRaw(target->tex,"fog_after_particles");

@@ -122,6 +122,7 @@ struct State {
     std::atomic<bool> armed{false};
     bool producer_enabled=false;
     bool allocation_enabled=false;
+    std::uint64_t packet_ps=0x80d537b100ull,packet_cb0=0x806b240000ull;
     std::uint64_t slide=0;
     std::array<std::pair<std::uint64_t,std::uint64_t>,8> executable{};
     std::size_t executable_count=0;
@@ -386,6 +387,20 @@ std::string Token(const std::string& path) {
     ::close(fd);
     return size>0 ? std::string(bytes,static_cast<std::size_t>(size)) : std::string{};
 }
+bool AddressOption(const char* name,std::uint64_t& address) {
+    const char* value=std::getenv(name);if(!value || !*value) return true;
+    if(value[0]=='0' && (value[1]=='x' || value[1]=='X')) value+=2;
+    std::uint64_t parsed=0;unsigned digits=0;
+    for(;*value;++value) {
+        const unsigned digit=*value>='0' && *value<='9' ? unsigned(*value-'0') :
+            *value>='a' && *value<='f' ? unsigned(*value-'a'+10) :
+            *value>='A' && *value<='F' ? unsigned(*value-'A'+10) : 16;
+        if(digit>=16 || ++digits>16 || parsed>(UINT64_MAX-digit)/16) return false;
+        parsed=parsed*16+digit;
+    }
+    if(!digits || !parsed) return false;
+    address=parsed;return true;
+}
 
 // Called directly by the current Mac prologue thunk, which preserves rbp.
 // __builtin_frame_address(0) establishes a host frame; its saved rbp is the
@@ -624,7 +639,7 @@ void ObserveFogDrawPacket(std::uint64_t packet,std::uint32_t count,std::uint64_t
     if(!s || !s->armed.load(std::memory_order_acquire)) return;
     // Addresses are diagnostic identities verified for this scene. Filtering
     // them only limits observations; no command execution depends on this.
-    if(ps!=0x80d537b100ull || cb0!=0x806b240000ull ||
+    if(ps!=s->packet_ps || cb0!=s->packet_cb0 ||
         s->packet_next.load(std::memory_order_relaxed)>=kLimit) return;
     CaptureScope active(*s);if(!active.entered) return;
     const auto index=s->packet_next.fetch_add(1,std::memory_order_relaxed);if(index>=kLimit) return;
@@ -644,6 +659,10 @@ void InstallFogDrawCapture(ElfImage* image) {
         const bool allocation_on=allocation_flag && !std::strcmp(allocation_flag,"1");
         if(allocation_on && !producer_on) {
             host_log("Native fog allocation capture refused: producer capture is required");return;
+        }
+        std::uint64_t packet_ps=0x80d537b100ull,packet_cb0=0x806b240000ull;
+        if(!AddressOption("BBHOST_FOG_CAPTURE_PS",packet_ps) || !AddressOption("BBHOST_FOG_CAPTURE_CB0",packet_cb0)) {
+            host_log("Native fog capture refused: packet PS/CB0 overrides require nonzero hexadecimal addresses");return;
         }
         const std::filesystem::path root=std::filesystem::path(directory).lexically_normal();
         if(!RootAllowed(root) || !std::filesystem::path(trigger).is_absolute()) {
@@ -669,6 +688,7 @@ void InstallFogDrawCapture(ElfImage* image) {
         auto* output=::fdopen(fd,"w");if(!output) {::close(fd);return;}
         auto* s=new State;s->output=output;s->slide=image->mem.slide;s->producer_enabled=producer_on;
         s->allocation_enabled=allocation_on;
+        s->packet_ps=packet_ps;s->packet_cb0=packet_cb0;
         s->trigger=trigger;s->initial_token=Token(s->trigger);
         for(const auto& segment:image->segments) if((segment.flags&1) && segment.memsz &&
             s->executable_count<s->executable.size() && segment.va<=UINT64_MAX-s->slide &&
@@ -717,9 +737,10 @@ void InstallFogDrawCapture(ElfImage* image) {
             "\"arena_detailed_failure_limit\":16,\"arena_scope\":\"cheap header before/after; detailed unsynchronized lists after first16 nonzero returns only\","
             "\"arena_node_columns\":[\"address\",\"status_word\",\"start\",\"end\",\"next\",\"resolved_status\",\"read_mask\"],"
             "\"arena_stop_codes\":[\"end\",\"limit\",\"unreadable\",\"cycle\",\"unexpected_null\"],"
-            "\"packet_limit\":4096,\"packet_ps_filter\":\"0x80d537b100\",\"packet_cb0_filter\":\"0x806b240000\","
+            "\"packet_limit\":4096,\"packet_ps_filter\":\"0x%llx\",\"packet_cb0_filter\":\"0x%llx\","
             "\"scope\":\"count2..16 writers, optional producer entries and selected CP packet identities; shared horizon ends at any4096 limit or30s; original execution preserved\"}\n",
-            image->sha256.c_str(),static_cast<unsigned long long>(s->slide),producer_on?"true":"false",allocation_on?"true":"false");
+            image->sha256.c_str(),static_cast<unsigned long long>(s->slide),producer_on?"true":"false",allocation_on?"true":"false",
+            static_cast<unsigned long long>(s->packet_ps),static_cast<unsigned long long>(s->packet_cb0));
         std::fflush(output);state.store(s,std::memory_order_release);
         try { std::thread(Worker,s).detach(); }
         catch(...) {state.store(nullptr,std::memory_order_release);rollback();std::fclose(output);s->output=nullptr;throw;}

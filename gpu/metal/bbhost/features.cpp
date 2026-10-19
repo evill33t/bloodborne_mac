@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "features.h"
 #include "fog_draw_capture.h"
+#include "transient_gpu_budget.h"
 #include "core/elf.h"
 #include "engine/addr.h"
 #include "engine/params.h"
@@ -61,6 +62,7 @@ void Install() {
     InstallGpuFenceWaits(&game_image);
     InstallMotionCapture(&game_image);
     InstallFogDrawCapture(&game_image);
+    InstallTransientGpuBudget(&game_image);
     plugins_image(&game_image);
     patch_manifests_apply(&game_image);
     debug_menu_install(&game_image);

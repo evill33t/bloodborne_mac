@@ -46,7 +46,7 @@ static inline uint4 dc_vertex_bytes(uint word) {
     return uint4(word&255u,(word>>8)&255u,(word>>16)&255u,word>>24);
 }
 static inline bool dc_native_vertex_fetch(thread DcVertexFetch& o,thread const DcMem& m,
-        uint vertex,uint stride,uint4 d0,uint4 d1,uint4 d2,uint4 d3,uint4 d4,uint4 d5) {
+        uint vertex_index,uint stride,uint4 d0,uint4 d1,uint4 d2,uint4 d3,uint4 d4,uint4 d5) {
     if(stride!=32u && stride!=36u) return false;
     uint layout=stride<<16;
     if((d0.y&0xfffff000u)!=layout || (d1.y&0xfffff000u)!=layout ||
@@ -54,13 +54,13 @@ static inline bool dc_native_vertex_fetch(thread DcVertexFetch& o,thread const D
        (d4.y&0xfffff000u)!=layout || (stride==36u && (d5.y&0xfffff000u)!=layout)) return false;
     if(d0.w!=0x2006f3acu || d1.w!=0x20054facu || d2.w!=0x20054facu ||
        d3.w!=0x20050facu || d4.w!=0x20065facu || (stride==36u && d5.w!=0x2002d02cu)) return false;
-    if(vertex>=d0.z || vertex>=d1.z || vertex>=d2.z || vertex>=d3.z || vertex>=d4.z ||
-       (stride==36u && vertex>=d5.z)) return false;
+    if(vertex_index>=d0.z || vertex_index>=d1.z || vertex_index>=d2.z || vertex_index>=d3.z || vertex_index>=d4.z ||
+       (stride==36u && vertex_index>=d5.z)) return false;
     ulong base=dc_vbase(d0.x,d0.y);
     if(dc_vbase(d1.x,d1.y)!=base+12ul || dc_vbase(d2.x,d2.y)!=base+16ul ||
        dc_vbase(d3.x,d3.y)!=base+20ul || dc_vbase(d4.x,d4.y)!=base+24ul ||
        (stride==36u && dc_vbase(d5.x,d5.y)!=base+32ul)) return false;
-    device uint* p=dc_vertex_record(m,base+ulong(vertex)*ulong(stride),stride);
+    device uint* p=dc_vertex_record(m,base+ulong(vertex_index)*ulong(stride),stride);
     if(!p) return false;
     o.a0=uint4(p[0],p[1],p[2],0x3f800000u);
     o.a1=dc_vertex_bytes(p[3]);o.a2=dc_vertex_bytes(p[4]);
