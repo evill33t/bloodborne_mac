@@ -125,6 +125,9 @@ struct MslOptions {
     // DB_DEPTH_CONTROL.DEPTH_BOUNDS_ENABLE: discard where the stored depth (a copy at
     // texture(kDepthBoundsTexture)) is outside [min, max] (buffer(kDepthBoundsBuffer)).
     bool depth_bounds = false;
+    // Remove only translator-inserted kills proven unreachable by the fragment
+    // CFG. This never forces early depth/stencil tests or removes depth bounds.
+    bool opaque_exports = false;
     // Register probe (debugging): before the instruction at `probe_pc`, the
     // fragment at pixel (probe_x, probe_y) -- for compute, the thread at that
     // global grid position -- writes its
@@ -139,5 +142,10 @@ struct MslOptions {
 // Returns the MSL source; the entry point is "main0". Opcodes that could not
 // be translated are appended to `unsupported`.
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported);
+
+// Conservative proof for the translated per-lane EXEC model. Every reachable
+// export must have full EXEC, and every reachable exit must follow an export.
+// Unsupported control flow and loops retain the original fragment kills.
+bool FragmentExportsOpaque(const Program& p);
 
 } // namespace Gpu::Shader

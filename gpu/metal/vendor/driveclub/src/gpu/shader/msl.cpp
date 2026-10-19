@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -38,9 +39,225 @@ u32 FloatBits(float f) {
     return u;
 }
 
+using OpaqueWord = std::optional<u32>;
+using OpaquePair = std::array<OpaqueWord, 2>;
+
+struct OpaqueState {
+    std::array<OpaqueWord, 128> scalar{};
+    bool exported = false;
+};
+
+u16 OpaqueHi(u16 code) {
+    return code == Operand::VccLo ? Operand::VccHi :
+           code == Operand::ExecLo ? Operand::ExecHi : static_cast<u16>(code + 1);
+}
+
+OpaqueWord OpaqueRead(const OpaqueState& state, u16 code, u32 literal) {
+    if (code < state.scalar.size()) return state.scalar[code];
+    if (code >= Operand::Zero && code <= Operand::IntPosMax) return code - Operand::Zero;
+    if (code > Operand::IntPosMax && code <= Operand::IntNegMax)
+        return u32(-s32(code - Operand::IntPosMax));
+    if (code >= Operand::FloatHalf && code <= Operand::FloatNegFour) {
+        static const float values[] = {0.5f, -0.5f, 1.0f, -1.0f, 2.0f, -2.0f, 4.0f, -4.0f};
+        return FloatBits(values[code - Operand::FloatHalf]);
+    }
+    if (code == Operand::Literal) return literal;
+    return {}; // VGPRs and predicates are dynamic.
+}
+
+OpaquePair OpaqueRead64(const OpaqueState& state, u16 code, u32 literal) {
+    if (code <= Operand::SgprMax || code == Operand::VccLo || code == Operand::ExecLo)
+        return {OpaqueRead(state,code,literal),OpaqueRead(state,OpaqueHi(code),literal)};
+    const auto lo = OpaqueRead(state,code,literal);
+    // Match Src64: literal dwords zero extend, inline integers sign extend.
+    return {lo,lo ? OpaqueWord(code == Operand::Literal ? 0u : u32(s32(*lo) >> 31)) : OpaqueWord{}};
+}
+
+bool OpaqueWrite(OpaqueState& state, u16 code, OpaqueWord word) {
+    if (code >= state.scalar.size()) return false;
+    state.scalar[code] = word;
+    return true;
+}
+
+bool OpaqueWrite64(OpaqueState& state, u16 code, const OpaquePair& pair) {
+    return OpaqueWrite(state,code,pair[0]) && OpaqueWrite(state,OpaqueHi(code),pair[1]);
+}
+
+OpaqueWord OpaqueBitwise(u16 op, OpaqueWord a, OpaqueWord b) {
+    if (!a || !b) return {};
+    switch (op) {
+    case 0: return *a & *b;
+    case 1: return *a | *b;
+    case 2: return *a ^ *b;
+    case 3: return *a & ~*b;
+    case 4: return *a | ~*b;
+    case 5: return ~(*a & *b);
+    case 6: return ~(*a | *b);
+    case 7: return ~(*a ^ *b);
+    default: return {};
+    }
+}
+
+// Track only scalar constants needed to prove EXEC restores. All other writes
+// lose information. Keep the scalar write cases aligned with EmitSop*/EmitVop;
+// in particular vector compares, carries, and lane reads can clobber a saved
+// EXEC pair even though most vector instructions only write VGPRs.
+bool OpaqueStep(OpaqueState& state, const Inst& i) {
+    if (!OpName(i.enc,i.op)) return false;
+    switch (i.enc) {
+    case Enc::EXP:
+        if (state.scalar[Operand::ExecLo] != OpaqueWord(~0u) ||
+            state.scalar[Operand::ExecHi] != OpaqueWord(~0u)) return false;
+        state.exported = true;
+        return true;
+    case Enc::SOP1: {
+        const auto a = OpaqueRead(state,i.src[0],i.literal);
+        const auto pair = OpaqueRead64(state,i.src[0],i.literal);
+        const auto op = static_cast<Sop1>(i.op);
+        if (op >= Sop1::S_AND_SAVEEXEC_B64 && op <= Sop1::S_XNOR_SAVEEXEC_B64) {
+            const auto old = OpaqueRead64(state,Operand::ExecLo,0);
+            const auto kind = i.op - static_cast<u16>(Sop1::S_AND_SAVEEXEC_B64);
+            const OpaquePair next = {OpaqueBitwise(kind,pair[0],old[0]),
+                                     OpaqueBitwise(kind,pair[1],old[1])};
+            return OpaqueWrite64(state,i.dst,old) && OpaqueWrite64(state,Operand::ExecLo,next);
+        }
+        switch (op) {
+        case Sop1::S_MOV_B32: case Sop1::S_MOV_FED_B32: case Sop1::S_WQM_B32:
+            return OpaqueWrite(state,i.dst,a);
+        case Sop1::S_MOV_B64: case Sop1::S_WQM_B64:
+            return OpaqueWrite64(state,i.dst,pair);
+        case Sop1::S_NOT_B32:
+            return OpaqueWrite(state,i.dst,a ? OpaqueWord(~*a) : OpaqueWord{});
+        case Sop1::S_NOT_B64:
+            return OpaqueWrite64(state,i.dst,{pair[0] ? OpaqueWord(~*pair[0]) : OpaqueWord{},
+                                              pair[1] ? OpaqueWord(~*pair[1]) : OpaqueWord{}});
+        case Sop1::S_CMOV_B32:
+            return OpaqueWrite(state,i.dst,a == OpaqueRead(state,i.dst,0) ? a : OpaqueWord{});
+        case Sop1::S_CMOV_B64: {
+            const auto old = OpaqueRead64(state,i.dst,0);
+            return OpaqueWrite64(state,i.dst,{old[0] == pair[0] ? pair[0] : OpaqueWord{},
+                                              old[1] == pair[1] ? pair[1] : OpaqueWord{}});
+        }
+        case Sop1::S_SETPC_B64: case Sop1::S_SWAPPC_B64: case Sop1::S_RFE_B64:
+        case Sop1::S_MOVRELS_B32: case Sop1::S_MOVRELS_B64:
+        case Sop1::S_MOVRELD_B32: case Sop1::S_MOVRELD_B64: case Sop1::S_CBRANCH_JOIN:
+            return false;
+        default:
+            return OpaqueWrite64(state,i.dst,{}); // May conservatively kill an adjacent constant.
+        }
+    }
+    case Enc::SOP2: {
+        if (i.op == static_cast<u16>(Sop2::S_CBRANCH_G_FORK)) return false;
+        if (i.op >= static_cast<u16>(Sop2::S_AND_B32) && i.op <= static_cast<u16>(Sop2::S_XNOR_B64)) {
+            const auto kind = (i.op - static_cast<u16>(Sop2::S_AND_B32)) / 2;
+            if (i.op & 1u) {
+                const auto a = OpaqueRead64(state,i.src[0],i.literal);
+                const auto b = OpaqueRead64(state,i.src[1],i.literal);
+                return OpaqueWrite64(state,i.dst,{OpaqueBitwise(kind,a[0],b[0]),OpaqueBitwise(kind,a[1],b[1])});
+            }
+            return OpaqueWrite(state,i.dst,OpaqueBitwise(kind,OpaqueRead(state,i.src[0],i.literal),
+                                                                OpaqueRead(state,i.src[1],i.literal)));
+        }
+        return OpaqueWrite64(state,i.dst,{});
+    }
+    case Enc::SOPK:
+        if (i.op == static_cast<u16>(Sopk::S_CBRANCH_I_FORK)) return false;
+        if ((i.op >= static_cast<u16>(Sopk::S_CMPK_EQ_I32) && i.op <= static_cast<u16>(Sopk::S_CMPK_LE_U32)) ||
+            i.op == static_cast<u16>(Sopk::S_SETREG_B32) || i.op == static_cast<u16>(Sopk::S_SETREG_IMM32_B32)) return true;
+        return OpaqueWrite(state,i.dst,i.op == static_cast<u16>(Sopk::S_MOVK_I32) ?
+                           OpaqueWord(u32(s32(i.simm16))) : OpaqueWord{});
+    case Enc::SOPC:
+        return true; // SCC is not used to prune either branch.
+    case Enc::SOPP:
+        return IsBranch(i) || i.op == static_cast<u16>(Sopp::S_ENDPGM) ||
+               i.op == static_cast<u16>(Sopp::S_NOP) || i.op == static_cast<u16>(Sopp::S_WAITCNT) ||
+               i.op == static_cast<u16>(Sopp::S_BARRIER);
+    case Enc::SMRD: {
+        if (i.op == static_cast<u16>(Smrd::S_DCACHE_INV) || i.op == static_cast<u16>(Smrd::S_DCACHE_INV_VOL)) return true;
+        u32 count = 0;
+        if (i.op <= 4) count = 1u << i.op;
+        else if (i.op >= 8 && i.op <= 12) count = 1u << (i.op - 8);
+        else if (i.op == static_cast<u16>(Smrd::S_MEMTIME)) count = 2;
+        else return false;
+        for (u32 k = 0; k < count; ++k)
+            if (!OpaqueWrite(state,static_cast<u16>(i.dst+k),{})) return false;
+        return true;
+    }
+    case Enc::VOPC: case Enc::VOP3:
+        if (i.op < 256) {
+            if (!OpaqueWrite64(state,i.sdst,{})) return false;
+            if ((i.op & 0x10u) && !OpaqueWrite64(state,Operand::ExecLo,{})) return false;
+            return true;
+        }
+        [[fallthrough]];
+    case Enc::VOP1: case Enc::VOP2:
+        switch (static_cast<Vop>(i.op)) {
+        case Vop::V_READLANE_B32: case Vop::V_READFIRSTLANE_B32:
+            return OpaqueWrite(state,i.dst,{});
+        case Vop::V_ADD_I32: case Vop::V_SUB_I32: case Vop::V_SUBREV_I32:
+        case Vop::V_ADDC_U32: case Vop::V_SUBB_U32: case Vop::V_SUBBREV_U32:
+        case Vop::V_DIV_SCALE_F32: case Vop::V_DIV_SCALE_F64:
+        case Vop::V_MAD_U64_U32: case Vop::V_MAD_I64_I32:
+            return OpaqueWrite64(state,i.sdst,{});
+        default: return true;
+        }
+    case Enc::VINTRP: case Enc::DS: case Enc::MUBUF: case Enc::MTBUF: case Enc::MIMG:
+        return true; // These instructions do not write scalar registers or EXEC.
+    default: return false;
+    }
+}
+
+bool ProveOpaqueExports(const Program& p) {
+    if (p.stage != Stage::Fragment || p.code.empty() || !p.unsupported.empty() || p.code.front().pc != 0) return false;
+    std::unordered_map<u32,size_t> indices;
+    for (size_t k = 0; k < p.code.size(); ++k) {
+        if (!indices.emplace(p.code[k].pc,k).second || p.code[k].size == 0 ||
+            (k && p.code[k].pc != p.code[k-1].pc + 4u*p.code[k-1].size)) return false;
+    }
+    const auto end_pc = p.code.back().pc + 4u*p.code.back().size;
+    indices.emplace(end_pc,p.code.size());
+    std::vector<std::optional<OpaqueState>> incoming(p.code.size()+1);
+    OpaqueState initial;
+    initial.scalar[Operand::ExecLo] = initial.scalar[Operand::ExecHi] = ~0u;
+    initial.scalar[Operand::VccLo] = initial.scalar[Operand::VccHi] = 0u;
+    incoming[0] = initial;
+    auto merge = [&](size_t at, const OpaqueState& state) {
+        if (!incoming[at]) { incoming[at] = state; return; }
+        auto& old = *incoming[at];
+        old.exported &= state.exported;
+        for (size_t k = 0; k < old.scalar.size(); ++k)
+            if (old.scalar[k] != state.scalar[k]) old.scalar[k].reset();
+    };
+    bool exited = false;
+    for (size_t k = 0; k < p.code.size(); ++k) {
+        if (!incoming[k]) continue;
+        auto state = *incoming[k];
+        const auto& i = p.code[k];
+        if (!OpaqueStep(state,i)) return false;
+        if (i.enc == Enc::SOPP && i.op == static_cast<u16>(Sopp::S_ENDPGM)) {
+            if (!state.exported) return false;
+            exited = true;
+            continue;
+        }
+        if (IsBranch(i)) {
+            const auto found = indices.find(BranchTarget(i));
+            // Acyclic CFG only. Loops/dynamic jumps use the original kills.
+            if (found == indices.end() || found->second <= k) return false;
+            merge(found->second,state);
+            if (i.op == static_cast<u16>(Sopp::S_BRANCH)) continue;
+        }
+        merge(k+1,state); // Both arms of a dynamic conditional remain reachable.
+    }
+    if (incoming.back()) {
+        if (!incoming.back()->exported) return false;
+        exited = true;
+    }
+    return exited;
+}
+
 class Emitter {
 public:
-    Emitter(const Program& p, const MslOptions& o) : p(p), o(o) {}
+    Emitter(const Program& p, const MslOptions& o) : p(p), o(o), opaque_exports(o.opaque_exports && ProveOpaqueExports(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -205,7 +422,7 @@ private:
         Line(t <= cur ? "{ tgt_ = " + N(t) + "u; continue; }" : "tgt_ = " + N(t) + "u;");
     }
     void End() {
-        if (p.stage == Stage::Fragment) {
+        if (p.stage == Stage::Fragment && !opaque_exports) {
             Line("if (!dc_exported) discard_fragment();");
         }
         Line(ComputeLike() ? "return;" : "return out;");
@@ -224,6 +441,7 @@ private:
 
     const Program& p;
     const MslOptions& o;
+    const bool opaque_exports;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -1355,7 +1573,7 @@ void Emitter::EmitExp(const Inst& i) {
     if (p.stage != Stage::Fragment) {
         return;
     }
-    if (p.writes_exec) {
+    if (p.writes_exec && !opaque_exports) {
         Line("if (exec_lo == 0u) discard_fragment();");
     }
     Line("dc_exported = true;");
@@ -1689,7 +1907,7 @@ std::string Emitter::Run() {
         wrapped = "    uint tgt_ = 0u;\n" + body;
     } else if (p.has_branches) {
         wrapped = "    uint pc_ = 0u;\n    while (true) {\n    switch (pc_) {\n    case 0u:\n" + body +
-                  "    default:\n        " + (p.stage == Stage::Fragment ? "if (!dc_exported) discard_fragment(); " : "") +
+                  "    default:\n        " + (p.stage == Stage::Fragment && !opaque_exports ? "if (!dc_exported) discard_fragment(); " : "") +
                   (ComputeLike() ? "return;" : "return out;") + "\n    }\n    }\n";
     } else {
         wrapped = body;
@@ -1844,6 +2062,10 @@ std::string Emitter::Run() {
 }
 
 } // namespace
+
+bool FragmentExportsOpaque(const Program& p) {
+    return ProveOpaqueExports(p);
+}
 
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {
     Emitter e(p, o);

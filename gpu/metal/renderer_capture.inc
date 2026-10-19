@@ -5,6 +5,9 @@ u64 capture_bytes=0,capture_sequence=0,capture_scene_frame=~0ull;
 std::set<std::string> captured_textures;
 u64 capture_buffer_frame=~0ull;
 std::set<std::string> captured_buffers;
+unsigned fog_capture_frames=0;
+bool fog_capture_started=false,fog_capture_particles=false;
+u64 fog_capture_target=0;
 void CaptureMotionConstants(const Program& program,const u32* ud) {
   if(!trace || capture_root.empty() || (program.hash!=0xba34012ce43413a9ull &&
       program.hash!=0x507b55c2109a1e25ull && program.hash!=0x474f614296148b2bull)) return;
@@ -42,6 +45,8 @@ void InitCapture() {
   }
   std::filesystem::create_directories(root,error);if(error) return;
   capture_root=root.string();
+  if(const char* frames=std::getenv("BB_METAL_CAPTURE_FOG_FRAMES"))
+    fog_capture_frames=std::clamp(std::atoi(frames),0,12);
   DC_INFO("gpu: raw capture enabled at %s (64 textures / 512 MiB limit)",capture_root.c_str());
 }
 void CaptureRaw(id<MTLTexture> texture,const std::string& name) {
@@ -79,7 +84,33 @@ void CaptureRaw(id<MTLTexture> texture,const std::string& name) {
   [json writeToFile:@((base+".json").c_str()) atomically:YES];
   DC_INFO("gpu: raw capture %s, %llu bytes",base.c_str(),u64(bytes.size()));
 }
+// Diagnostic checkpoints for the observed saved-view HDR particle group.
+// Consecutive frames separate base lighting from intermittent fog dropouts.
+// This deliberately drains the GPU; never enable it in a performance run.
+void CaptureFogBoundary(const Program* pixel,const RenderTarget* color) {
+  if(!fog_capture_frames || capture_root.empty()) return;
+  const bool first_particle=pixel && pixel->hash==0x33a4610f6f19410dull && color &&
+      color->addr==0x806b240000ull && color->tex.pixelFormat==MTLPixelFormatRGBA16Float;
+  if(!fog_capture_started) {
+    if(!trace || !first_particle) return;
+    fog_capture_started=true;
+  }
+  const bool previous=trace;trace=true;
+  if(first_particle && !fog_capture_particles) {
+    fog_capture_target=color->addr;fog_capture_particles=true;
+    CaptureRaw(color->tex,"fog_before_particles");
+    if(auto* depth=Latest(depth_targets,0x804f3f0000ull);depth && depth->initialized && !depth->clear_pending)
+      CaptureRaw(depth->tex,"fog_scene_depth");
+  } else if(fog_capture_particles && (!color || color->addr!=fog_capture_target)) {
+    if(auto* target=Latest(color_targets,fog_capture_target);target && target->initialized && !target->clear_pending)
+      CaptureRaw(target->tex,"fog_after_particles");
+    fog_capture_particles=false;--fog_capture_frames;
+  }
+  trace=previous;
+}
 void CaptureSceneBoundary() {
+  // Reserve the bounded capture budget for the consecutive fog checkpoints.
+  if(fog_capture_started || fog_capture_frames) return;
   if(!trace || capture_root.empty() || capture_scene_frame==frame_count) return;
   capture_scene_frame=frame_count;
   NativeMotionCapture::Observation motion;

@@ -3087,6 +3087,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     return;
   }
 
+  CaptureFogBoundary(ps,colors[0]);
+
   if (trace) { // DC_PEEK_PS=<ps>: its first two V# buffers, printed after the
                // traced frame
     static const u64 peek_ps =
