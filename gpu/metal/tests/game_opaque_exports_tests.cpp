@@ -109,6 +109,9 @@ void SyntheticCases() {
     Check(Make({Branch(Sopp::S_BRANCH,1),Move(Operand::ExecLo,Operand::Zero),Export(),End()}),
           true,"unreachable kill does not affect proof");
     Check(Make({Export()}),true,"export before fallthrough exit");
+    auto depth=Make({Export(),End()});
+    depth.exports_depth=true; depth.code.front().target=ExpTarget::MrtZ;
+    Check(depth,true,"full EXEC depth export keeps normal Metal depth semantics");
     Check(Make({End()}),false,"no export");
     Check(Make({Move(Operand::ExecLo,Operand::Zero),Export(),End()}),false,"explicit kill");
     Check(Make({Compare(),SaveExec(0),Export(),End()}),false,"dynamic EXEC export");

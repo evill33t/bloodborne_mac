@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 
 namespace Gpu::Liverpool::Tiling {
@@ -168,6 +169,12 @@ u32 Thickness(u32 tile_index) {
     return IsThick1D(tile_index) ? 4 : 1;
 }
 
+u32 StorageLayers(u32 texture_type, u32 depth, bool pow2) {
+    u32 slices = texture_type == 10 ? 1 : depth;
+    if (texture_type == 11) slices *= 6;
+    return pow2 ? std::bit_ceil(slices) : slices;
+}
+
 u64 SliceSize(u32 tile_index, u32 pitch_el, u32 height_el, u32 bytes_per_el) {
     if (IsLinear(tile_index)) {
         return u64(pitch_el) * height_el * bytes_per_el;
@@ -241,8 +248,8 @@ u64 MipLayout(u32 tile_index, u32 pitch, u32 height, u32 layers, u32 levels, u32
     return total;
 }
 
-void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el,
-                 u32 bytes_per_el, u32 z) {
+void DetileSliceReference(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el,
+                         u32 pitch_el, u32 bytes_per_el, u32 z) {
     const u64 row = u64(width_el) * bytes_per_el;
     if (IsLinear(tile_index)) {
         for (u32 y = 0; y < height_el; ++y) {
@@ -308,6 +315,46 @@ void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 heigh
             const u8* tile = tile_row + u64(x / 8) * tile_bytes;
             std::memcpy(out + u64(x) * bytes_per_el, tile + u64(order[(y & 7) * 8 + (x & 7)]) * bytes_per_el,
                         bytes_per_el);
+        }
+    }
+}
+
+void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el,
+                 u32 bytes_per_el, u32 z) {
+    // Explicit opt-in until the production upload/queued-frame fixture and
+    // live cold-upload comparison have passed. Read once for consistent runs.
+    static const bool fast = [] {
+        const char* option = std::getenv("BB_METAL_FAST_DETILE");
+        return option && std::strcmp(option, "1") == 0;
+    }();
+    const Micro type = MicroType2D(tile_index);
+    if (!fast || bytes_per_el != 4 || type == Micro::None) {
+        DetileSliceReference(tile_index, src, dst, width_el, height_el, pitch_el, bytes_per_el, z);
+        return;
+    }
+
+    // For four-byte Depth/Thin/Display elements, one 8x8 micro tile is
+    // exactly one 256-byte pipe-interleave block. Pipe, bank, macro offset
+    // and the upper address bits stay constant within that tile; only the
+    // existing six-bit micro order changes. Wider elements do not satisfy
+    // this contract and always retain the original per-element addressing.
+    const MacroParams m = Macro(4);
+    const u32 pitch = AlignUp(pitch_el, m.pitch);
+    u32 order[64];
+    for (u32 y = 0; y < 8; ++y)
+        for (u32 x = 0; x < 8; ++x)
+            order[y * 8 + x] = MicroIndex(type, 4, x, y);
+    const u64 row = u64(width_el) * 4;
+    for (u32 ty = 0; ty < height_el; ty += 8) {
+        const u32 rows = std::min(8u, height_el - ty);
+        for (u32 tx = 0; tx < width_el; tx += 8) {
+            const u32 columns = std::min(8u, width_el - tx);
+            const u8* tile = src + MacroOffset(tx, ty, pitch, m, order, 4);
+            for (u32 y = 0; y < rows; ++y) {
+                u8* out = dst + u64(ty + y) * row + u64(tx) * 4;
+                for (u32 x = 0; x < columns; ++x)
+                    std::memcpy(out + x * 4, tile + order[y * 8 + x] * 4, 4);
+            }
         }
     }
 }

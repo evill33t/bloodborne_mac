@@ -26,6 +26,11 @@ bool Supported(u32 tile_index);
 // multiple z-slices into each 8x8 micro tile.
 u32 Thickness(u32 tile_index);
 
+// Physical slices per mip from T# TYPE, decoded DEPTH+1 and POW2_PAD.
+// A cube contributes six faces before padding. Array view ranges do not
+// change this stride; 3D depth is handled separately by MipLayout callers.
+u32 StorageLayers(u32 texture_type, u32 depth, bool pow2);
+
 // Bytes of guest memory one slice occupies. For thick modes this is the
 // size of one thickness-group (Thickness() slices together).
 u64 SliceSize(u32 tile_index, u32 pitch_el, u32 height_el, u32 bytes_per_el);
@@ -51,6 +56,11 @@ u64 MipLayout(u32 tile_index, u32 pitch, u32 height, u32 layers, u32 levels, u32
 // `z` is the z-plane within a thick micro tile (0..Thickness()-1).
 void DetileSlice(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el, u32 pitch_el,
                  u32 bytes_per_el, u32 z = 0);
+
+// Original per-element implementation, retained as the fallback and as an
+// independent byte-exact oracle for the bounded macro-tile optimization.
+void DetileSliceReference(u32 tile_index, const u8* src, u8* dst, u32 width_el, u32 height_el,
+                         u32 pitch_el, u32 bytes_per_el, u32 z = 0);
 
 } // namespace Gpu::Liverpool::Tiling
 

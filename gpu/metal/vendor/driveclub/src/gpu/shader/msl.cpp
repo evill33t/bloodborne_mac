@@ -10,6 +10,7 @@
 
 #include "gpu/shader/msl_prelude.h"
 #include "gpu/metal/native_tessellation.h"
+#include "gpu/metal/static_smrd.h"
 
 namespace Gpu::Shader {
 
@@ -255,9 +256,111 @@ bool ProveOpaqueExports(const Program& p) {
     return exited;
 }
 
+bool StaticSmrdClobbers(u8& intact,const Inst& i) {
+    const char* name=OpName(i.enc,i.op);
+    if(!name) return false;
+    auto write=[&](u16 destination,u32 words) {
+        constexpr u16 roots[]={2,3,12,13};
+        if(destination>=128 || words>128u-destination) return false;
+        for(u32 k=0;k<4;++k)
+            if(roots[k]>=destination && u32(roots[k]-destination)<words) intact&=u8(~(1u<<k));
+        return true;
+    };
+    const u32 width=std::strstr(name,"64") ? 2 : 1;
+    switch(i.enc) {
+    case Enc::SOP1:
+        switch(static_cast<Sop1>(i.op)) {
+        case Sop1::S_SETPC_B64:case Sop1::S_SWAPPC_B64:case Sop1::S_RFE_B64:
+        case Sop1::S_MOVRELS_B32:case Sop1::S_MOVRELS_B64:
+        case Sop1::S_MOVRELD_B32:case Sop1::S_MOVRELD_B64:case Sop1::S_CBRANCH_JOIN:
+            return false;
+        default:return write(i.dst,width);
+        }
+    case Enc::SOP2:
+        return i.op!=u16(Sop2::S_CBRANCH_G_FORK) && write(i.dst,width);
+    case Enc::SOPK:
+        if(i.op==u16(Sopk::S_CBRANCH_I_FORK)) return false;
+        if((i.op>=u16(Sopk::S_CMPK_EQ_I32) && i.op<=u16(Sopk::S_CMPK_LE_U32)) ||
+           i.op==u16(Sopk::S_SETREG_B32) || i.op==u16(Sopk::S_SETREG_IMM32_B32)) return true;
+        return write(i.dst,1);
+    case Enc::SMRD:
+        if(i.op<=4) return write(i.dst,1u<<i.op);
+        if(i.op>=8 && i.op<=12) return write(i.dst,1u<<(i.op-8));
+        if(i.op==u16(Smrd::S_MEMTIME)) return write(i.dst,2);
+        return i.op==u16(Smrd::S_DCACHE_INV) || i.op==u16(Smrd::S_DCACHE_INV_VOL);
+    case Enc::VOPC:case Enc::VOP3:
+        if(i.op<256) return write(i.sdst,2);
+        [[fallthrough]];
+    case Enc::VOP1:case Enc::VOP2:
+        switch(static_cast<Vop>(i.op)) {
+        case Vop::V_READLANE_B32:case Vop::V_READFIRSTLANE_B32:return write(i.dst,1);
+        case Vop::V_ADD_I32:case Vop::V_SUB_I32:case Vop::V_SUBREV_I32:
+        case Vop::V_ADDC_U32:case Vop::V_SUBB_U32:case Vop::V_SUBBREV_U32:
+        case Vop::V_DIV_SCALE_F32:case Vop::V_DIV_SCALE_F64:
+        case Vop::V_MAD_U64_U32:case Vop::V_MAD_I64_I32:return write(i.sdst,2);
+        default:return true;
+        }
+    case Enc::SOPP:
+        return IsBranch(i) || i.op==u16(Sopp::S_ENDPGM) || i.op==u16(Sopp::S_NOP) ||
+            i.op==u16(Sopp::S_WAITCNT) || i.op==u16(Sopp::S_BARRIER);
+    case Enc::SOPC:case Enc::VINTRP:case Enc::DS:case Enc::MUBUF:
+    case Enc::MTBUF:case Enc::MIMG:case Enc::EXP:return true;
+    default:return false;
+    }
+}
+
+bool ProveStaticSmrd(const Program& p) {
+    const auto layout=Gpu::Metal::StaticSmrd::Layout(p.hash);
+    if(p.stage!=Stage::Fragment || p.num_user_sgprs<14 || layout.empty() ||
+       p.code.empty() || p.code.front().pc!=0 || !p.unsupported.empty()) return false;
+    std::unordered_map<u32,size_t> indices;
+    size_t selected=0;
+    for(size_t k=0;k<p.code.size();++k) {
+        const auto& i=p.code[k];
+        if(!i.size || !indices.emplace(i.pc,k).second ||
+           (k && i.pc!=p.code[k-1].pc+4u*p.code[k-1].size)) return false;
+        if(i.enc!=Enc::SMRD || i.op>4) continue;
+        if(selected==layout.size()) return false;
+        const auto& load=layout[selected++];
+        if(i.pc!=load.pc || i.sbase!=load.root || !i.imm ||
+           i.smrd_offset!=load.offset/4 || (1u<<i.op)!=load.words ||
+           i.dst!=load.destination || i.size!=1) return false;
+    }
+    if(selected!=layout.size()) return false;
+    indices.emplace(p.code.back().pc+4u*p.code.back().size,p.code.size());
+    std::vector<std::optional<u8>> incoming(p.code.size()+1);
+    incoming[0]=15;
+    auto merge=[&](size_t at,u8 intact) {
+        if(incoming[at]) *incoming[at]&=intact;else incoming[at]=intact;
+    };
+    u32 visited=0;
+    for(size_t k=0;k<p.code.size();++k) {
+        if(!incoming[k]) continue;
+        u8 intact=*incoming[k];
+        const auto& i=p.code[k];
+        if(i.enc==Enc::SMRD && i.op<=4) {
+            const auto mask=i.sbase==2 ? 3u : 12u;
+            if((intact&mask)!=mask) return false;
+            ++visited;
+        }
+        if(!StaticSmrdClobbers(intact,i)) return false;
+        if(i.enc==Enc::SOPP && i.op==u16(Sopp::S_ENDPGM)) continue;
+        if(IsBranch(i)) {
+            const auto target=indices.find(BranchTarget(i));
+            if(target==indices.end() || target->second<=k) return false;
+            merge(target->second,intact);
+            if(i.op==u16(Sopp::S_BRANCH)) continue;
+        }
+        merge(k+1,intact);
+    }
+    return visited==layout.size();
+}
+
 class Emitter {
 public:
-    Emitter(const Program& p, const MslOptions& o) : p(p), o(o), opaque_exports(o.opaque_exports && ProveOpaqueExports(p)) {}
+    Emitter(const Program& p, const MslOptions& o) : p(p), o(o),
+        opaque_exports(o.opaque_exports && ProveOpaqueExports(p)),
+        static_smrd(o.static_smrd && ProveStaticSmrd(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -442,6 +545,7 @@ private:
     const Program& p;
     const MslOptions& o;
     const bool opaque_exports;
+    const bool static_smrd;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -713,6 +817,17 @@ void Emitter::EmitSmrd(const Inst& i) {
     case Smrd::S_DCACHE_INV_VOL:
         return;
     default: Unsupported(i); return;
+    }
+    if(static_smrd && !buffer) {
+        u32 packed=0;
+        for(const auto& load:Gpu::Metal::StaticSmrd::Layout(p.hash)) {
+            if(load.pc==i.pc) {
+                for(u32 k=0;k<count;++k)
+                    SetS(static_cast<u16>(i.dst+k),"dc_smrd["+N(packed+k)+"u]");
+                return;
+            }
+            packed+=load.words;
+        }
     }
     const std::string b0 = SName(i.sbase), b1 = SName(static_cast<u16>(i.sbase + 1));
     const std::string base = buffer ? "dc_vbase(" + b0 + ", " + b1 + ")"
@@ -2039,7 +2154,8 @@ std::string Emitter::Run() {
             o.depth_bounds ? ", texture2d<float> dc_zb [[texture(" + N(kDepthBoundsTexture) + ")]], constant float2& dc_zbr [[buffer(" +
                                  N(kDepthBoundsBuffer) + ")]]"
                            : "";
-        src += "fragment PsOut main0(PsIn pin [[stage_in]], " + mem_params + probe_param + bounds_param + TexParams(true) +
+        const std::string smrd_param=static_smrd ? ", constant uint* dc_smrd [[buffer("+N(Binding::StaticSmrd)+")]]" : "";
+        src += "fragment PsOut main0(PsIn pin [[stage_in]], " + mem_params + probe_param + bounds_param + smrd_param + TexParams(true) +
                ") {\n";
         if (o.depth_bounds) {
             src += "    { float z_ = dc_zb.read(uint2(pin.pos.xy)).x; float bmin = min(dc_zbr.x, dc_zbr.y); float bmax = max(dc_zbr.x, dc_zbr.y); if (z_ < bmin || z_ > bmax) discard_fragment(); }\n";
@@ -2065,6 +2181,10 @@ std::string Emitter::Run() {
 
 bool FragmentExportsOpaque(const Program& p) {
     return ProveOpaqueExports(p);
+}
+
+bool FragmentStaticSmrdEligible(const Program& p) {
+    return ProveStaticSmrd(p);
 }
 
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {

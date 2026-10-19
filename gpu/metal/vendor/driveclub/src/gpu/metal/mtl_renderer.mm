@@ -43,6 +43,8 @@
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/native_tessellation.h"
+#include "gpu/metal/snapshot_arena.h"
+#include "gpu/metal/static_smrd.h"
 
 namespace Gpu::Metal {
 
@@ -491,6 +493,7 @@ struct MetalRenderer::Impl {
   struct Snapshot {
     u64 gen = 0;
     u64 va = 0;
+    u64 lease = SnapshotArena::NoLease;
   };
   std::unordered_map<u64, Snapshot>
       snapshots; // dump address -> its latest copy
@@ -499,6 +502,7 @@ struct MetalRenderer::Impl {
   u64 arena_head = 0; // bytes handed out so far (wraps modulo kArenaSize)
   std::atomic<u64> arena_released{0}; // head values the GPU is done with
   u64 arena_commit_head = 0; // head when the last command buffer was committed
+  u64 arena_pin = SnapshotArena::NoLease; // prepared but not yet bound stage data
 
   // ---- presentation ----
   id<MTLRenderPipelineState> copy_pipeline = nil;
@@ -562,6 +566,10 @@ struct MetalRenderer::Impl {
   bool Profiling() const { return profile && (!profile_trace_only || trace); }
   bool fast_typed_fills = true;
   bool native_tessellation = true;
+  bool opaque_exports = true;
+  bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
+  std::unordered_map<const Program*,bool> static_smrd_programs;
+  u64 static_smrd_attempts=0,static_smrd_draws=0,static_smrd_rejects=0,static_smrd_bytes=0;
   u64 native_tess_draws=0,translated_tess_draws=0;
   id<MTLBuffer> native_tess_factors[2]{};
   struct ProfileEntry {
@@ -651,6 +659,7 @@ struct MetalRenderer::Impl {
         !std::strcmp(std::getenv("DC_GPU_PROFILE"),"passes"));
     if (const char* option=std::getenv("BB_METAL_TYPED_FILL")) fast_typed_fills=std::strcmp(option,"0")!=0;
     if (const char* option=std::getenv("BB_METAL_NATIVE_TESSELLATION")) native_tessellation=std::strcmp(option,"0")!=0;
+    if (const char* option=std::getenv("BB_METAL_OPAQUE_EXPORTS")) opaque_exports=std::strcmp(option,"0")!=0;
     compiler = std::make_unique<ShaderCompiler>(device, 4,ShaderCompiler::CacheMode::DriverManaged);
     compiler->EnablePrewarming();
     signal_event = [device newSharedEvent];
@@ -737,6 +746,7 @@ struct MetalRenderer::Impl {
     if (gen == mem_map_gen && mem_map) {
       return;
     }
+    StutterTrace::Scope timing("memory_map_refresh",frame_count,gen);
     mem_map_gen = gen;
     mem_ranges = Core::Memory::DirectMappings();
     std::sort(mem_ranges.begin(), mem_ranges.end(),
@@ -879,13 +889,16 @@ struct MetalRenderer::Impl {
 
   void EnsureCommandBuffer() {
     if (!cmd) {
+      StutterTrace::Scope timing("command_buffer_create",frame_count,last_vs,last_ps,1);
       cmd = [queue commandBuffer];
     }
   }
 
   void EndPass() {
     if (enc) {
+      StutterTrace::Scope timing("render_pass_end",frame_count,last_vs,last_ps,1);
       [enc endEncoding];
+      timing.End();
       enc = nil;
       if (dump_passes && trace && dump_frames) {
         DumpPass();
@@ -1057,9 +1070,10 @@ struct MetalRenderer::Impl {
       chunk_off = 0;
     }
     if (arena_va) {
-      const u64 head = arena_commit_head = arena_head;
+      arena_commit_head = arena_head;
+      const u64 head = SnapshotArena::ReleasePoint(arena_head,arena_pin);
       [cmd addCompletedHandler:^(id<MTLCommandBuffer>) {
-        arena_released.store(head, std::memory_order_release);
+        SnapshotArena::Publish(arena_released,head);
       }];
     }
     if (stats) {
@@ -1090,6 +1104,7 @@ struct MetalRenderer::Impl {
   }
 
   void NoteConstDump(u64 addr, u32 bytes) {
+    if(!bytes || addr>UINT64_MAX-bytes) return;
     // A new dump replaces whatever older dumps it overlaps.
     auto it = const_dumps.lower_bound(addr);
     if (it != const_dumps.begin() &&
@@ -1121,59 +1136,88 @@ struct MetalRenderer::Impl {
 
   // Guest address of `bytes` of arena space the GPU is not using.
   u64 ArenaAlloc(u64 bytes) {
-    bytes = (bytes + 255) & ~255ull;
     if (!arena_va && !InitArena()) {
       return 0;
     }
-    u64 off = arena_head % kArenaSize;
-    if (off + bytes > kArenaSize) {
-      arena_head += kArenaSize - off; // do not split a copy across the wrap
-      off = 0;
-    }
-    if (arena_head + bytes - arena_released.load(std::memory_order_acquire) >
-        kArenaSize) {
-      // Ring full of in-flight copies (rare): wait for what was committed.
-      // A draw may be half recorded here, so the open command buffer stays.
-      WaitLast();
-      arena_released = arena_commit_head;
-    }
-    arena_head += bytes;
-    return arena_va + off;
+    const auto plan=SnapshotArena::Allocate(kArenaSize,arena_head,
+        arena_released.load(std::memory_order_acquire),bytes);
+    if(plan.status!=SnapshotArena::Status::Ready) return 0;
+    SnapshotArena::Publish(arena_released,plan.released);
+    arena_head=plan.end;
+    return arena_va+plan.begin%kArenaSize;
   }
 
-  // Points user-data pointers that land in a CE dump at a snapshot of it.
-  void PatchUserData(u32 *ud) {
-    if (const_dumps.empty()) {
-      return;
-    }
-    for (u32 k = 0; k + 1 < 16; ++k) {
-      const u64 v =
-          ud[k] | (u64(ud[k + 1] & 0xFFF) << 32); // pointer or V# base
-      auto it = const_dumps.upper_bound(v);
-      if (it == const_dumps.begin()) {
-        continue;
-      }
+  // Prepare all stages together, before this draw/dispatch creates an encoder.
+  // A rare capacity drain is safe here; it cannot cut a half-configured draw.
+  bool PatchUserData(std::span<u32* const> stages,std::vector<StaticSmrd::Snapshot>* prepared=nullptr) {
+    if(prepared) prepared->clear();
+    if(const_dumps.empty()) return true;
+    struct Reference {u32* ud;u32 word;u64 source,offset;};
+    std::vector<Reference> references;
+    std::map<u64,ConstDump> needed;
+    for(auto* ud:stages) for(u32 k=0;k+1<16;++k) {
+      const u64 v=ud[k]|(u64(ud[k+1]&0xfff)<<32);
+      auto it=const_dumps.upper_bound(v);
+      if(it==const_dumps.begin()) continue;
       --it;
-      const u64 off = v - it->first;
-      if (off >= it->second.bytes) {
-        continue;
-      }
-      Snapshot &snap = snapshots[it->first];
-      if (snap.gen != it->second.gen || !snap.va) {
-        snap.va = ArenaAlloc(it->second.bytes);
-        if (!snap.va) {
-          return;
-        }
-        std::memcpy(reinterpret_cast<void *>(snap.va),
-                    reinterpret_cast<const void *>(it->first),
-                    it->second.bytes);
-        snap.gen = it->second.gen;
-      }
-      const u64 nv = snap.va + off;
-      ud[k] = static_cast<u32>(nv);
-      ud[k + 1] = (ud[k + 1] & ~0xFFFu) | static_cast<u32>(nv >> 32);
-      ++k;
+      const u64 offset=v-it->first;
+      if(offset>=it->second.bytes) continue;
+      references.push_back({ud,k,it->first,offset});needed.emplace(it->first,it->second);++k;
     }
+    if(needed.empty()) return true;
+    const auto fail=[&](const char* why) {execution->Fail(why);return false;};
+    for(const auto& [source,dump]:needed)
+      if(!Readable(source,dump.bytes)) return fail("GPU constant snapshot source is not mapped.");
+    const auto reusable=[&](u64 source,const ConstDump& dump) {
+      const auto it=snapshots.find(source);
+      return it!=snapshots.end() && it->second.gen==dump.gen && arena_va &&
+          SnapshotArena::Reusable(it->second.lease,dump.bytes,arena_head,arena_commit_head,kArenaSize) &&
+          it->second.va==arena_va+it->second.lease%kArenaSize;
+    };
+    u64 bytes=0;
+    const auto required=[&] {
+      u64 sum=0;
+      for(const auto& [source,dump]:needed) if(!reusable(source,dump)) {
+        const auto size=SnapshotArena::Aligned(dump.bytes);
+        if(!size || size>kArenaSize || sum>kArenaSize-size) return SnapshotArena::NoLease;
+        sum+=size;
+      }
+      return sum;
+    };
+    bytes=required();
+    if(bytes==SnapshotArena::NoLease) return fail("One draw exceeds the GPU constant snapshot capacity.");
+    u64 allocation=0;
+    if(bytes && !(allocation=ArenaAlloc(bytes))) {
+      if(arena_pin!=SnapshotArena::NoLease) return fail("GPU constant snapshot preparation overlapped another draw.");
+      // Commit every outstanding use, including the open command buffer. An
+      // epoch change makes all cached entries require a fresh allocation.
+      Commit(true);
+      if(execution->Failed()) return false;
+      arena_commit_head=arena_head;
+      SnapshotArena::Publish(arena_released,arena_head);
+      bytes=required();
+      if(bytes==SnapshotArena::NoLease || !(allocation=ArenaAlloc(bytes)))
+        return fail("GPU constant snapshots did not fit after draining queued work.");
+    }
+    u64 copied=0;
+    const u64 begin=bytes ? arena_head-bytes : 0;
+    for(const auto& [source,dump]:needed) {
+      auto& snapshot=snapshots[source];
+      if(!reusable(source,dump)) {
+        snapshot={dump.gen,allocation+copied,begin+copied};
+        std::memcpy(reinterpret_cast<void*>(snapshot.va),reinterpret_cast<const void*>(source),dump.bytes);
+        copied+=SnapshotArena::Aligned(dump.bytes);
+      }
+      arena_pin=std::min(arena_pin,snapshot.lease);
+      if(prepared) prepared->push_back({snapshot.va,dump.bytes,snapshot.gen,dump.gen,snapshot.lease,
+          reinterpret_cast<const std::byte*>(snapshot.va)});
+    }
+    for(const auto& ref:references) {
+      const u64 address=snapshots.at(ref.source).va+ref.offset;
+      ref.ud[ref.word]=u32(address);
+      ref.ud[ref.word+1]=(ref.ud[ref.word+1]&~0xfffu)|u32(address>>32);
+    }
+    return true;
   }
 
   // DC_GPU_PROFILE: puts the work since the last cut in its own command
@@ -1287,6 +1331,7 @@ struct MetalRenderer::Impl {
       const u64 capacity=std::max(kUploadChunk,size);
       chunk=upload_pool->Take(capacity);
       if (!chunk) {
+        StutterTrace::Scope timing("upload_buffer_create",frame_count,capacity,0,1);
         chunk=[device newBufferWithLength:capacity options:MTLResourceStorageModeShared];
         ++upload_allocations;
       }
@@ -1377,6 +1422,7 @@ struct MetalRenderer::Impl {
   // MSL for `p`; GPU thread only (reports and dumps).
   std::string MslSource(const Program &p, const Shader::MslOptions &o,
                         u64 key) {
+    StutterTrace::Scope timing("shader_msl",frame_count,p.address,key);
     std::vector<std::string> unsupported;
     std::string src = Shader::GenerateMsl(p, o, &unsupported);
     for (const auto &u : unsupported) {
@@ -1505,6 +1551,7 @@ struct MetalRenderer::Impl {
 
   // True if the texture memory differs from what was uploaded.
   bool TextureChanged(TextureEntry &e, u64 addr, u64 size) {
+    StutterTrace::Scope timing("texture_change_check",frame_count,addr,size,1);
     const u32 n = static_cast<u32>(e.chunks.size());
     if (e.hot) {
       for (u32 c = 0; c < n; ++c) {
@@ -1527,6 +1574,8 @@ struct MetalRenderer::Impl {
     const u32 nfmt = (t[1] >> 26) & 0xF;
     const u32 width = (t[2] & 0x3FFF) + 1;
     const u32 height = ((t[2] >> 14) & 0x3FFF) + 1;
+    StutterTrace::Scope resource_timing("texture_resolve",frame_count,addr,
+        (u64(width)<<32)|height,1);
     const u32 swz = t[3] & 0xFFF;
     const u32 tiling = (t[3] >> 20) & 0x1F;
     const u32 ttype = t[3] >> 28;
@@ -1729,19 +1778,23 @@ struct MetalRenderer::Impl {
     TextureEntry &e = textures[key];
     // T# BASE_LEVEL..LAST_LEVEL: a view of those levels.
     auto view = [&]() -> id<MTLTexture> {
-      if (base_level == 0 || base_level >= e.tex.mipmapLevelCount) {
+      if (base_level >= e.tex.mipmapLevelCount) return Dummy(tt);
+      if (base_level == 0 && base_array == 0) {
         return e.tex;
       }
       if (!e.base_view) {
+        StutterTrace::Scope timing("texture_view_create",frame_count,addr,
+            (u64(base_level)<<32)|base_array,1);
         e.base_view = [e.tex
             newTextureViewWithPixelFormat:e.tex.pixelFormat
                               textureType:e.tex.textureType
                                    levels:NSMakeRange(base_level,
                                                       e.tex.mipmapLevelCount - base_level)
                                    slices:NSMakeRange(
-                                              0, e.tex.textureType ==
+                                              e.tex.textureType==MTLTextureType2DArray ? base_array : 0,
+                                              e.tex.textureType ==
                                                          MTLTextureType2DArray
-                                                     ? e.tex.arrayLength
+                                                     ? slice_count
                                                      : 1)];
       }
       return e.base_view;
@@ -1764,9 +1817,18 @@ struct MetalRenderer::Impl {
     const u32 levels =
         tt.dim == TexDim::Tex3D ? 1 : std::min(last_level + 1, max_levels);
     const bool pow2 = (t[3] >> 25) & 1;
+    // T# DEPTH defines the full physical array allocation. BASE/LAST_ARRAY
+    // only select visible faces. In particular POW2_PAD cubes store eight
+    // slices per mip even though the Metal view exposes six faces.
+    const u32 storage_layers=tt.dim==TexDim::Tex3D ? layers
+        : Tiling::StorageLayers(ttype,depth,pow2);
+    if(layers>storage_layers) {
+      ReportOnce("texture array view exceeds its physical layer allocation");
+      return Dummy(tt);
+    }
     Tiling::MipLevel mips[16];
     const u64 size =
-        Tiling::MipLayout(tiling, pitch, height, layers, levels,
+        Tiling::MipLayout(tiling, pitch, height, storage_layers, levels,
                           fi.bytes_per_block, fi.compressed, pow2, mips);
     if (!Readable(addr, size)) {
       ReportOnce("texture memory not mapped");
@@ -1791,6 +1853,7 @@ struct MetalRenderer::Impl {
     // Reusing e.tex here changes the pixels of already queued frames.
     e.base_view = nil;
     {
+      StutterTrace::Scope timing("texture_create",frame_count,addr,size,1);
       MTLTextureDescriptor *d = [MTLTextureDescriptor new];
       d.textureType = tt.dim == TexDim::Tex2D        ? MTLTextureType2D
                       : tt.dim == TexDim::Tex2DArray ? MTLTextureType2DArray
@@ -1815,8 +1878,31 @@ struct MetalRenderer::Impl {
       }
     }
     const auto *src = reinterpret_cast<const u8 *>(addr);
+    static const u64 capture_texture=std::getenv("BB_METAL_CAPTURE_TEXTURE")
+        ? std::strtoull(std::getenv("BB_METAL_CAPTURE_TEXTURE"),nullptr,16) : 0;
+    static const bool capture_cubes=std::getenv("BB_METAL_CAPTURE_TEXTURE") &&
+        std::string_view(std::getenv("BB_METAL_CAPTURE_TEXTURE"))=="bc6-cubes";
+    static std::set<u64> captured_guest_textures;
+    const bool capture_candidate=(capture_texture && addr==capture_texture) ||
+        (capture_cubes && dfmt==40 && width==128 && height==128 && layers==6 && levels==8);
+    const u64 capture_identity=capture_candidate && !capture_root.empty() && size<=(1ull<<20)
+        ? Hash(addr,Fnv(src,size)) : 0;
+    const bool capture_guest=capture_identity && captured_guest_textures.size()<32 &&
+        captured_guest_textures.insert(capture_identity).second;
+    const auto capture_stem=capture_guest ? capture_root+"/guest_texture_"+Hex(addr)+"_"+Hex(capture_identity) : std::string{};
+    if(capture_guest) {
+      std::ofstream(capture_stem+"_tiled.bin",std::ios::binary).write(reinterpret_cast<const char*>(src),size);
+      std::ofstream info(capture_stem+".json");
+      info<<"{\"address\":"<<addr<<",\"bytes\":"<<size<<",\"format\":"<<unsigned(fi.format)
+          <<",\"width\":"<<width<<",\"height\":"<<height<<",\"layers\":"<<layers
+          <<",\"levels\":"<<levels<<",\"descriptor\":[";
+      for(unsigned k=0;k<8;++k) info<<(k?",":"")<<t[k];
+      info<<"],\"scope\":\"Guest upload bytes and exact detiled planes before Metal upload\"}\n";
+    }
     std::vector<u8> linear;
     for (u32 lv = 0; lv < levels; ++lv) {
+      StutterTrace::Scope mip_timing("texture_mip_upload",frame_count,addr,
+          (u64(lv)<<32)|layers,1);
       const Tiling::MipLevel &m = mips[lv];
       const u32 w = std::max(width >> lv, 1u), h = std::max(height >> lv, 1u);
       const u32 w_el = fi.compressed ? (w + 3) / 4 : w,
@@ -1827,9 +1913,17 @@ struct MetalRenderer::Impl {
       const u32 level_thick = Tiling::Thickness(m.tile_index);
       for (u32 l = 0; l < layers; ++l) {
         const u64 group_offset = m.offset + m.slice_size * (l / level_thick);
-        Tiling::DetileSlice(m.tile_index, src + group_offset, linear.data(),
-                            w_el, h_el, m.pitch_el, fi.bytes_per_block,
-                            l % level_thick);
+        {
+          StutterTrace::Scope timing("texture_detile",frame_count,addr,
+              (u64(lv)<<32)|l,1);
+          Tiling::DetileSlice(m.tile_index, src + group_offset, linear.data(),
+                              w_el, h_el, m.pitch_el, fi.bytes_per_block,
+                              l % level_thick);
+        }
+        if(capture_guest) {
+          const auto path=capture_stem+"_level_"+std::to_string(lv)+"_slice_"+std::to_string(l)+".bin";
+          std::ofstream(path,std::ios::binary).write(reinterpret_cast<const char*>(linear.data()),image);
+        }
         if (dump_texture == addr && dump_frames && l == 0 &&
             lv == 0) { // DC_DUMP_TEXTURE=<addr>: raw linear bytes
           char path[512];
@@ -1842,6 +1936,8 @@ struct MetalRenderer::Impl {
         const MTLRegion region = tt.dim == TexDim::Tex3D
                                      ? MTLRegionMake3D(0, 0, l, w, h, 1)
                                      : MTLRegionMake2D(0, 0, w, h);
+        StutterTrace::Scope replace_timing("texture_replace_region",frame_count,addr,
+            (u64(lv)<<32)|l,1);
         [e.tex replaceRegion:region
                  mipmapLevel:lv
                        slice:tt.dim == TexDim::Tex2DArray ? l : 0
@@ -1851,9 +1947,12 @@ struct MetalRenderer::Impl {
       }
     }
     (void)thick;
-    e.chunks.resize((size + kChunk - 1) / kChunk);
-    for (u32 c = 0; c < e.chunks.size(); ++c) {
-      e.chunks[c] = ChunkHash(addr, size, c);
+    {
+      StutterTrace::Scope timing("texture_hash_initial",frame_count,addr,size,1);
+      e.chunks.resize((size + kChunk - 1) / kChunk);
+      for (u32 c = 0; c < e.chunks.size(); ++c) {
+        e.chunks[c] = ChunkHash(addr, size, c);
+      }
     }
     e.frame = frame_count;
     e.addr = addr;
@@ -1878,6 +1977,7 @@ struct MetalRenderer::Impl {
     if (it != samplers.end()) {
       return it->second;
     }
+    StutterTrace::Scope timing("sampler_create",frame_count,key,0,1);
     MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
     d.sAddressMode = AddressMode(s[0]);
     d.tAddressMode = AddressMode(s[0] >> 3);
@@ -1941,6 +2041,8 @@ struct MetalRenderer::Impl {
                                   u32 levels, bool depth,
                                   TexDim dim = TexDim::Tex2D,
                                   u32 depth_or_layers = 1) {
+    StutterTrace::Scope timing("target_texture_create",frame_count,
+        (u64(width)<<32)|height,(u64(fmt)<<32)|depth_or_layers,1);
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
     d.pixelFormat = fmt;
     d.width = width;
@@ -1990,6 +2092,7 @@ struct MetalRenderer::Impl {
       }
       if (t->tex.pixelFormat != fmt) {
         if (depth || !ColorByteViewCompatible(t->tex.pixelFormat,fmt)) continue;
+        StutterTrace::Scope timing("target_reformat",frame_count,addr,fmt,1);
         id<MTLTexture> view=[t->tex newTextureViewWithPixelFormat:fmt];
         if (!view) continue;
         EndPass();
@@ -2001,6 +2104,8 @@ struct MetalRenderer::Impl {
                 : t->depth_or_layers;
       if (t->levels < levels ||
           t->depth_or_layers < want_layers) { // grow, keeping what is there
+        StutterTrace::Scope timing("target_grow",frame_count,addr,
+            (u64(levels)<<32)|want_layers,1);
         const u32 new_levels = std::max(t->levels, levels);
         id<MTLTexture> tex = NewTargetTexture(fmt, width, height, new_levels,
                                               depth, dim, want_layers);
@@ -2026,6 +2131,8 @@ struct MetalRenderer::Impl {
       }
       return *t;
     }
+    StutterTrace::Scope timing("target_create",frame_count,addr,
+        (u64(width)<<32)|height,1);
     auto rt = std::make_unique<RenderTarget>();
     rt->tex = NewTargetTexture(fmt, width, height, levels, depth, dim,
                                depth_or_layers);
@@ -2073,6 +2180,7 @@ struct MetalRenderer::Impl {
     if (it != rt.views.end()) {
       return it->second;
     }
+    StutterTrace::Scope timing("target_view_create",frame_count,rt.addr,key,1);
     id<MTLTexture> v = [rt.tex
         newTextureViewWithPixelFormat:fmt
                           textureType:rt.tex.textureType
@@ -2162,6 +2270,7 @@ struct MetalRenderer::Impl {
                  float depth_value, bool clear_stencil = false,
                  u32 stencil_value = 0) {
     EndPass();
+    StutterTrace::Scope timing("render_pass_begin",frame_count,last_vs,last_ps,1);
     if (work_since_commit >= kCommitEvery) {
       Commit(false); // keep the host GPU busy while the rest is recorded
     }
@@ -2230,7 +2339,10 @@ struct MetalRenderer::Impl {
     pass_height = h;
     rp.renderTargetWidth = w;
     rp.renderTargetHeight = h;
-    enc = [cmd renderCommandEncoderWithDescriptor:rp];
+    {
+      StutterTrace::Scope encoder_timing("render_encoder_create",frame_count,last_vs,last_ps,1);
+      enc = [cmd renderCommandEncoderWithDescriptor:rp];
+    }
     pass = ps;
     if (dump_passes && trace) {
       for (u32 k = 0; k < 8; ++k) {
@@ -2253,7 +2365,7 @@ struct MetalRenderer::Impl {
   };
 
   bool PrepareTessellation(const RegFile& r, const DrawCall& dc,u64 domain_hash,
-                           bool allow_native,TessBuffers& out) {
+                           bool allow_native,TessBuffers& out,const u32* local_ud,const u32* hull_ud) {
     const u32 config = r[Reg::VGT_LS_HS_CONFIG], tf = r[Reg::VGT_TF_PARAM];
     // The light-volume shaders use one input/output control point and keep
     // their attributes in LDS. Other patch layouts still require integration.
@@ -2281,11 +2393,12 @@ struct MetalRenderer::Impl {
     for (u32 k=0;k<2;++k) {
       const u32 lo=registers[k];
       const u64 address=r.ProgramAddr(lo);
-      user[k]=r.UserData(lo+4);
+      user[k]=k ? hull_ud : local_ud;
       programs[k]=GetProgram(Stage::Vertex,address,user[k],Bits(r[lo+3],1,5),
                             Bits(r[lo+2],24,2));
       if (!programs[k]) return false;
     }
+    if(domain_hash==0xc4b45ba023e435cfull) CaptureFogInputs(programs[0],user[0],"local");
     const auto native=native_tessellation && allow_native
         ? NativeTessellation(programs[0]->hash,programs[1]->hash,domain_hash) : NativeTessellationConfig{};
     if (native && programs[0]->num_user_sgprs==6 && programs[1]->num_user_sgprs==8) {
@@ -2302,7 +2415,6 @@ struct MetalRenderer::Impl {
         out.native=native;out.factors=native_tess_factors[slot];
         out.params={r[Reg::VGT_INDX_OFFSET],dc.count,dc.indexed ? dc.index_size : 0u,0,dc.indexed ? index_base : 0};
         std::memcpy(out.local_ud.data(),user[0],64);std::memcpy(out.hull_ud.data(),user[1],64);
-        PatchUserData(out.local_ud.data());PatchUserData(out.hull_ud.data());
         ++native_tess_draws;
         return true;
       }
@@ -2352,7 +2464,6 @@ struct MetalRenderer::Impl {
     for (u32 k=0;k<2;++k) {
       u32 ud[16];
       std::memcpy(ud,user[k],sizeof(ud));
-      PatchUserData(ud);
       if (k) [compute memoryBarrierWithScope:MTLBarrierScopeBuffers];
       [compute setComputePipelineState:stages[k]];
       [compute setBytes:ud length:sizeof(ud) atIndex:Shader::Binding::UserData];
@@ -2396,6 +2507,7 @@ struct MetalRenderer::Impl {
     if (it != depth_states.end()) {
       return it->second;
     }
+    StutterTrace::Scope timing("depth_state_create",frame_count,key,0,1);
     MTLDepthStencilDescriptor *d = [MTLDepthStencilDescriptor new];
     const bool z_enable = (db_control >> 1) & 1;
     d.depthCompareFunction =
@@ -2454,6 +2566,7 @@ struct MetalRenderer::Impl {
   // Evaluates each image instruction's descriptors against the user data.
   void Resolve(const Program &p, const u32 *ud, std::vector<TextureType> &types,
                Resources &out) {
+    StutterTrace::Scope timing("resource_resolve",frame_count,p.address,p.images.size(),1);
     std::vector<std::array<u32, 4>> ssharps;
     std::vector<bool> comparison(p.samplers.size(),false);
     for (const auto &ss : p.samplers) {
@@ -2536,16 +2649,11 @@ struct MetalRenderer::Impl {
     if (!last_level || rt.levels <= 1 || !Tiling::Supported(tiling)) {
       return;
     }
+    StutterTrace::Scope timing("target_mip_alias",frame_count,rt.addr,rt.levels,1);
     // ImageInfo NumLayers: depth + 1 slices (cubes: full cubes), pow2 padded.
     const u32 ttype = t[3] >> 28;
-    u32 layers = rt.dim == TexDim::Tex2DArray ? (t[4] & 0x1FFF) + 1 : 1;
-    if (ttype == 11) {
-      layers *= 6;
-    }
     const bool pow2 = (t[3] >> 25) & 1;
-    if (pow2) {
-      layers = std::bit_ceil(layers);
-    }
+    const u32 layers = Tiling::StorageLayers(ttype,(t[4] & 0x1FFF)+1,pow2);
     const u32 pitch = ((t[4] >> 13) & 0x3FFF) + 1;
     const u32 levels = std::min(last_level + 1, rt.levels);
     Tiling::MipLevel mips[16];
@@ -2607,20 +2715,31 @@ struct MetalRenderer::Impl {
     if (rt.initialized || rt.clear_pending || rt.dim!=TexDim::Tex2D || rt.levels!=1 ||
         PixelBytes(rt.tex.pixelFormat)!=4 || pitch<rt.width || !detile_pipeline ||
         !Tiling::Supported(tile) || Tiling::Thickness(tile)!=1) return;
+    StutterTrace::Scope timing("color_guest_init",frame_count,rt.addr,
+        (u64(tile)<<32)|pitch,1);
     const u64 bytes=Tiling::SliceSize(tile,pitch,rt.height,4);
     id<MTLBuffer> source=nil; u64 offset=0;
     if (!bytes || bytes>UINT32_MAX || !Locate(rt.addr,bytes,&source,&offset)) return;
     u64 key=Hash(tile); key=Hash(pitch,key); key=Hash(rt.width,key); key=Hash(rt.height,key);
     auto& offsets=detile_maps[key];
     if (!offsets) {
+      StutterTrace::Scope map_timing("color_detile_map_build",frame_count,rt.addr,bytes,1);
       std::vector<u32> indexed(bytes/4),linear(u64(rt.width)*rt.height);
       for (u32 i=0;i<indexed.size();++i) indexed[i]=i;
       Tiling::DetileSlice(tile,reinterpret_cast<const u8*>(indexed.data()),
           reinterpret_cast<u8*>(linear.data()),rt.width,rt.height,pitch,4);
+      StutterTrace::Scope allocation_timing("color_detile_map_buffer",frame_count,rt.addr,
+          linear.size()*4,1);
       offsets=[device newBufferWithBytes:linear.data() length:linear.size()*4 options:MTLResourceStorageModeShared];
     }
     const u32 row=(rt.width*4+255)&~255u;
-    id<MTLBuffer> linear=[device newBufferWithLength:u64(row)*rt.height options:MTLResourceStorageModePrivate];
+    id<MTLBuffer> linear;
+    {
+      StutterTrace::Scope allocation_timing("color_guest_staging",frame_count,rt.addr,
+          u64(row)*rt.height,1);
+      linear=[device newBufferWithLength:u64(row)*rt.height options:MTLResourceStorageModePrivate];
+    }
+    StutterTrace::Scope encode_timing("color_guest_encode",frame_count,rt.addr,bytes,1);
     EndPass(); EnsureCommandBuffer();
     auto e=[cmd computeCommandEncoder];
     [e setComputePipelineState:detile_pipeline];
@@ -2922,6 +3041,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   ++draw_count;
   ++stat_draws;
   ++work_since_commit;
+  CaptureFogDrawEntry(r,dc);
   const u64 vs_addr = r.ProgramAddr(Reg::SPI_SHADER_PGM_LO_VS);
   const u32 cb_mode = Bits(r[Reg::CB_COLOR_CONTROL], 4, 3);
   const u32 db_render = r[Reg::DB_RENDER_CONTROL];
@@ -3087,6 +3207,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     return;
   }
 
+  CaptureDreamMaterialBoundary(ps,colors[5]);
   CaptureFogBoundary(ps,colors[0]);
 
   if (trace) { // DC_PEEK_PS=<ps>: its first two V# buffers, printed after the
@@ -3156,6 +3277,37 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     }
   }
 
+  // One transaction reserves every stage before tessellation or render
+  // encoders are created. Keep its leases pinned across diagnostic commits.
+  u32 vud[16],pud[16],lud[16],hud[16];
+  std::memcpy(vud,vs_ud,sizeof(vud));std::memcpy(pud,ps_ud,sizeof(pud));
+  std::array<u32*,4> prepared{vud};
+  std::size_t prepared_count=1;
+  if(ps) prepared[prepared_count++]=pud;
+  if(tessellated) {
+    std::memcpy(lud,r.UserData(Reg::SPI_SHADER_PGM_LO_LS+4),sizeof(lud));
+    std::memcpy(hud,r.UserData(Reg::SPI_SHADER_PGM_LO_HS+4),sizeof(hud));
+    prepared[prepared_count++]=lud;prepared[prepared_count++]=hud;
+  }
+  SnapshotArena::Pin snapshot_pin(arena_pin);
+  bool static_smrd_eligible=false;
+  if(static_smrd_enabled && ps && !probe_buf && !StaticSmrd::Layout(ps->hash).empty()) {
+    ++static_smrd_attempts;
+    auto [entry,inserted]=static_smrd_programs.try_emplace(ps,false);
+    if(inserted) entry->second=Shader::FragmentStaticSmrdEligible(*ps);
+    static_smrd_eligible=entry->second;
+  }
+  std::vector<StaticSmrd::Snapshot> static_smrd_sources;
+  if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),static_smrd_eligible ? &static_smrd_sources : nullptr)) return;
+  StaticSmrd::Packed static_smrd_packed;
+  const bool use_static_smrd=static_smrd_eligible && StaticSmrd::Pack(ps->hash,std::span<const u32,16>(pud),static_smrd_sources,
+      {arena_va,kArenaSize,arena_head,arena_commit_head,arena_pin},static_smrd_packed);
+  if(static_smrd_eligible) {
+    if(use_static_smrd) {++static_smrd_draws;static_smrd_bytes+=u64(static_smrd_packed.count)*4;}
+    else ++static_smrd_rejects;
+  }
+  CaptureFogInputs(ps,pud);
+  if(ps && ps->hash==0x33a4610f6f19410dull) CaptureFogInputs(vs,vud,"domain");
   TessBuffers tess;
   // Preserve a preparation boundary when a draw samples one of its own
   // attachments. Fusing pure setup must not weaken a feedback dependency.
@@ -3169,7 +3321,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     if(depth && root==texture_root(depth->tex))allow_native_tess=false;
     for(auto* color:colors)if(color && root==texture_root(color->tex))allow_native_tess=false;
   }
-  if (tessellated && !PrepareTessellation(r,dc,vs->hash,allow_native_tess,tess)) return;
+  if (tessellated && !PrepareTessellation(r,dc,vs->hash,allow_native_tess,tess,lud,hud)) return;
 
   bool pending_clear = depth && depth->clear_pending;
   for (u32 k = 0; k < 8; ++k) {
@@ -3268,6 +3420,10 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     fo.textures = ps_types;
     fo.depth_target = depth != nullptr;
     fo.depth_bounds = depth_bounds;
+    // Only the generator's conservative CFG proof can remove a kill. Keep
+    // diagnostic probes on the original path; depth/coverage rules stay Metal's.
+    fo.opaque_exports=opaque_exports && probe_slot<0;
+    fo.static_smrd=use_static_smrd;
     if (probe_slot >= 0) {
       fo.probe_pc = probe.pc;
       fo.probe_x = probe.x;
@@ -3279,6 +3435,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     ps_key = Hash(fo.probe_y, ps_key);
     ps_key = Hash(fo.depth_target, ps_key);
     ps_key = Hash(fo.depth_bounds, ps_key);
+    ps_key = Hash(fo.opaque_exports, ps_key);
+    if(fo.static_smrd) ps_key=Hash(0x53534d524431ull,ps_key);
     ps_key = Fnv(fo.ps_input_cntl.data(), sizeof(fo.ps_input_cntl), ps_key);
     ps_key = Hash(fo.vs_param_mask, ps_key);
     ps_key = Hash(fo.ps_input_addr, ps_key);
@@ -3434,7 +3592,11 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     return;
   }
 
-  [enc setRenderPipelineState:pso];
+  {
+    StutterTrace::Scope timing("draw_pipeline_bind",frame_count,vs_addr,ps_addr,1);
+    [enc setRenderPipelineState:pso];
+  }
+  StutterTrace::Scope fixed_timing("draw_fixed_bind",frame_count,vs_addr,ps_addr,1);
   [enc setViewport:MTLViewport{0, 0, static_cast<double>(pass_width),
                                static_cast<double>(pass_height), 0, 1}];
   [enc setScissorRect:MTLScissorRect{static_cast<NSUInteger>(sc.x0),
@@ -3498,17 +3660,11 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   std::array<float,6> viewport;
   for (u32 k=0;k<viewport.size();++k) viewport[k]=r.F(Reg::PA_CL_VPORT_XSCALE+k);
   const auto consts=Shader::MakeDrawConsts(r[Reg::PA_CL_VTE_CNTL],viewport,pass_width,pass_height);
+  fixed_timing.End();
 
   // ---- bindings ----
   if (std::getenv("DC_DEBUG_MEMTEST")) {
     MemTest(vs_addr);
-  }
-  u32 vud[16], pud[16];
-  std::memcpy(vud, vs_ud, sizeof(vud));
-  std::memcpy(pud, ps_ud, sizeof(pud));
-  PatchUserData(vud);
-  if (ps) {
-    PatchUserData(pud);
   }
   if(trace && !capture_root.empty()) {
     TraceHtileReaders(*vs,vud,0,0,0);CaptureMotionConstants(*vs,vud);
@@ -3552,6 +3708,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
       }
     }
   }
+  StutterTrace::Scope binding_timing("draw_bind_resources",frame_count,vs_addr,ps_addr,1);
   UpdateMemMap();
   [enc setVertexBytes:vud length:64 atIndex:Shader::Binding::UserData];
   [enc setVertexBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
@@ -3568,6 +3725,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     } else [enc setVertexBuffer:tess.lds offset:tess.lds_offset atIndex:Shader::Binding::TessLds];
   }
   for (u32 k = 0; k < vs_res.tex.size(); ++k) {
+    StutterTrace::Scope timing("draw_vertex_texture_bind",frame_count,vs_addr,k,1);
     [enc setVertexTexture:vs_res.tex[k] atIndex:k];
   }
   for (u32 u = 0; u < vs_res.smp.size() && u < 16; ++u) {
@@ -3575,10 +3733,13 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
   if (ps) {
     [enc setFragmentBytes:pud length:64 atIndex:Shader::Binding::UserData];
+    if(fo.static_smrd) [enc setFragmentBytes:static_smrd_packed.words.data()
+        length:static_smrd_packed.count*sizeof(u32) atIndex:Shader::Binding::StaticSmrd];
     [enc setFragmentBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
     [enc setFragmentBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
     [enc setFragmentBuffer:mem_map offset:0 atIndex:Shader::Binding::MemMap];
     for (u32 k = 0; k < ps_res.tex.size(); ++k) {
+      StutterTrace::Scope timing("draw_fragment_texture_bind",frame_count,ps_addr,k,1);
       [enc setFragmentTexture:ps_res.tex[k] atIndex:k];
     }
     for (u32 u = 0; u < ps_res.smp.size() && u < 16; ++u) {
@@ -3603,6 +3764,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
                      atIndex:Shader::kProbeBinding];
     }
   }
+  binding_timing.End();
 
   if (capture) {
     debug_vs_buf = [device newBufferWithLength:64 * 16
@@ -3621,6 +3783,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
 
   // ---- primitive assembly ----
   if (tessellated) {
+    StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc setTessellationFactorBuffer:tess.factors offset:tess.factor_offset instanceStride:0];
     [enc drawPatches:1 patchStart:0 patchCount:dc.count patchIndexBuffer:nil
         patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
@@ -3656,10 +3819,13 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
       ReportOnce("indexed RECTLIST draws are not supported");
       return;
     }
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle
-            vertexStart:0
-            vertexCount:(dc.count / 3) * 6
-          instanceCount:instances];
+    {
+      StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
+      [enc drawPrimitives:MTLPrimitiveTypeTriangle
+              vertexStart:0
+              vertexCount:(dc.count / 3) * 6
+            instanceCount:instances];
+    }
     return;
   default:
     ReportOnce("primitive type " + std::to_string(static_cast<u32>(prim)) +
@@ -3668,6 +3834,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
 
   if (!dc.indexed && !to_list) {
+    StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc drawPrimitives:mprim
             vertexStart:base_vertex
             vertexCount:dc.count
@@ -3676,6 +3843,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
   }
   if (!dc.indexed && prim == PrimType::QuadList) {
     const u32 quads = std::min<u32>(dc.count / 4, 0x10000);
+    StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                     indexCount:quads * 6
                      indexType:MTLIndexTypeUInt32
@@ -3696,6 +3864,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     u64 ioff = 0;
     if ((src % dc.index_size) == 0 &&
         Locate(src, u64(dc.count) * dc.index_size, &ibuf, &ioff)) {
+      StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
       [enc drawIndexedPrimitives:mprim
                       indexCount:dc.count
                        indexType:dc.index_size == 2 ? MTLIndexTypeUInt16
@@ -3751,6 +3920,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc) {
     return;
   }
   auto [buf, off] = Upload(idx.data(), idx.size() * 4);
+  StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
   [enc drawIndexedPrimitives:mprim
                   indexCount:idx.size()
                    indexType:MTLIndexTypeUInt32
@@ -4078,10 +4248,12 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz) {
   if (++work_since_commit >= kCommitEvery) {
     Commit(false);
   }
-  EnsureCommandBuffer();
   u32 cud[16];
   std::memcpy(cud, ud, sizeof(cud));
-  PatchUserData(cud);
+  u32* prepared[]{cud};
+  SnapshotArena::Pin snapshot_pin(arena_pin);
+  if(!PatchUserData(prepared)) return;
+  EnsureCommandBuffer();
   UpdateMemMap();
   id<MTLComputeCommandEncoder> e = [cmd computeCommandEncoder];
   [e setComputePipelineState:pso];
@@ -4218,6 +4390,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           velocity_clears,velocity_producers,velocity_camera_matches,velocity_filters);
       DC_INFO("gpu tessellation: %llu native draws, %llu translated preparation draws (cumulative)",
           native_tess_draws,translated_tess_draws);
+      if(static_smrd_enabled) DC_INFO("gpu static SMRD: %llu attempts, %llu packed draws, %llu snapshot rejects, %llu bytes (cumulative)",
+          static_smrd_attempts,static_smrd_draws,static_smrd_rejects,static_smrd_bytes);
       stat_upload_base=upload_allocations.load(std::memory_order_relaxed);
       stat_hashed = 0;
       stat_depth_copies = 0;
@@ -4450,7 +4624,8 @@ bool MetalRenderer::WaitIdleUntil(std::chrono::steady_clock::time_point deadline
     })) {error="GPU fence callbacks did not finish before the GPU drain timeout.";return false;}
     if(Execution()->Failed()){error=Execution()->Error();return false;}
     impl->last_committed=nil;
-    impl->arena_released.store(impl->arena_head,std::memory_order_release);
+    impl->arena_commit_head=impl->arena_head;
+    SnapshotArena::Publish(impl->arena_released,impl->arena_head);
     error.clear();return true;
   }
 }

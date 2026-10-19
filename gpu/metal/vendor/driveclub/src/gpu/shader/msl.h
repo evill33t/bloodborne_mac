@@ -32,6 +32,7 @@ constexpr u32 TessFactors = 9;
 constexpr u32 TessParams = 10;
 constexpr u32 TessLocalUserData = 11;
 constexpr u32 TessHullUserData = 12;
+constexpr u32 StaticSmrd = 13; // exact-layout, pinned-snapshot fragment constants
 } // namespace Binding
 
 // Host-side mirrors of the MSL structs in the prelude.
@@ -128,6 +129,9 @@ struct MslOptions {
     // Remove only translator-inserted kills proven unreachable by the fragment
     // CFG. This never forces early depth/stencil tests or removes depth bounds.
     bool opaque_exports = false;
+    // Default-disabled prototype. The caller must bind the corresponding
+    // StaticSmrd::Packed block from currently pinned prepared snapshots.
+    bool static_smrd = false;
     // Register probe (debugging): before the instruction at `probe_pc`, the
     // fragment at pixel (probe_x, probe_y) -- for compute, the thread at that
     // global grid position -- writes its
@@ -147,5 +151,9 @@ std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::
 // export must have full EXEC, and every reachable exit must follow an export.
 // Unsupported control flow and loops retain the original fragment kills.
 bool FragmentExportsOpaque(const Program& p);
+
+// Exact original hash/layout plus conservative CFG proof that each selected
+// direct S_LOAD still reads its original UD2/UD12 root at that instruction.
+bool FragmentStaticSmrdEligible(const Program& p);
 
 } // namespace Gpu::Shader

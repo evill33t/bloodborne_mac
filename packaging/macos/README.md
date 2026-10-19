@@ -158,6 +158,9 @@ diagnostics perform bounded lossless readbacks; disable them for timing runs.
 The [stutter follow-up](../../docs/MACOS_STUTTER_PROFILING.md) records the
 dedicated presentation loop, controlled UI-stall regression and visible-window
 gameplay results.
+The [extended Metal gameplay report](../../docs/MACOS_METAL_GAMEPLAY_2026-10-19.md)
+records native light-volume preparation, snapshot lifetime fixes, cubemap mip
+padding, measured FPS gains and remaining fog/stutter limits.
 
 Reconstructible uploaded textures expire after 20 idle seconds. Under cache
 pressure the oldest uploads can leave sooner, with a two-second grace period for

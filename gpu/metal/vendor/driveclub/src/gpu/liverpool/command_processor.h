@@ -98,10 +98,24 @@ public:
     const RegFile& Regs() const { return regs; }
 
 private:
+    // Ephemeral diagnostics only. These never enter checkpoint state or replace
+    // the guest command spans used for execution.
+    struct AuditJob;
+    struct AuditState;
     struct Job {
         std::vector<CmdBuffers> buffers;
         std::function<void()> after;
+        std::shared_ptr<AuditJob> audit;
     };
+    std::unique_ptr<AuditState> audit;
+    static thread_local AuditJob* t_audit_job;
+    static thread_local u32 t_audit_buffer;
+    void InitAudit();
+    std::shared_ptr<AuditJob> AuditSubmission(const std::vector<CmdBuffers>&);
+    void AuditConsume(AuditJob&,const CmdBuffers&,u32 buffer);
+    void AuditFinish(AuditJob&);
+    void AuditPacket(std::span<const u32>,u64 offset,int depth,bool constant);
+    void AuditDraw(bool indexed,u32 count,u32 offset,u32 first,u32 instances);
 
     // Constant engine: fills its 48 KB RAM from the CCB and dumps it to
     // memory (descriptor tables) for the DE. It runs ahead of the DE, synced

@@ -100,6 +100,18 @@ u32 TraceHtileReaders(const Program& program,const u32* ud,u32 gx,u32 gy,u32 gz)
     const u32 stride=(descriptor[1]>>16)&0x3fff;
     const u64 bytes=u64(descriptor[2])*std::max(1u,stride);
     const bool valid=resolved && base && bytes && bytes<=kGpuAddrMask+1-base;
+    u64 dump_address=0,dump_bytes=0,dump_generation=0;
+    bool dump_covers_resource=false;
+    if(valid) {
+      auto dump=const_dumps.upper_bound(base);
+      if(dump!=const_dumps.begin()) {
+        --dump;
+        if(base-dump->first<dump->second.bytes) {
+          dump_address=dump->first;dump_bytes=dump->second.bytes;dump_generation=dump->second.gen;
+          dump_covers_resource=bytes<=dump_bytes-(base-dump_address);
+        }
+      }
+    }
     if (output) {
       output<<(first?"":",")<<"{\"pc\":"<<read.pc<<",\"encoding\":"<<unsigned(read.encoding)
         <<",\"op\":"<<read.op<<",\"resolved\":"<<(resolved?"true":"false")
@@ -111,6 +123,8 @@ u32 TraceHtileReaders(const Program& program,const u32* ud,u32 gx,u32 gy,u32 gz)
         output<<(k?",":"")<<"["<<unsigned(source.kind)<<','<<unsigned(source.ud)<<','<<source.offset<<"]";
       }
       output<<"],\"base\":"<<base<<",\"descriptor_bytes\":"<<bytes
+        <<",\"cpu_dump_address\":"<<dump_address<<",\"cpu_dump_bytes\":"<<dump_bytes
+        <<",\"cpu_dump_generation\":"<<dump_generation<<",\"cpu_dump_covers_resource\":"<<(dump_covers_resource?"true":"false")
         <<",\"immediate_offset\":"<<read.immediate_offset<<",\"scalar_offset_operand\":"<<read.scalar_offset
         <<",\"dynamic_scalar_offset\":"<<(read.dynamic_scalar_offset?"true":"false")
         <<",\"vaddr\":"<<unsigned(read.vector_address)<<",\"idxen\":"<<(read.index_enabled?"true":"false")
