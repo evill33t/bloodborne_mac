@@ -148,7 +148,7 @@ void ShaderCompiler::Remember(NSDictionary* recipe,WarmPipeline pipeline) {
         std::lock_guard guard(warm_lock);
         StoreWarmLocked(key,pipeline,bytes.length);
         if(recipe_writes.contains(key)) return;
-        while(recipe_writes.size()>=PipelinePrewarmLimits::Recipes ||
+        while(recipe_writes.size()+warm_queued_count>=PipelinePrewarmLimits::Recipes ||
                 bytes.length>PipelinePrewarmLimits::Bytes-pending_recipe_bytes-warm_queued_bytes) {
             // Queued startup recipes cannot be cancelled mid-compilation. Keep
             // the combined serialized inputs bounded until they finish.

@@ -86,6 +86,19 @@ std::unique_ptr<Shader::Program> CapturedProgram(
     std::ifstream input(selected,std::ios::binary);
     Require(bool(input.read(reinterpret_cast<char*>(code.data()),bytes)), "Cannot read shader capture");
     std::array<u32,16> user{};
+    std::vector<u32> fetch;
+    const auto fetch_path=std::filesystem::path(selected.string()+".fetch.bin");
+    if(std::filesystem::exists(fetch_path)) {
+        const auto size=std::filesystem::file_size(fetch_path);
+        Require(size>=4 && size<=65536 && !(size&3),"Invalid captured fetch shader size");
+        fetch.resize(size/4+64,0xbf810000u);
+        std::ifstream stream(fetch_path,std::ios::binary);
+        Require(bool(stream.read(reinterpret_cast<char*>(fetch.data()),size)),"Cannot read captured fetch shader");
+        const auto address=reinterpret_cast<std::uintptr_t>(fetch.data());
+        user[0]=u32(address);user[1]=u32(address>>32);
+    }
+    if(hash==0x030976bf71b6a530ull || hash==0x53b4731b549fb1f0ull)
+        Require(!fetch.empty(),"Original LS capture is incomplete: capture its .bin.fetch.bin sidecar");
     std::unique_ptr<Shader::Program> program;
     // The hash also includes system-input metadata. The capture filename binds
     // the expected result; do not silently substitute a different decode.

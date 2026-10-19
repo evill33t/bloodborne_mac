@@ -1352,6 +1352,10 @@ struct MetalRenderer::Impl {
       const u32 size = Shader::Gcn::ProgramSize(code);
       std::ofstream(path, std::ios::binary)
           .write(reinterpret_cast<const char *>(code), size);
+      if (prog->fetch_address && prog->fetch_bytes) {
+        std::ofstream(std::string(path)+".fetch.bin",std::ios::binary)
+            .write(reinterpret_cast<const char*>(prog->fetch_address),prog->fetch_bytes);
+      }
     }
     ShaderEntry e;
     u32 bytes = 16;

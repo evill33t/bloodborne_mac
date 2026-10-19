@@ -7,6 +7,51 @@
 #include <unistd.h>
 #include <thread>
 #include <chrono>
+#include <future>
+#include <string>
+#include <vector>
+
+namespace {
+constexpr const char* kAreaCompute="#include <metal_stdlib>\nusing namespace metal; kernel void main0(uint i [[thread_position_in_grid]]) { }";
+id<MTLComputePipelineState> AreaPipeline(Gpu::Metal::ShaderCompiler& compiler,unsigned group) {
+    auto descriptor=[MTLComputePipelineDescriptor new];
+    descriptor.computeFunction=compiler.Function(100,kAreaCompute,0);
+    descriptor.maxTotalThreadsPerThreadgroup=group;
+    NSError* error=nil;
+    auto result=compiler.ComputePipeline(descriptor,&error);
+    assert(result && !error);return result;
+}
+std::vector<std::filesystem::path> Recipes(const std::filesystem::path& directory) {
+    std::vector<std::filesystem::path> result;
+    for(const auto& file:std::filesystem::recursive_directory_iterator(directory))
+        if(file.is_regular_file() && !file.is_symlink() && file.path().extension()==".json" &&
+            file.path().filename().string().size()==69) result.push_back(file.path());
+    return result;
+}
+std::uint64_t RecipeBytes(const std::filesystem::path& directory) {
+    std::uint64_t total=0;
+    for(const auto& file:Recipes(directory))total+=std::filesystem::file_size(file);
+    return total;
+}
+std::filesystem::path RecipeRoot(const std::filesystem::path& directory,id<MTLDevice> device) {
+    const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
+    char identity[128];
+    std::snprintf(identity,sizeof(identity),"%llx-%ld.%ld.%ld",device.registryID,
+        os.majorVersion,os.minorVersion,os.patchVersion);
+    return directory/"metal-cache"/"prewarm-v1"/identity;
+}
+void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64_t bytes) {
+    std::filesystem::create_directories(root);
+    const auto now=std::filesystem::file_time_type::clock::now();
+    for(unsigned i=0;i<count;++i) {
+        char name[80];std::snprintf(name,sizeof(name),"%064x.json",i);
+        const auto path=root/name;
+        std::ofstream stream(path,std::ios::binary);
+        stream.seekp(bytes-1);stream.put('x');stream.close();
+        std::filesystem::last_write_time(path,now-std::chrono::seconds(count-i+60));
+    }
+}
+}
 
 // A real GPU behind a proxy that records archive requests. The production
 // cache policy must not reach any archive API, even when environment variables
@@ -140,6 +185,76 @@ int main() {
             changed.maxTotalThreadsPerThreadgroup=64;
             assert(compiler.ComputePipeline(changed,nil));assert(compiler.GetWarmupStats().hits==2);
         }
+        // A route visiting several areas must learn beyond the original 64
+        // recipes. Hold the background worker to exercise pending admission,
+        // rather than merely compiling/writing one descriptor at a time.
+        char areas_directory[]="/tmp/bb-metal-areas-XXXXXX";assert(mkdtemp(areas_directory));
+        setenv("BB_DATA_DIR",areas_directory,1);
+        {
+            auto spy=[BBArchiveSpyDevice wrapping:device];
+            Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+            std::promise<void> started,release;
+            auto gate=release.get_future().share();
+            compiler.Submit([&started,gate]{started.set_value();gate.wait();},true);
+            started.get_future().wait();
+            for(unsigned group=1;group<=72;++group) AreaPipeline(compiler,group);
+            const auto stats=compiler.GetWarmupStats();
+            assert(stats.pending==72 && stats.retained==72);
+            assert(stats.pending+stats.queued<=Gpu::Metal::PipelinePrewarmLimits::Recipes);
+            assert(stats.pending_bytes+stats.queued_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
+            assert(stats.retained_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
+            release.set_value();assert(spy.archiveCalls==0);
+        }
+        assert(Recipes(areas_directory).size()==72);
+        {
+            auto spy=[BBArchiveSpyDevice wrapping:device];
+            Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+            while(compiler.GetWarmupStats().ready<72 && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            const auto stats=compiler.GetWarmupStats();
+            assert(stats.loaded==72 && stats.ready==72 && stats.retained==72);
+            AreaPipeline(compiler,72);assert(compiler.GetWarmupStats().hits==1);
+            assert(spy.archiveCalls==0);
+        }
+        std::filesystem::remove_all(areas_directory);
+        // A full count or byte budget must evict the oldest regular generated
+        // recipe and retain the newly observed one. Sparse files make the
+        // 128 MiB disk boundary is inexpensive without compiling 512 shaders.
+        for(bool byte_limit:{false,true}) {
+            char bounds_directory[]="/tmp/bb-metal-bounds-XXXXXX";assert(mkdtemp(bounds_directory));
+            setenv("BB_DATA_DIR",bounds_directory,1);
+            const auto root=RecipeRoot(bounds_directory,device);
+            {
+                Compiler compiler(device,2);compiler.EnablePrewarming();
+                const auto old_count=static_cast<unsigned>(byte_limit ?
+                    Gpu::Metal::PipelinePrewarmLimits::Bytes/Gpu::Metal::PipelinePrewarmLimits::RecipeBytes :
+                    Gpu::Metal::PipelinePrewarmLimits::Recipes);
+                FillOldRecipes(root,old_count,byte_limit ? Gpu::Metal::PipelinePrewarmLimits::RecipeBytes : 1);
+                const auto oldest=root/(std::string(64,'0')+".json");assert(std::filesystem::exists(oldest));
+                const auto sentinel=std::filesystem::path(bounds_directory)/"protected.txt";
+                std::ofstream(sentinel)<<"untouched";
+                const auto link=root/(std::string(64,'f')+".json");
+                std::filesystem::create_symlink(sentinel,link);
+                std::ofstream(root/"unrelated.txt")<<"untouched";
+                AreaPipeline(compiler,73);
+            }
+            assert(Recipes(bounds_directory).size()<=Gpu::Metal::PipelinePrewarmLimits::Recipes);
+            assert(RecipeBytes(bounds_directory)<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
+            assert(!std::filesystem::exists(root/(std::string(64,'0')+".json")));
+            // The only non-placeholder recipe must be the newly learned one.
+            unsigned learned=0;
+            for(const auto& file:Recipes(bounds_directory)) {
+                std::ifstream input(file);char first=0;input.get(first);
+                if(first=='{')++learned;
+            }
+            assert(learned==1);
+            assert(std::filesystem::is_symlink(root/(std::string(64,'f')+".json")));
+            std::string text;std::ifstream(std::filesystem::path(bounds_directory)/"protected.txt")>>text;
+            assert(text=="untouched");text.clear();std::ifstream(root/"unrelated.txt")>>text;assert(text=="untouched");
+            std::filesystem::remove_all(bounds_directory);
+        }
+        setenv("BB_DATA_DIR",warm_directory,1);
         // Corruption is a cache miss; no partially decoded recipe is used.
         for(const auto& entry:std::filesystem::recursive_directory_iterator(warm_directory))
             if(entry.path().extension()==".json") std::ofstream(entry.path(),std::ios::trunc)<<"{broken";
@@ -148,6 +263,6 @@ int main() {
             compile(compiler);
         }
         std::filesystem::remove_all(warm_directory);
-        puts("Metal runtime: no binary archives; exact-source/descriptor prewarming, source-directory protection, opt-out and corruption recovery passed; offline archive fixture passed");
+        puts("Metal runtime: no binary archives; 72-recipe persistence/reload, warm hit beyond 64, bounded pending inputs, oldest-recipe count/byte eviction, source/symlink protection, opt-out and corruption recovery passed; offline archive fixture passed");
     }
 }
