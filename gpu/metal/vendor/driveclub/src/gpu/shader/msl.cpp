@@ -651,11 +651,14 @@ public:
         static_smrd(o.static_smrd && !o.direct_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
         direct_smrd(o.direct_smrd && !o.static_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
         simd_smrd(o.simd_smrd && !o.static_smrd && !o.direct_smrd && ProveSimdSmrd(p)),
+        direct_vertex_root(o.direct_vertex_root && o.tess_stage==TessStage::None && !o.native_tess_layout &&
+            !o.rect_list && !o.points && !o.debug_capture && o.probe_pc==~0u &&
+            !o.static_smrd && !o.direct_smrd && !o.simd_smrd && ProveNativeVertexFetch(p)),
         native_vertex_fetch(o.native_vertex_fetch && o.tess_stage==TessStage::None && !o.native_tess_layout &&
             !o.rect_list && !o.points && !o.debug_capture && ProveNativeVertexFetch(p)),
         readonly_guest_memory(o.readonly_guest_memory && o.tess_stage==TessStage::None &&
             !o.native_tess_layout && (!o.native_vertex_fetch || native_vertex_fetch) && !o.rect_list && !o.points &&
-            !o.debug_capture && o.probe_pc==~0u && !o.static_smrd && !o.direct_smrd &&
+            !o.debug_capture && o.probe_pc==~0u && !direct_vertex_root && !o.static_smrd && !o.direct_smrd &&
             !o.simd_smrd && ProveReadOnlyGuestCode(p)) {}
 
     std::string Run();
@@ -854,6 +857,7 @@ private:
     const bool static_smrd;
     const bool direct_smrd;
     const bool simd_smrd;
+    const bool direct_vertex_root;
     const bool native_vertex_fetch;
     const bool readonly_guest_memory;
     std::string body;
@@ -1162,6 +1166,19 @@ void Emitter::EmitSmrd(const Inst& i) {
     const std::string base = buffer ? "dc_vbase(" + b0 + ", " + b1 + ")"
                                     : "((ulong(" + b0 + ") | (ulong(" + b1 + ") << 32)) & 0xfffffffffffful)";
     const std::string off = i.imm ? Hex(i.smrd_offset * 4) : SName(static_cast<u16>(i.smrd_offset));
+    if(direct_vertex_root && !buffer) {
+        const auto* layout=Gpu::Metal::NativeVertexFetch::Layout(p.hash);
+        for(u32 k=0;k<layout->attributes;++k) {
+            if(i.pc!=kFetchPcBase+4*k || i.op!=u16(Smrd::S_LOAD_DWORDX4) ||
+                i.dst!=16+4*k || i.sbase!=2 || !i.imm || i.smrd_offset!=4*k)continue;
+            std::string s="{ ulong root_ = dc_vs_roots[0u]; device uint* p_; ";
+            s+="if (root_ != ~0ul) p_ = ((root_ & 1ul) != 0ul ? mem.hi : mem.lo) + (root_ >> 1) + "+N(4*k)+"u; ";
+            s+="else p_ = dc_ptr_n(mem, ("+base+" + ulong("+off+")) & ~3ul, 16u);";
+            for(u32 word=0;word<4;++word)
+                s+=" "+SName(static_cast<u16>(i.dst+word))+" = p_ ? p_["+N(word)+"] : 0u;";
+            Line(s+" }");return;
+        }
+    }
     if(direct_smrd && !buffer) for(const auto& load:Gpu::Metal::StaticSmrd::Layout(p.hash)) {
         if(load.pc!=i.pc) continue;
         const u32 slot=load.root==2 ? 0 : 1;
@@ -2419,12 +2436,13 @@ std::string Emitter::Run() {
         const std::string tess_params = !domain ? "" : o.native_tess_layout
             ? ", float2 dc_uv, uint dc_patch, thread const DcNativeTess& lds"
             : ", float2 dc_uv, uint dc_patch, device uint* lds";
-        src += "static VsOut dc_run(uint vid, uint iid, constant uint* ud, thread const DcMem& mem" + tess_params + TexParams(false) +
+        const std::string root_param=direct_vertex_root ? ", constant ulong* dc_vs_roots" : "";
+        src += "static VsOut dc_run(uint vid, uint iid, constant uint* ud, thread const DcMem& mem" + root_param + tess_params + TexParams(false) +
                ") {\n    VsOut out = {};\n" + (o.points ? "    out.psize = 1.0f;\n" : "") + decl + wrapped + "}\n\n";
-        const std::string args = "ud, mem" + TexArgs();
+        const std::string args = std::string("ud, mem") + (direct_vertex_root ? ", dc_vs_roots" : "") + TexArgs();
         src += domain ? "[[patch(quad, 1)]] vertex VsOut main0(uint dc_patch [[patch_id]], float2 dc_uv [[position_in_patch]], "
             : "vertex VsOut main0(uint vid [[vertex_id]], uint iid [[instance_id]], ";
-        src += mem_params +
+        src += mem_params + (direct_vertex_root ? ", constant ulong* dc_vs_roots [[buffer(13)]]" : "") +
                ", constant DcDraw& draw [[buffer(4)]]" + (o.debug_capture ? ", device float4* dbg [[buffer(6)]]" : "") +
                (domain ? (o.native_tess_layout ? ", constant uint* dc_lud [[buffer(11)]], constant uint* dc_hud [[buffer(12)]], constant DcTess& dc_tp [[buffer(10)]]"
                                               : ", device uint* dc_lds [[buffer(8)]]") : "") +

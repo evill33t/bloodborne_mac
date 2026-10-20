@@ -437,6 +437,23 @@ visible, require positive presentation timestamps and check the
 stop receiving display-link updates; after 100 ms the producer may skip a frame
 to keep running. Those periods do not provide valid whole-window display FPS.
 
+Bloodborne now enables the guarded native indirect and GPU-source texture paths
+by default. For a synchronized-path comparison, set both
+`BB_METAL_NATIVE_INDIRECT=0` and `BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT=0`.
+The page-index, read-only shader and static/direct/SIMD packing experiments
+remain off; their latest comparisons did not establish a repeatable gain.
+Validated shader-source prewarm recipes use a device/architecture/OS identity
+that survives GPU registry-ID changes after reboot.
+
+`BB_METAL_STAGE_COUNTER_CSV=/absolute/output.csv` records calibrated vertex and
+fragment processing intervals for existing material passes when supported.
+`BB_METAL_STAGE_COUNTER_ALL_PASSES=1` includes other natural render passes.
+Collection uses a bounded pool and skips samples when busy. Intervals include
+stalls and may overlap; they are not shader-only time or GPU utilization.
+Keep these diagnostics out of normal-play FPS comparisons. The investigation
+and validation ledger is in the
+[renderer report](../../docs/MACOS_BLOODBORNE_RENDERER_REA_2026-10-20.md).
+
 The Windows reference was reviewed at
 [`0a71dd171f15096a01dc0f472aa0bcff12c41c6d`](https://github.com/Mrsuss60/bloodborne_pc_windows_port/tree/0a71dd171f15096a01dc0f472aa0bcff12c41c6d)
 for frame pacing, texture alias handling and graphics settings. The macOS overlay

@@ -43,12 +43,16 @@
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/command_timeline.h"
+#include "gpu/metal/stage_counter_timeline.h"
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
+#include "gpu/metal/ps_root_read.h"
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
 #include "gpu/metal/bound_vertex_fetch.h"
+#include "gpu/metal/direct_root_span.h"
+#include "gpu/metal/direct_root_read.h"
 #include "gpu/metal/native_indirect.h"
 #include "gpu/metal/native_writer_proof.h"
 #include "gpu/metal/native_writer_offsets.h"
@@ -298,6 +302,10 @@ struct MetalRenderer::Impl {
   id<MTLCommandBuffer> last_committed = nil;
   std::shared_ptr<CommandTimeline::Log> command_timeline=CommandTimeline::Open();
   double command_created=0;
+  std::shared_ptr<StageCounterTimeline::Log> stage_counter_log;
+  StageCounterTimeline::ClockPair stage_counter_clock;
+  std::optional<StageCounterTimeline::Pass> stage_counter_pass;
+  std::vector<StageCounterTimeline::Pass> stage_counter_passes;
   id<MTLRenderCommandEncoder> enc = nil;
   struct PassState {
     u64 color[8] = {};
@@ -660,6 +668,10 @@ struct MetalRenderer::Impl {
   u64 texture_gpu_snapshots=0,texture_gpu_snapshot_history_versions=0;
   std::array<u64,13> texture_gpu_snapshot_rejects{};
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
+  bool direct_vertex_root_enabled=std::getenv("BB_METAL_DIRECT_VERTEX_ROOT") &&
+      !std::strcmp(std::getenv("BB_METAL_DIRECT_VERTEX_ROOT"),"1");
+  u64 direct_vertex_root_draws=0,direct_vertex_root_hits=0,direct_vertex_root_fallbacks=0;
+  std::array<u64,unsigned(DirectRootRead::Reject::Count)> direct_vertex_root_rejects{};
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
   bool native_vertex_fetch_enabled=!std::getenv("BB_METAL_NATIVE_VERTEX_FETCH") || std::strcmp(std::getenv("BB_METAL_NATIVE_VERTEX_FETCH"),"0")!=0;
@@ -734,6 +746,7 @@ struct MetalRenderer::Impl {
     std::vector<NativeIndirect::Range> physical;
     bool unknown=false;
     std::shared_ptr<std::atomic<bool>> completed;
+    u64 submission=0;
   };
   std::vector<GuestWriter> guest_writers;
   static constexpr std::size_t kGuestWriterLimit=512;
@@ -751,6 +764,8 @@ struct MetalRenderer::Impl {
   std::unordered_map<u64,bool> simd_smrd_programs;
   u64 static_smrd_attempts=0,static_smrd_draws=0,static_smrd_rejects=0,static_smrd_bytes=0;
   u64 direct_smrd_draws=0,direct_smrd_roots=0,direct_smrd_fallbacks=0;
+  std::array<u64,unsigned(PsRootRead::Reject::Count)> direct_smrd_root_results{};
+  std::array<u64,13> direct_smrd_callback_rejects{};
   u64 native_tess_draws=0,translated_tess_draws=0;
   id<MTLBuffer> native_tess_factors[2]{};
   struct ProfileEntry {
@@ -783,6 +798,7 @@ struct MetalRenderer::Impl {
 #include "gpu/metal/renderer_binding_cache.inc"
 
   void Init() {
+    stage_counter_log=StageCounterTimeline::Log::Open(device);
     InitCapture();
     // Immutable snapshots and raw GPU detiling avoid the large CPU upload
     // stalls. Unsupported layouts retain the reference uploader; 0 disables
@@ -1159,7 +1175,7 @@ struct MetalRenderer::Impl {
     if(native_texture_coherence)texture_write_journal.Publish(physical,unknown);
     if(unknown) ++unknown_guest_writers;
     auto completed=std::make_shared<std::atomic<bool>>(false);
-    guest_writers.push_back({std::move(physical),unknown,completed});
+    guest_writers.push_back({std::move(physical),unknown,completed,submission_id});
     [cmd addCompletedHandler:^(id<MTLCommandBuffer>){completed->store(true,std::memory_order_release);}];
   }
   void NoteTextureCpuWrite(u64 address,u64 bytes,bool deferred=false) {
@@ -1607,6 +1623,165 @@ struct MetalRenderer::Impl {
           frame_count,program.hash,source.address,source.bytes,source.generation,prepared.table,
           prepared.payload,prepared.bytes,prepared.stride,prepared.attributes,prepared.min_records,prepared.max_records);
   }
+  StaticSmrd::AddressBlock GuardedDirectSmrd(const Program& vertex,const Program& pixel,
+      std::span<const u32,16> prepared,id<MTLBuffer> draw_map,u64 generation,bool ordinary) {
+    StaticSmrd::AddressBlock addresses;
+    if(draw_map.length>=sizeof(Shader::GpuMemMap)) {
+      const auto* header=static_cast<const Shader::GpuMemMap*>(draw_map.contents);
+      const auto* entries=reinterpret_cast<const std::int32_t*>(header+1);
+      const auto count=(draw_map.length-sizeof(*header))/sizeof(*entries);
+      addresses=StaticSmrd::TranslateRoots(pixel.hash,prepared,*header,{entries,count});
+    }
+    std::optional<bool> read_only;
+    struct Guards {
+      Impl& owner;const Program& vertex;const Program& pixel;
+      id<MTLBuffer> map;u64 generation;bool ordinary;std::optional<bool>& read_only;
+      const CpuReadReady& predicate;
+      DirectRootSpan::Span span{};
+      id<MTLBuffer> buffer=nil;u64 offset=0;
+      bool Context() const {
+        return ordinary && owner.cmd && owner.enc && owner.native_indirect_enabled &&
+            owner.native_texture_coherence && owner.gpu_written_texture_snapshot;
+      }
+      bool StagesReadOnly() {
+        if(!read_only) {
+          const auto eligible=[&](const Program& program) {
+            auto [entry,inserted]=owner.readonly_guest_programs.try_emplace(&program,false);
+            if(inserted)entry->second=Shader::GuestMemoryReadOnlyEligible(program);
+            return entry->second;
+          };
+          read_only=eligible(vertex) && eligible(pixel);
+        }
+        return *read_only;
+      }
+      bool HasCpuPredicate() const {return bool(predicate);}
+      bool GenerationStable() const {return generation==Core::Memory::DirectMapGeneration();}
+      bool Mapping(const PsRootRead::Request& request) {
+        if(map.length<sizeof(Shader::GpuMemMap))return false;
+        const auto* header=static_cast<const Shader::GpuMemMap*>(map.contents);
+        const auto* entries=reinterpret_cast<const std::int32_t*>(header+1);
+        const auto count=(map.length-sizeof(*header))/sizeof(*entries);
+        if(!DirectRootSpan::TranslateSpan(request.address,request.bytes,*header,{entries,count},span))return false;
+        // ARC write-back parameters require a local object, not a guard member.
+        id<MTLBuffer> located=nil;
+        if(!owner.LocateIndirect(request.address,request.bytes,&located,&offset))return false;
+        buffer=located;return true;
+      }
+      bool PhysicalMatch(const PsRootRead::Request& request) const {
+        return DirectRootSpan::MatchBacking(span,request.encoded,unsigned(buffer==owner.mem[1]),
+            offset,buffer.length,generation,Core::Memory::DirectMapGeneration());
+      }
+      bool CpuReady(const PsRootRead::Request& request) const {return predicate(request.address,request.bytes);}
+      bool CallbacksReady() {
+        const auto reason=owner.SignalSourceBlock({span.physical,span.bytes});
+        if(reason==UINT32_MAX)return true;
+        if(reason<owner.direct_smrd_callback_rejects.size())++owner.direct_smrd_callback_rejects[reason];
+        return false;
+      }
+      PsRootRead::Reject WritersReady() {
+        owner.PruneGuestWriters();
+        for(const auto& writer:owner.guest_writers) {
+          if(writer.unknown)return PsRootRead::Reject::GpuUnknown;
+          // A previous command on this queue is ordered. An overlapping writer
+          // in this command may still belong to this render encoder: metadata
+          // alone is not proof of an intra-pass stage barrier. Do not add one.
+          if(writer.submission>=owner.submission_id)for(const auto& range:writer.physical)
+            if(NativeIndirect::Overlap(range,{span.physical,span.bytes}))
+              return PsRootRead::Reject::GpuCurrentCommand;
+        }
+        return PsRootRead::Reject::None;
+      }
+      bool PublishRead(const PsRootRead::Request& request) {
+        if(!owner.IndirectReadAvailable())return false;
+        owner.TrackIndirectRead(request.address,request.bytes,buffer,offset);return true;
+      }
+    };
+    for(unsigned slot=0;slot<2;++slot) {
+      const auto request=PsRootRead::MakeRequest(pixel.hash,slot,prepared,addresses.roots[slot]);
+      Guards guard{*this,vertex,pixel,draw_map,generation,ordinary,read_only,CurrentCpuReadReady()};
+      const auto result=PsRootRead::Protect(request,guard);
+      ++direct_smrd_root_results[unsigned(result)];
+      if(result!=PsRootRead::Reject::None)addresses.roots[slot]=StaticSmrd::AddressBlock::Fallback;
+    }
+    ++direct_smrd_draws;direct_smrd_roots+=addresses.ValidRoots();
+    direct_smrd_fallbacks+=2-addresses.ValidRoots();return addresses;
+  }
+  StaticSmrd::AddressBlock GuardedVertexRoot(const Program& vertex,const Program* pixel,
+      std::span<const u32,16> prepared,id<MTLBuffer> draw_map,u64 generation,bool ordinary) {
+    StaticSmrd::AddressBlock addresses;
+    const auto* layout=NativeVertexFetch::Layout(vertex.hash);
+    DirectRootRead::Request request{DirectRootSpan::SmrdRoot(prepared[2],prepared[3]),
+        layout ? u64(layout->attributes)*16 : 0,DirectRootSpan::Fallback};
+    if(draw_map.length>=sizeof(Shader::GpuMemMap)) {
+      const auto* header=static_cast<const Shader::GpuMemMap*>(draw_map.contents);
+      const auto* entries=reinterpret_cast<const std::int32_t*>(header+1);
+      const auto count=(draw_map.length-sizeof(*header))/sizeof(*entries);
+      DirectRootSpan::Span span;
+      if(DirectRootSpan::TranslateSpan(request.address,request.bytes,*header,{entries,count},span))
+        request.encoded=span.encoded;
+    }
+    struct Guards {
+      Impl& owner;const Program& vertex;const Program* pixel;
+      id<MTLBuffer> map;u64 generation;bool ordinary;const CpuReadReady& predicate;
+      DirectRootSpan::Span span{};id<MTLBuffer> buffer=nil;u64 offset=0;
+      bool Context() const {
+        return ordinary && owner.cmd && owner.enc && owner.native_indirect_enabled &&
+            owner.native_texture_coherence && owner.gpu_written_texture_snapshot;
+      }
+      bool StagesReadOnly() {
+        const auto eligible=[&](const Program* program) {
+          if(!program)return true;
+          auto [entry,inserted]=owner.readonly_guest_programs.try_emplace(program,false);
+          if(inserted)entry->second=Shader::GuestMemoryReadOnlyEligible(*program);
+          return entry->second;
+        };
+        return eligible(&vertex) && eligible(pixel);
+      }
+      bool HasCpuPredicate() const {return bool(predicate);}
+      bool GenerationStable() const {return generation==Core::Memory::DirectMapGeneration();}
+      bool Mapping(const DirectRootRead::Request& request) {
+        if(map.length<sizeof(Shader::GpuMemMap))return false;
+        const auto* header=static_cast<const Shader::GpuMemMap*>(map.contents);
+        const auto* entries=reinterpret_cast<const std::int32_t*>(header+1);
+        const auto count=(map.length-sizeof(*header))/sizeof(*entries);
+        if(!DirectRootSpan::TranslateSpan(request.address,request.bytes,*header,{entries,count},span))return false;
+        // ARC write-back parameters require a local object, not a guard member.
+        id<MTLBuffer> located=nil;
+        if(!owner.LocateIndirect(request.address,request.bytes,&located,&offset))return false;
+        buffer=located;return true;
+      }
+      bool PhysicalMatch(const DirectRootRead::Request& request) const {
+        return DirectRootSpan::MatchBacking(span,request.encoded,unsigned(buffer==owner.mem[1]),
+            offset,buffer.length,generation,Core::Memory::DirectMapGeneration());
+      }
+      bool CpuReady(const DirectRootRead::Request& request) const {return predicate(request.address,request.bytes);}
+      bool CallbacksReady() {return owner.SignalSourceBlock({span.physical,span.bytes})==UINT32_MAX;}
+      DirectRootRead::Reject WritersReady() {
+        owner.PruneGuestWriters();
+        for(const auto& writer:owner.guest_writers) {
+          if(writer.unknown)return DirectRootRead::Reject::GpuUnknown;
+          // Older commands on this queue are ordered; metadata alone does not
+          // establish an intra-pass stage barrier for this command's writers.
+          if(writer.submission>=owner.submission_id)for(const auto& range:writer.physical)
+            if(NativeIndirect::Overlap(range,{span.physical,span.bytes}))
+              return DirectRootRead::Reject::GpuCurrentCommand;
+        }
+        return DirectRootRead::Reject::None;
+      }
+      bool PublishRead(const DirectRootRead::Request& request) {
+        if(!owner.IndirectReadAvailable())return false;
+        owner.TrackIndirectRead(request.address,request.bytes,buffer,offset);return true;
+      }
+    };
+    Guards guard{*this,vertex,pixel,draw_map,generation,ordinary,CurrentCpuReadReady()};
+    const auto result=DirectRootRead::Protect(request,guard);
+    ++direct_vertex_root_rejects[unsigned(result)];
+    if(result==DirectRootRead::Reject::None)addresses.roots[0]=request.encoded;
+    ++direct_vertex_root_draws;
+    if(result==DirectRootRead::Reject::None)++direct_vertex_root_hits;
+    else ++direct_vertex_root_fallbacks;
+    return addresses;
+  }
   void PruneIndirectReads() {
     std::erase_if(indirect_reads,[](const IndirectRead& read) {
       return read.completed->load(std::memory_order_acquire);
@@ -1748,6 +1923,7 @@ struct MetalRenderer::Impl {
       StutterTrace::Scope timing("command_buffer_create",frame_count,last_vs,last_ps,1);
       cmd = [queue commandBuffer];
       if(command_timeline)command_created=StutterTrace::Now();
+      if(stage_counter_log)stage_counter_clock=stage_counter_log->Clock();
     }
   }
 
@@ -1758,6 +1934,10 @@ struct MetalRenderer::Impl {
       [enc endEncoding];
       timing.End();
       enc = nil;
+      if(stage_counter_pass) {
+        stage_counter_passes.push_back(std::move(*stage_counter_pass));
+        stage_counter_pass.reset();
+      }
       if (dump_passes && trace && dump_frames) {
         DumpPass();
       }
@@ -1963,6 +2143,17 @@ struct MetalRenderer::Impl {
       [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
         log->Complete(submission,scheduled->load(std::memory_order_acquire),completed.GPUStartTime,
             completed.GPUEndTime,StutterTrace::Now(),long(completed.status),long(completed.error.code));
+      }];
+    }
+    if(stage_counter_log && !stage_counter_passes.empty()) {
+      const auto log=stage_counter_log;
+      const auto begin=stage_counter_clock;
+      const auto stage_submission=submission_id;
+      const auto passes=std::make_shared<const std::vector<StageCounterTimeline::Pass>>(std::move(stage_counter_passes));
+      stage_counter_passes.clear();
+      [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        const auto end=log->Clock();
+        log->Complete(stage_submission,long(completed.status),long(completed.error.code),begin,end,passes);
       }];
     }
     [cmd commit];
@@ -2346,7 +2537,7 @@ struct MetalRenderer::Impl {
     if(!readonly_guest_memory_enabled || options.tess_stage!=Shader::TessStage::None ||
         options.native_tess_layout || options.rect_list ||
         options.points || options.debug_capture || options.probe_pc!=~0u ||
-        options.static_smrd || options.direct_smrd || options.simd_smrd)return false;
+        options.direct_vertex_root || options.static_smrd || options.direct_smrd || options.simd_smrd)return false;
     // ShaderEntry retains every decoded version for the renderer lifetime.
     // Cache by that stable object, including its stage/fetch/SGPR context.
     auto [entry,inserted]=readonly_guest_programs.try_emplace(&program,false);
@@ -3384,9 +3575,24 @@ struct MetalRenderer::Impl {
     pass_height = h;
     rp.renderTargetWidth = w;
     rp.renderTargetHeight = h;
+    if(stage_counter_log) {
+      StageCounterTimeline::Pass metadata;
+      metadata.frame=frame_count;metadata.width=w;metadata.height=h;
+      metadata.depth=depth ? depth->addr : 0;
+      metadata.depth_format=depth ? depth->tex.pixelFormat : MTLPixelFormatInvalid;
+      for(u32 k=0;k<8;++k)if(colors[k]) {
+        ++metadata.colors;metadata.formats[k]=colors[k]->tex.pixelFormat;
+        if(!k)metadata.color0=colors[k]->addr;
+      }
+      stage_counter_pass=stage_counter_log->Attach(rp,std::move(metadata));
+    }
     {
       StutterTrace::Scope encoder_timing("render_encoder_create",frame_count,last_vs,last_ps,1);
       enc = [cmd renderCommandEncoderWithDescriptor:rp];
+      if(!enc && stage_counter_pass) {
+        stage_counter_log->Cancel(rp,*stage_counter_pass);stage_counter_pass.reset();
+        enc = [cmd renderCommandEncoderWithDescriptor:rp];
+      }
     }
     binding_cache.Reset(enc && cmd.retainedReferences);
     pass = ps;
@@ -4063,7 +4269,7 @@ struct MetalRenderer::Impl {
 
 bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 address,const CpuReadReady& ready) {
   // Address extraction retains its conservative drained-path admission.
-  if(!native_indirect_enabled || direct_smrd_enabled ||
+  if(!native_indirect_enabled ||
       dc.indexed || !IndirectReadAvailable() ||
       r[Reg::DB_RENDER_CONTROL] || Bits(r[Reg::CB_COLOR_CONTROL],4,3)!=1) return false;
   switch(r.Primitive()) {
@@ -4117,10 +4323,11 @@ bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 a
   const u64 pixel_address=r.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS);
   auto* pixel=pixel_address ? NativeProgram(Stage::Fragment,pixel_address,pud,
       Bits(r[Reg::SPI_SHADER_PGM_RSRC2_PS],1,5),0,0,ready) : nullptr;
-  // Static packing changes setup only for these exact retail layouts. Keep
-  // those indirect draws on the drained path; all other PS programs execute
-  // the identical preparation path with this flag on or off.
-  if(static_smrd_enabled && pixel && !StaticSmrd::Layout(pixel->hash).empty())return false;
+  // Scalar-root specializations change setup only for these exact layouts.
+  // Keep their indirect draws conservative; unrelated PS programs use the
+  // identical preparation with either option on or off.
+  if((static_smrd_enabled || direct_smrd_enabled) && pixel &&
+      !StaticSmrd::Layout(pixel->hash).empty())return false;
   unsigned target_count=0;
   for(u32 k=0;k<8;++k) if(((r[Reg::CB_TARGET_MASK]>>(4*k))&15) &&
       ((r[Reg::SPI_SHADER_COL_FORMAT]>>(4*k))&15)) ++target_count;
@@ -4619,9 +4826,18 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       if(NativeVertexFetch::IsExtended(vs->hash)) ++native_vertex_fetch_extended_draws;
     }
   }
+  if(direct_vertex_root_enabled && native_indirect_enabled && native_texture_coherence &&
+      gpu_written_texture_snapshot && vo.tess_stage==Shader::TessStage::None &&
+      !vo.native_tess_layout && !rect && !vo.points && !debug_vsout && !probe_buf &&
+      NativeVertexFetch::Layout(vs->hash)) {
+    auto [entry,inserted]=native_vertex_fetch_programs.try_emplace(vs->hash,false);
+    if(inserted)entry->second=Shader::VertexNativeFetchEligible(*vs);
+    vo.direct_vertex_root=entry->second;
+  }
   vo.readonly_guest_memory=ReadOnlyGuestMemory(*vs,vo);
   if(vo.readonly_guest_memory)++readonly_guest_vs_bindings;
   u64 vs_key = Hash(vs->hash);
+  if(vo.direct_vertex_root)vs_key=Hash(0x5653524f4f543031ull,vs_key); // distinct VS root-address ABI
   if(vo.readonly_guest_memory)vs_key=Hash(0x524f475545535431ull,vs_key);
   if(vo.native_vertex_fetch) vs_key=Hash(NativeVertexFetch::CacheTag,vs_key);
   vs_key = Hash(vo.tess_stage, vs_key);
@@ -4970,15 +5186,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   StutterTrace::Scope binding_timing("draw_bind_resources",frame_count,vs_addr,ps_addr,1);
   UpdateMemMap();
   id<MTLBuffer> draw_map=mem_map;
-  StaticSmrd::AddressBlock direct_addresses;
-  if(fo.direct_smrd && draw_map.length>=sizeof(Shader::GpuMemMap)) {
-    const auto* header=static_cast<const Shader::GpuMemMap*>(draw_map.contents);
-    const auto* pages=reinterpret_cast<const std::int32_t*>(header+1);
-    const auto count=(draw_map.length-sizeof(*header))/sizeof(*pages);
-    direct_addresses=StaticSmrd::TranslateRoots(ps->hash,std::span<const u32,16>(pud),*header,{pages,count});
-    ++direct_smrd_draws;direct_smrd_roots+=direct_addresses.ValidRoots();
-    direct_smrd_fallbacks+=2-direct_addresses.ValidRoots();
-  }
+  const u64 draw_map_generation=mem_map_gen;
   [enc setVertexBytes:vud length:64 atIndex:Shader::Binding::UserData];
   if(binding_cache.Buffer(false,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
     [enc setVertexBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
@@ -5009,8 +5217,6 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     [enc setFragmentBytes:pud length:64 atIndex:Shader::Binding::UserData];
     if(fo.static_smrd) [enc setFragmentBytes:static_smrd_packed.words.data()
         length:static_smrd_packed.count*sizeof(u32) atIndex:Shader::Binding::StaticSmrd];
-    if(fo.direct_smrd) [enc setFragmentBytes:&direct_addresses length:sizeof(direct_addresses)
-        atIndex:Shader::Binding::StaticSmrd];
     if(binding_cache.Buffer(true,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
       [enc setFragmentBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
     if(binding_cache.Buffer(true,Shader::Binding::Mem1,(__bridge const void*)mem[1]))
@@ -5076,8 +5282,36 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   // reuse that now-stale copy. Read-only passes leave the revision untouched.
   if (depth && (db_control & 6u) == 6u) ++depth->depth_revision;
 
+  // Address proof and read ticket belong to the ACTUAL consumer command,
+  // after all setup/index uploads. No guest descriptor/payload bytes are read.
+  const auto prepare_vertex_root=[&] {
+    if(!vo.direct_vertex_root)return;
+    const bool ordinary=!tessellated && !rect && !vo.points && !vo.debug_capture && !probe_buf;
+    const auto roots=GuardedVertexRoot(*vs,ps,std::span<const u32,16>(vud),draw_map,
+        draw_map_generation,ordinary);
+    [enc setVertexBytes:&roots length:sizeof(roots) atIndex:Shader::Binding::StaticSmrd];
+  };
   // ---- primitive assembly ----
+  const auto prepare_direct_smrd=[&] {
+    if(!fo.direct_smrd)return;
+    // Publish only after all setup/Upload/profiling boundaries, on the command
+    // that actually encodes this draw. Only address/map metadata is inspected.
+    const bool ordinary=!tessellated && !rect && !vo.points && !vo.debug_capture && !probe_buf;
+    const auto addresses=GuardedDirectSmrd(*vs,*ps,std::span<const u32,16>(pud),
+        draw_map,draw_map_generation,ordinary);
+    [enc setFragmentBytes:&addresses length:sizeof(addresses) atIndex:Shader::Binding::StaticSmrd];
+  };
+  const auto note_stage_draw=[&] {
+    if(stage_counter_pass) {
+      // debug_fs replaces the translated fragment function without a compiler
+      // cache key. Preserve GCN provenance and mark its encoded PS key unknown.
+      const bool ps_key_known=!(debug_fs && ps && out_type[0]==OutType::Float);
+      StageCounterTimeline::NoteDraw(*stage_counter_pass,vs_addr,ps_addr,vs->hash,ps ? ps->hash : 0,
+          {vs_key,ps_key_known ? ps_key : 0,pkey,true,ps_key_known,true});
+    }
+  };
   if (tessellated) {
+    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc setTessellationFactorBuffer:tess.factors offset:tess.factor_offset instanceStride:0];
     [enc drawPatches:1 patchStart:0 patchCount:dc.count patchIndexBuffer:nil
@@ -5115,6 +5349,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       return;
     }
     {
+      prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
       StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
       [enc drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0
@@ -5129,6 +5364,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
 
   if (!dc.indexed && !to_list) {
+    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     if(indirect) {
       [enc drawPrimitives:mprim indirectBuffer:indirect indirectBufferOffset:0];
@@ -5142,6 +5378,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
   if (!dc.indexed && prim == PrimType::QuadList) {
     const u32 quads = std::min<u32>(dc.count / 4, 0x10000);
+    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                     indexCount:quads * 6
@@ -5163,6 +5400,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     u64 ioff = 0;
     if ((src % dc.index_size) == 0 &&
         Locate(src, u64(dc.count) * dc.index_size, &ibuf, &ioff)) {
+      prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
       StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
       [enc drawIndexedPrimitives:mprim
                       indexCount:dc.count
@@ -5219,6 +5457,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     return;
   }
   auto [buf, off] = Upload(idx.data(), idx.size() * 4);
+  prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
   StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
   [enc drawIndexedPrimitives:mprim
                   indexCount:idx.size()
@@ -5780,8 +6019,23 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_worklist_refined,native_worklist_fallbacks,native_worklist_fallback_reason[0],
           native_worklist_fallback_reason[1],native_worklist_fallback_reason[2],native_worklist_fallback_reason[3],
           native_worklist_fallback_reason[4],native_worklist_fallback_reason[5],native_worklist_fallback_reason[6]);
+      if(direct_vertex_root_enabled) DC_INFO("gpu direct VS root: %llu draws, %llu proved roots, %llu sentinel roots; address metadata only (cumulative)",
+          direct_vertex_root_draws,direct_vertex_root_hits,direct_vertex_root_fallbacks);
+      if(direct_vertex_root_enabled)for(unsigned reason=1;reason<direct_vertex_root_rejects.size();++reason)
+        if(direct_vertex_root_rejects[reason])DC_INFO("gpu direct VS root sentinel: %s=%llu (cumulative)",
+            DirectRootRead::Names[reason],direct_vertex_root_rejects[reason]);
       if(direct_smrd_enabled) DC_INFO("gpu direct SMRD: %llu draws, %llu translated roots, %llu fallback roots (cumulative)",
           direct_smrd_draws,direct_smrd_roots,direct_smrd_fallbacks);
+      if(direct_smrd_enabled) {
+        DC_INFO("gpu direct SMRD proof: admitted=%llu untranslated=%llu layout=%llu context=%llu stage-writes=%llu missing-guard=%llu generation=%llu mapping=%llu physical-key=%llu cp-pending=%llu callback=%llu unknown-gpu=%llu current-command-gpu=%llu lease=%llu (cumulative)",
+            direct_smrd_root_results[0],direct_smrd_root_results[1],direct_smrd_root_results[2],direct_smrd_root_results[3],
+            direct_smrd_root_results[4],direct_smrd_root_results[5],direct_smrd_root_results[6],direct_smrd_root_results[7],
+            direct_smrd_root_results[8],direct_smrd_root_results[9],direct_smrd_root_results[10],direct_smrd_root_results[11],
+            direct_smrd_root_results[12],direct_smrd_root_results[13]);
+        DC_INFO("gpu direct SMRD callback rejects: queued-unknown=%llu active-unknown=%llu queued-overlap=%llu active-overlap=%llu queued-remap=%llu active-remap=%llu (cumulative)",
+            direct_smrd_callback_rejects[3],direct_smrd_callback_rejects[4],direct_smrd_callback_rejects[9],
+            direct_smrd_callback_rejects[10],direct_smrd_callback_rejects[11],direct_smrd_callback_rejects[12]);
+      }
       if(binding_cache.enabled) DC_INFO("gpu binding cache: buffers %llu/%llu, textures %llu/%llu, samplers %llu/%llu APIs skipped/intended (cumulative)",
           binding_cache.buffer_counts.skipped,binding_cache.buffer_counts.intended,
           binding_cache.texture_counts.skipped,binding_cache.texture_counts.intended,

@@ -6,6 +6,9 @@
 #include "gpu/shader/msl.h"
 #include "gpu/shader/msl_prelude.h"
 #include "gpu/metal/native_vertex_fetch.h"
+#include "gpu/metal/direct_root_span.h"
+#include "gpu/metal/direct_root_read.h"
+#include "gpu/metal/static_smrd.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -158,16 +161,18 @@ id<MTLComputePipelineState> Pipeline(id<MTLDevice> device,id<MTLLibrary> library
     NSError* error=nil;auto result=[device newComputePipelineStateWithFunction:[library newFunctionWithName:name] error:&error];
     Require(result!=nil,std::string("Native vertex pipeline: ")+(error ? error.localizedDescription.UTF8String : "unknown"));return result;
 }
-std::string VertexCompute(const Shader::Program& p,bool native,bool readonly=false) {
-    Shader::MslOptions options;options.native_vertex_fetch=native;options.readonly_guest_memory=readonly;
+std::string VertexCompute(const Shader::Program& p,bool native,bool readonly=false,bool direct_root=false) {
+    Shader::MslOptions options;options.native_vertex_fetch=native;options.readonly_guest_memory=readonly;options.direct_vertex_root=direct_root;
     std::vector<std::string> unsupported;
     auto source=Shader::GenerateMsl(p,options,&unsupported);Require(unsupported.empty(),"Captured VS unsupported");
     const auto entry=source.find("\nvertex VsOut main0(");Require(entry!=std::string::npos,"Captured VS entry missing");
     source.resize(entry);
     const std::string pointer=readonly ? "device const uint*" : "device uint*";
-    source+="\nkernel void main0(constant uint* ud [[buffer(0)]],"+pointer+" gm0 [[buffer(1)]],"+pointer+" gm1 [[buffer(2)]],"
-        "device const DcMap& map [[buffer(3)]],constant uint2* ids [[buffer(4)]],device uint4* result [[buffer(5)]],"
-        "uint tid [[thread_position_in_grid]]) { DcMem mem={gm0,gm1,&map}; VsOut o=dc_run(ids[tid].x,ids[tid].y,ud,mem);";
+    source+=std::string("\nkernel void main0(constant uint* ud [[buffer(0)]],")+pointer+" gm0 [[buffer(1)]],"+pointer+" gm1 [[buffer(2)]],"
+        "device const DcMap& map [[buffer(3)]],constant uint2* ids [[buffer(4)]],device uint4* result [[buffer(5)]],"+
+        (direct_root ? "constant ulong* dc_vs_roots [[buffer(13)]]," : "")+
+        "uint tid [[thread_position_in_grid]]) { DcMem mem={gm0,gm1,&map}; VsOut o=dc_run(ids[tid].x,ids[tid].y,ud,mem"+
+        (direct_root ? ",dc_vs_roots" : "")+");";
     const u32 vectors=1+std::popcount(p.param_mask);
     source+=" uint base=tid*"+std::to_string(vectors)+"u;result[base]=as_type<uint4>(o.pos);";
     u32 at=1;for(u32 k=0;k<32;++k) if(p.param_mask&(1u<<k))
@@ -274,6 +279,7 @@ kernel void writer(constant Mutation& p [[buffer(0)]],device uint* lo [[buffer(1
         dc_st(mem,(p.table&~3ul)+ulong(tid*16u),uint(p.base+ulong(offsets[tid])));
     }
     if(p.kind==2u && tid==0u) dc_st(mem,(p.table&~3ul)+60ul,0x20050fadu);
+    if(p.kind==3u && tid==0u) dc_st(mem,(p.table&~3ul)+8ul,3u);
 }
 )MSL";
 }
@@ -293,12 +299,13 @@ public:
     std::array<id<MTLComputePipelineState>,2> vertex{};
     const Shader::Program& program;
     u32 vectors;
-    Harness(id<MTLDevice> d,const Shader::Program& p,bool readonly=false,bool readonly_native=false):device(d),program(p),vectors(1+std::popcount(p.param_mask)) {
+    bool direct_root=false;
+    Harness(id<MTLDevice> d,const Shader::Program& p,bool readonly=false,bool readonly_native=false,bool root=false,bool root_native=false):device(d),program(p),vectors(1+std::popcount(p.param_mask)),direct_root(root) {
         queue=[device newCommandQueue];auto library=Compile(device,RawSource());
         raw=Pipeline(device,library,@"raw");writer=Pipeline(device,library,@"writer");
         if(readonly) Require(Shader::GuestMemoryReadOnlyEligible(p),"Full vertex readonly proof failed");
         for(u32 enabled=0;enabled<2;++enabled) {
-            auto compiled=Compile(device,VertexCompute(p,readonly ? readonly_native : enabled,readonly && enabled));
+            auto compiled=Compile(device,VertexCompute(p,root ? root_native : readonly ? readonly_native : enabled,readonly && enabled,root && enabled));
             if(!readonly) {vertex[enabled]=Pipeline(device,compiled,@"main0");continue;}
             auto descriptor=[MTLComputePipelineDescriptor new];descriptor.computeFunction=[compiled newFunctionWithName:@"main0"];
             NSError* error=nil;MTLComputePipelineReflection* reflection=nil;
@@ -318,7 +325,7 @@ public:
         [encoder setBuffer:guest.memory offset:(split<MemoryBytes ? split : 0) atIndex:2];
         [encoder setBuffer:guest.map offset:0 atIndex:3];
     }
-    Result Run(Guest& guest,const RawInput& input,bool expected,const Mutation* mutation=nullptr,bool write_mask=false) {
+    Result Run(Guest& guest,const RawInput& input,bool expected,const Mutation* mutation=nullptr,bool write_mask=false,bool force_sentinel=false) {
         guest.UploadMap();
         auto raw_result=[device newBufferWithLength:RawWords*2*4 options:MTLResourceStorageModeShared];
         const u64 bytes=u64(Vertices)*vectors*16;
@@ -338,6 +345,15 @@ public:
         for(u32 enabled=0;enabled<2;++enabled) {
             enc=[command computeCommandEncoder];[enc setComputePipelineState:vertex[enabled]];Bind(enc,guest);
             [enc setBytes:guest.ud.data() length:64 atIndex:0];
+            if(direct_root && enabled) {
+                Gpu::Metal::StaticSmrd::AddressBlock roots;
+                Gpu::Metal::DirectRootSpan::Span span;
+                const auto bytes=u64(Native::Layout(program.hash)->attributes)*16;
+                if(!force_sentinel && Gpu::Metal::DirectRootSpan::TranslateSpan(
+                    Gpu::Metal::DirectRootSpan::SmrdRoot(guest.ud[2],guest.ud[3]),bytes,
+                    guest.mapping.header,guest.mapping.pages,span))roots.roots[0]=span.encoded;
+                [enc setBytes:&roots length:sizeof(roots) atIndex:13];
+            }
             [enc setBytes:ids.data() length:sizeof(ids) atIndex:4];[enc setBuffer:vertices offset:enabled*bytes atIndex:5];
             [enc dispatchThreads:MTLSizeMake(Vertices,1,1) threadsPerThreadgroup:MTLSizeMake(16,1,1)];[enc endEncoding];
         }
@@ -359,9 +375,9 @@ public:
         return result;
     }
 };
-void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic,bool readonly=false,bool readonly_native=false) {
-    const auto* layout=Native::Layout(program.hash);Harness harness(device,program,readonly,readonly_native);Guest guest(device);
-    u32 cases=0,fast=0,fallback=0;bool record_writer=false,table_writer=false,format_writer=false;
+void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic,bool readonly=false,bool readonly_native=false,bool direct_root=false,bool root_native=false) {
+    const auto* layout=Native::Layout(program.hash);Harness harness(device,program,readonly,readonly_native,direct_root,root_native);Guest guest(device);
+    u32 cases=0,fast=0,fallback=0;bool record_writer=false,table_writer=false,format_writer=false,count_writer=false;
     const auto check=[&](const RawInput& input,bool expected,const Mutation* mutation=nullptr) {
         const auto result=harness.Run(guest,input,expected,mutation,synthetic);
         ++cases;fast+=result.hit;fallback+=!result.hit;return result;
@@ -393,6 +409,11 @@ void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic
         mutation.kind=2;
         const auto after_format=check(input,false,&mutation);
         format_writer|=after_table.raw!=after_format.raw;
+        if(direct_root) {
+            mutation.kind=3;
+            const auto after_count=check(input,false,&mutation);
+            count_writer|=after_format.raw!=after_count.raw && after_format.vertex!=after_count.vertex;
+        }
     }
     for(u32 attribute=0;attribute<layout->attributes;++attribute) for(u32 kind=0;kind<5;++kind) {
         guest.Reset();prepare(Table,Records);
@@ -429,6 +450,18 @@ void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic
         if(kind==9) guest.mapping.header.split=Records;
         prepare(table,records);check({table,vertex,layout->stride},expected);
     }
+    if(direct_root)for(unsigned kind=0;kind<6;++kind) {
+        guest.Reset();u64 table=Table;bool expected=true;
+        switch(kind) {
+        case 0:guest.mapping.pages[Table/PageBytes]=-s32(Table/PageBytes);break; // descriptor physical zero
+        case 1:guest.mapping.header.split=Table/2;break; // descriptor in second physical buffer
+        case 2:table=0x13fe0;break; // complete table crosses page
+        case 3:table=0x13fe0;guest.mapping.pages[5]=Shader::GpuMemMap::kUnmapped;expected=false;break;
+        case 4:table=0x13fe0;guest.mapping.pages[5]=1;break; // discontiguous mapped descriptors: sentinel
+        case 5:table=0x13fe0;guest.mapping.header.split=0x14000;break; // split-crossing root: sentinel
+        }
+        prepare(table,Records);check({table,3,layout->stride},expected);
+    }
     // Unknown descriptor flags and every byte-level UNORM/signed boundary are
     // tested independently of renderer captures. The flag mutation must fail
     // closed even though the original general decoder ignores those bits.
@@ -436,13 +469,147 @@ void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic
     descriptor[1]|=0x1000;guest.Put(Table,descriptor);check({Table,3,layout->stride},false);
     guest.Reset();prepare(Table,Records);
     for(u32 vertex:{0u,1u,7u,31u,63u,95u,127u}) check({Table,vertex,layout->stride},true);
-    Require(record_writer && table_writer && format_writer,"Ordered GPU record/table/format writes were not observed");
+    Require(record_writer && table_writer && format_writer && (!direct_root || count_writer),"Ordered GPU record/table/format/count writes were not observed");
     Require(fast>=20 && fallback>=30,"Native vertex fixtures did not exercise both guarded paths");
+    if(direct_root) {
+        guest.Reset();prepare(Table,Records);
+        const auto reference=harness.Run(guest,{Table,3,layout->stride},true,nullptr,synthetic);
+        const auto sentinel=harness.Run(guest,{Table,3,layout->stride},true,nullptr,synthetic,true);
+        Equal(reference.raw,sentinel.raw,"Valid-map forced virtual descriptor fallback",false);
+        Equal(reference.vertex,sentinel.vertex,"Original full VS forced virtual fallback",true);
+        puts("VS address-only root: original outputs, queued payload/base/format/OOB writes and valid-map sentinel fallback covered");
+    }
     std::printf("Vertex %016llx %s GPU differential passed (%u cases, %u fast, %u fallback; ordered writers observed).\n",
         (unsigned long long)program.hash,synthetic ? "synthetic write-mask/raw" : "original full-output/raw",cases,fast,fallback);
     if(readonly)std::puts(readonly_native ?
         "Readonly native-fetch/full-VS raw outputs, queued record/descriptor/format writers and actual RW/RO reflection passed." :
         "Readonly original inline-fetch/full-VS raw outputs, queued record/descriptor/format writers and actual RW/RO reflection passed.");
+}
+void DirectRootProof(const Shader::Program& program) {
+    Shader::MslOptions off,on,fused;on.direct_vertex_root=true;fused=on;fused.native_vertex_fetch=true;
+    std::vector<std::string> unsupported;
+    const auto baseline=Shader::GenerateMsl(program,off,&unsupported);
+    Require(unsupported.empty(),"VS root baseline unsupported");
+    const auto direct=Shader::GenerateMsl(program,on,&unsupported);
+    Require(unsupported.empty(),"VS root variant unsupported");
+    const auto attributes=Native::Layout(program.hash)->attributes;
+    Require(Count(direct,"ulong root_ = dc_vs_roots[0u]")==attributes &&
+        Count(direct,"constant ulong* dc_vs_roots [[buffer(13)]]")==1 &&
+        Count(direct,"else p_ = dc_ptr_n(mem,")==attributes,"VS descriptor sites/sentinel fallback differ");
+    Require(direct.find("device uint* gm0 [[buffer(1)]]")!=std::string::npos &&
+        direct.find("device uint* gm1 [[buffer(2)]]")!=std::string::npos,"VS root changed guest pointer qualification");
+    Require(Count(Shader::GenerateMsl(program,fused,&unsupported),"if (dc_native_vertex_fetch(")==1 &&
+        unsupported.empty(),"VS address root did not compose with native typed fetch");
+    on.readonly_guest_memory=true;
+    Require(Shader::GenerateMsl(program,on,&unsupported).find("device uint* gm0 [[buffer(1)]]")!=std::string::npos,
+        "VS root accidentally promised readonly/noalias guest inputs");
+    for(unsigned kind=0;kind<5;++kind) {
+        auto options=on;
+        if(kind==0)options.rect_list=true;
+        if(kind==1)options.points=true;
+        if(kind==2)options.debug_capture=true;
+        if(kind==3)options.probe_pc=4;
+        if(kind==4)options.tess_stage=Shader::TessStage::Domain;
+        Require(Shader::GenerateMsl(program,options,&unsupported).find("dc_vs_roots")==std::string::npos,
+            "Unsupported VS wrapper admitted address root");
+    }
+    auto changed=program;changed.code[1].smrd_offset+=1;
+    Require(Shader::GenerateMsl(changed,on,&unsupported).find("dc_vs_roots")==std::string::npos,
+        "Changed original descriptor PC/opcode/offset shape admitted");
+    Require(baseline==Shader::GenerateMsl(program,off,&unsupported),"VS root OFF changed source");
+}
+void DirectRootProtectionProof() {
+    namespace R=Gpu::Metal::DirectRootRead;
+    namespace S=Gpu::Metal::DirectRootSpan;
+    struct Guards {
+        Shader::GpuMemMap map{0,32,0x40000,14,0,0x80000};
+        std::array<s32,32> entries{};S::Span span;
+        bool context=true,read_only=true,predicate=true,cpu=true,callback=true,lease=true,physical=true;
+        u64 generation=7,current_generation=7,command=10,writer_command=9;
+        bool writer_unknown=false,writer_overlap=false;
+        unsigned publications=0,generation_checks=0,change_generation_at=0;
+        u64 observed_address=0,observed_bytes=0;
+        bool Context()const{return context;}
+        bool StagesReadOnly()const{return read_only;}
+        bool HasCpuPredicate()const{return predicate;}
+        bool GenerationStable(){if(++generation_checks==change_generation_at)++current_generation;return generation==current_generation;}
+        bool Mapping(const R::Request& request){return S::TranslateSpan(request.address,request.bytes,map,entries,span);}
+        bool PhysicalMatch(const R::Request& request)const {
+            return physical && S::MatchBacking(span,request.encoded,span.selector,span.offset,0x40000,generation,current_generation);
+        }
+        bool CpuReady(const R::Request& request){observed_address=request.address;observed_bytes=request.bytes;return cpu;}
+        bool CallbacksReady()const{return callback;}
+        R::Reject WritersReady()const {
+            if(writer_unknown)return R::Reject::GpuUnknown;
+            if(writer_overlap && writer_command>=command)return R::Reject::GpuCurrentCommand;
+            return R::Reject::None;
+        }
+        bool PublishRead(const R::Request&){if(!lease)return false;++publications;return true;}
+    };
+    for(const u64 bytes:{u64(80),u64(96)}) {
+        Guards guard;S::Span span;
+        Require(S::TranslateSpan(Table,bytes,guard.map,guard.entries,span),"VS request translation failed");
+        const R::Request request{Table,bytes,span.encoded};
+        Require(R::Protect(request,guard)==R::Reject::None && guard.publications==1 &&
+            guard.observed_address==Table && guard.observed_bytes==bytes,"VS exact root lease not published");
+        for(unsigned kind=0;kind<14;++kind) {
+            guard={};auto changed=request;auto expected=R::Reject::None;
+            switch(kind) {
+            case 0:changed.encoded=S::Fallback;expected=R::Reject::Untranslated;break;
+            case 1:changed.bytes=0;expected=R::Reject::Layout;break;
+            case 2:guard.context=false;expected=R::Reject::Context;break;
+            case 3:guard.read_only=false;expected=R::Reject::StageWrites;break;
+            case 4:guard.predicate=false;expected=R::Reject::MissingGuard;break;
+            case 5:++guard.current_generation;expected=R::Reject::MapGeneration;break;
+            case 6:guard.entries[Table/PageBytes]=Shader::GpuMemMap::kUnmapped;expected=R::Reject::Mapping;break;
+            case 7:changed.encoded^=2;expected=R::Reject::PhysicalMismatch;break;
+            case 8:guard.physical=false;expected=R::Reject::PhysicalMismatch;break;
+            case 9:guard.cpu=false;expected=R::Reject::CpuPending;break;
+            case 10:guard.callback=false;expected=R::Reject::Callback;break;
+            case 11:guard.writer_unknown=true;expected=R::Reject::GpuUnknown;break;
+            case 12:guard.writer_overlap=true;guard.writer_command=guard.command;expected=R::Reject::GpuCurrentCommand;break;
+            case 13:guard.lease=false;expected=R::Reject::Lease;break;
+            }
+            Require(R::Protect(changed,guard)==expected && !guard.publications,"Rejected VS request published a lease");
+        }
+        for(unsigned phase:{2u,3u}) {
+            guard={};guard.change_generation_at=phase;
+            Require(R::Protect(request,guard)==R::Reject::MapGeneration && !guard.publications,"Late VS generation change admitted");
+        }
+        guard={};guard.writer_overlap=true; // known producer on prior queue command
+        Require(R::Protect(request,guard)==R::Reject::None,"Ordered prior-command descriptor producer rejected");
+    }
+}
+void DirectRootMapProof() {
+    namespace R=Gpu::Metal::DirectRootSpan;
+    Shader::GpuMemMap map{};map.shift=14;map.pages=8;map.limit=8*PageBytes;map.split=4*PageBytes;
+    std::array<s32,8> pages{};R::Span span;
+    Require(R::SmrdRoot(3,0xabcd0000u)==0,"SMRD48-bit/dword semantics changed");
+    Require(R::TranslateSpan(PageBytes,96,map,pages,span) && span.physical==PageBytes && span.selector==0,
+        "Complete root span failed");
+    Require(R::MatchBacking(span,span.encoded,0,PageBytes,map.split,7,7),"Backing proof failed");
+    Require(!R::MatchBacking(span,span.encoded^2,0,PageBytes,map.split,7,7) &&
+        !R::MatchBacking(span,span.encoded,1,PageBytes,map.split,7,7) &&
+        !R::MatchBacking(span,span.encoded,0,PageBytes,map.split,7,8) &&
+        !R::MatchBacking(span,span.encoded,0,PageBytes,PageBytes+95,7,7),"Invalid backing/generation accepted");
+    pages[1]=-1;Require(R::TranslateSpan(PageBytes,80,map,pages,span) && !span.physical && !span.encoded,
+        "Physical page zero rejected");
+    pages[1]=-2;Require(!R::TranslateSpan(PageBytes,80,map,pages,span),"Negative physical underflow accepted");
+    pages[1]=4;Require(R::TranslateSpan(PageBytes,80,map,pages,span) && span.selector==1 && span.offset==PageBytes,
+        "Second pool buffer failed");pages[1]=0;
+    Require(R::TranslateSpan(PageBytes-32,96,map,pages,span),"Contiguous crossed page rejected");
+    pages[1]=Shader::GpuMemMap::kUnmapped;
+    Require(!R::TranslateSpan(PageBytes-32,96,map,pages,span),"Mapped endpoints/gap accepted");pages[1]=0;
+    pages[2]=Shader::GpuMemMap::kUnmapped;
+    Require(!R::TranslateSpan(PageBytes-8,2*PageBytes+16,map,pages,span),"Middle map hole accepted");pages[2]=0;
+    Require(!R::TranslateSpan(map.split-32,96,map,pages,span),"Split-crossing root accepted");
+    for(const auto bytes:std::array<u64,3>{0,3,R::MaximumBytes+4})Require(!R::TranslateSpan(0,bytes,map,pages,span),"Invalid root byte count accepted");
+    Require(!R::TranslateSpan(R::AddressLimit-4,80,map,pages,span) &&
+        !R::TranslateSpan(1,80,map,pages,span),"Root alignment/domain overflow accepted");
+    auto invalid=map;invalid.shift=13;Require(!R::TranslateSpan(PageBytes,80,invalid,pages,span),"Invalid map shift accepted");
+    invalid=map;invalid.pages=9;Require(!R::TranslateSpan(PageBytes,80,invalid,pages,span),"Short page table accepted");
+    invalid=map;invalid.base=1;Require(!R::TranslateSpan(PageBytes,80,invalid,pages,span),"Unaligned map base accepted");
+    puts("VS address root: complete map/physical backing/generation/sentinel metadata contracts passed (no source bytes)");
 }
 } // namespace
 
@@ -455,6 +622,26 @@ int main(int argc,char** argv) {
                 Proof(Synthetic(hash));
             }
             Require(!Native::IsExtended(0) && !Native::Layout(0),"Unknown vertex identity admitted");
+            if(argc>=2 && (std::string(argv[1])=="--cpu-direct-root" ||
+                std::string(argv[1])=="--gpu-direct-root" || std::string(argv[1])=="--gpu-direct-root-native" ||
+                std::string(argv[1])=="--gpu-direct-root-captures" || std::string(argv[1])=="--gpu-direct-root-native-captures")) {
+                DirectRootMapProof();DirectRootProtectionProof();
+                for(const auto hash:Native::Hashes)DirectRootProof(Synthetic(hash));
+                if(std::string(argv[1])=="--cpu-direct-root"){Require(argc==2,"Unexpected CPU root args");return 0;}
+                const bool native=std::string(argv[1]).find("native")!=std::string::npos;
+                const bool captures=std::string(argv[1]).find("captures")!=std::string::npos;
+                Require(argc==(captures ? 3 : 2),"Expected optional original capture directory only in capture modes");
+                auto device=MTLCreateSystemDefaultDevice();if(!device)return 77;
+                if(argc==2)for(const auto hash:Native::Hashes)GpuCases(device,Synthetic(hash),true,false,false,true,native);
+                else {
+                    Require(argc==3,"Expected original capture directory");
+                    for(const auto hash:Native::Hashes) {
+                        const auto program=Capture(argv[2],hash);DirectRootProof(*program);
+                        GpuCases(device,*program,false,false,false,true,native);
+                    }
+                }
+                return 0;
+            }
             if(argc==2 && (std::string(argv[1])=="--gpu-readonly" || std::string(argv[1])=="--gpu-readonly-native")) {
                 auto device=MTLCreateSystemDefaultDevice();if(!device)return 77;
                 for(const auto hash:{Native::Hash32,Native::Hash36})GpuCases(device,Synthetic(hash),true,true,std::string(argv[1])=="--gpu-readonly-native");

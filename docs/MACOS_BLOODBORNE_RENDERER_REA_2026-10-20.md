@@ -73,8 +73,13 @@ are documented in
   still require full checking. Allocation failure returns to conservative
   history handling. The pool extent is supplied by the runtime and bounded.
 
-The new behavior remains gated by native indirect, texture coherence and
-`BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT=1`. Default flags have not been changed.
+The Bloodborne bridge now enables native indirect and GPU-source snapshots
+before constructing the renderer and installing its mapping-mutation hooks.
+Explicit environment overrides are preserved; setting both
+`BB_METAL_NATIVE_INDIRECT=0` and `BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT=0`
+restores the synchronized comparison route. Generic renderer construction
+outside the game retains its prior opt-in configuration. The page index,
+read-only specialization and static/direct/SIMD experiments remain optional.
 
 ### Intermediate diagnostic results
 
@@ -130,6 +135,20 @@ The static-packing live test records attempts but no successful owned snapshot
 packing. Its FPS must not be attributed to a shader optimization that did not
 execute. Static packing remains disabled by default.
 
+Four subsequent same-binary page-index comparisons do not show a repeatable
+gain: OFF/ON pair A measures 39.767/32.667 FPS; pair B measures 35.156/39.771.
+All four have complete presentation timestamps and zero GPU failures. The
+index consistently reduces hashing to 23.7 MiB/frame, but remains OFF. Its
+published-write proof does not replace the normal checks for unjournaled CPU
+stores. The full input-hashed comparison and counter limitations are in
+[`journal-page-index-ab-analysis.md`](../out/renderer-rea-2026-10-20/journal-page-index-ab-analysis.md).
+
+Retesting read-only VS/PS guest inputs after removing the CPU drains also
+shows no repeatable gain: enabled 36.994 and 36.029 FPS, disabled 36.853 FPS.
+These three runs use the same frozen native-1080p binary/pose on AC, with no
+missing presentation timestamps or GPU failures. Both qualified stage types
+execute, but the specialization remains OFF.
+
 ## Validation ledger
 
 The fixed baseline is built separately in an isolated worktree. Candidate
@@ -174,5 +193,38 @@ the bounded timeout; export/salvage yielded no usable GPU tables. That run's
 35 missing presentation timestamps, loading intervals and capture overhead
 exclude it from clean FPS comparisons. No GPU-stage attribution is claimed.
 
-Final performance, broad tests and original-file integrity results will be
-recorded after the remaining controlled runs complete.
+The next checkpoint passes 88 of 90 registered tests in 111.08 seconds, with
+the same two expected private-input skips and no failures. It includes the
+metadata-only bound-vertex audit and optional Metal stage-counter profiler.
+The profiler is disabled unless a CSV path is supplied. Its actual Metal
+fixtures verify sampled/unsampled pixels, bounded pool exhaustion/recovery,
+completion lifetime, clock calibration and safe output-path handling.
+
+A clean 90-second replay with the new normal Bloodborne defaults measures
+39.009 FPS at native 1920×1080, with p99 33.333 ms, maximum 33.340 ms, no
+missing presentation timestamps and no reported GPU errors. The native
+indirect and GPU-written texture options are absent from that run's environment,
+so this exercises their bridge defaults. The frozen binary SHA-256 is
+`58da868414c0e061aeaa8bc91d622d011c65007b229486e093972fe5fab612fe`.
+The original controlled result was 29.983 FPS. This is progress, not a 60-FPS
+result; current repeated controls also show meaningful run-to-run variation.
+
+Native stage sampling confirms the selected six-MRT material work has
+substantial vertex and fragment cost. In a late 50.117-second window, sampled
+material vertex/fragment intervals sum to 10.582/9.490 seconds. These intervals
+include dependencies and stalls and must not be called exclusive shader cost
+or GPU utilization. About 5.9% of selected passes exhausted the fixed sample
+pool. Whole-graph sampling exhausted about 89.7% and cannot establish the
+remaining graph's budget. All mixed material passes contain multiple shader
+identities, so their cost cannot be assigned to one shader. Instrumented FPS
+is excluded from clean comparisons. The calibrated, input-hashed analysis is
+[`stage-counter-offline-analysis.md`](../out/renderer-rea-2026-10-20/stage-counter-offline-analysis.md).
+
+The same material diagnostic records about 24.08 ms of inclusive CPU frame
+work, including 19.30 ms in draw and 14.02 ms in resource preparation. These
+scopes overlap. No late `cp_sync_renderer` event remains. This supports
+investigating both CPU resource bookkeeping and translated GPU loads rather
+than assuming the remaining limit is exclusively GPU throughput.
+
+Long gameplay, additional candidate comparisons and final original-file
+integrity results will be recorded after the remaining controlled runs complete.

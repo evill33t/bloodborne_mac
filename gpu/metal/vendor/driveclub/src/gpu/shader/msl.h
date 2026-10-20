@@ -119,6 +119,8 @@ struct MslOptions {
     // packed records remain GPU-time loads; every failed layout/map guard
     // executes the original individual typed fetches.
     bool native_vertex_fetch = false;
+    // Address metadata only at VS buffer13; values still load through gm0/gm1.
+    bool direct_vertex_root = false;
     // Opt-in immutable access qualification, not a CPU snapshot. Only supported
     // ordinary VS/PS with an independent opcode-level no-writer proof qualify.
     // The bounded decoded inline-fetch layout and independently proved native fetch are allowed;

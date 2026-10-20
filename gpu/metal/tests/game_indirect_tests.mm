@@ -1686,9 +1686,9 @@ static void GpuCases(u64 address,u64 alias) {
     assert(!renderer.DrawIndirect(draw,DrawCall{},address+32));
     assert(!renderer.DrawIndirect(depth_only,DrawCall{},address+32));
     renderer.CpuWrite(address+32,triangle,sizeof(triangle),false);
-    // Static packing does not change setup for these ordinary PS programs.
-    // GPU-time argument versions and zero-count semantics must remain native
-    // with that option enabled. Address extraction still retains fallback.
+    // Neither scalar-root specialization changes these ordinary PS programs.
+    // Both flags retain native GPU-time argument versions and zero-count
+    // semantics without any scalar-table reads or address extraction here.
     for(const bool direct:{false,true}) {
         const std::array<const char*,2> options{"BB_METAL_STATIC_SMRD","BB_METAL_DIRECT_SMRD"};
         std::array<bool,2> present{};std::array<std::string,2> saved;
@@ -1701,37 +1701,32 @@ static void GpuCases(u64 address,u64 alias) {
             Gpu::Metal::MetalRenderer optional(device);
             optional.Draw(draw,DrawCall{.count=3});pixel=Pixel(device,optional,address+16384);
             assert(pixel[2]==255 && pixel[1]==0 && pixel[0]==0);
-            if(direct) {
-                assert(!optional.DrawIndirect(draw,DrawCall{},address+32));
-                assert(optional.NativeIndirectDrawCount()==0);
-            } else {
-                auto blue_draw=draw;
-                blue_draw[Reg::SPI_SHADER_PGM_LO_PS]=u32(uintptr_t(shader+256)>>8);
-                optional.Draw(blue_draw,DrawCall{.count=0});Drain(optional);
-                const u32 stale_arguments[4]{};
-                optional.CpuWrite(address+32,stale_arguments,sizeof(stale_arguments),false);
-                auto event=[metal newSharedEvent];assert(event);
-                auto blocker=[queue commandBuffer];[blocker encodeWaitForEvent:event value:1];[blocker commit];
-                std::atomic<bool> timeout=false;
-                std::jthread watchdog([event,&timeout](std::stop_token stop) {
-                    for(unsigned k=0;k<300 && !stop.stop_requested();++k)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    if(!stop.stop_requested()){timeout=true;event.signaledValue=1;}
-                });
-                assert(optional.DmaData(0,address+32,2,3,4));
-                assert(optional.DmaData(0,address+36,2,1,4));
-                assert(optional.DrawIndirect(blue_draw,DrawCall{},address+32));
-                assert(optional.DmaData(0,address+32,2,0,4));
-                assert(optional.DrawIndirect(draw,DrawCall{},address+32));
-                assert(optional.DmaData(0,address+32,2,3,4));
-                assert(optional.DmaData(0,address+36,2,0,4));
-                assert(optional.DrawIndirect(draw,DrawCall{},address+32));
-                assert(optional.NativeIndirectDrawCount()==3);
-                assert(!std::memcmp(reinterpret_cast<const void*>(address+32),stale_arguments,sizeof(stale_arguments)));
-                event.signaledValue=1;watchdog.request_stop();watchdog.join();assert(!timeout);
-                pixel=Pixel(device,optional,address+16384);
-                assert(pixel[0]==255 && pixel[1]==0 && pixel[2]==0);
-            }
+            auto blue_draw=draw;
+            blue_draw[Reg::SPI_SHADER_PGM_LO_PS]=u32(uintptr_t(shader+256)>>8);
+            optional.Draw(blue_draw,DrawCall{.count=0});Drain(optional);
+            const u32 stale_arguments[4]{};
+            optional.CpuWrite(address+32,stale_arguments,sizeof(stale_arguments),false);
+            auto event=[metal newSharedEvent];assert(event);
+            auto blocker=[queue commandBuffer];[blocker encodeWaitForEvent:event value:1];[blocker commit];
+            std::atomic<bool> timeout=false;
+            std::jthread watchdog([event,&timeout](std::stop_token stop) {
+                for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if(!stop.stop_requested()){timeout=true;event.signaledValue=1;}
+            });
+            assert(optional.DmaData(0,address+32,2,3,4));
+            assert(optional.DmaData(0,address+36,2,1,4));
+            assert(optional.DrawIndirect(blue_draw,DrawCall{},address+32));
+            assert(optional.DmaData(0,address+32,2,0,4));
+            assert(optional.DrawIndirect(draw,DrawCall{},address+32));
+            assert(optional.DmaData(0,address+32,2,3,4));
+            assert(optional.DmaData(0,address+36,2,0,4));
+            assert(optional.DrawIndirect(draw,DrawCall{},address+32));
+            assert(optional.NativeIndirectDrawCount()==3);
+            assert(!std::memcmp(reinterpret_cast<const void*>(address+32),stale_arguments,sizeof(stale_arguments)));
+            event.signaledValue=1;watchdog.request_stop();watchdog.join();assert(!timeout);
+            pixel=Pixel(device,optional,address+16384);
+            assert(pixel[0]==255 && pixel[1]==0 && pixel[2]==0);
         }
         for(unsigned k=0;k<options.size();++k)
             if(present[k])setenv(options[k],saved[k].c_str(),1);else unsetenv(options[k]);
