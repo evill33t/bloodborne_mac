@@ -28,6 +28,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <map>
@@ -278,6 +279,13 @@ extern "C" void bbgpu_register_kernel(void) {
 }
 extern "C" int bbgpu_init(const BbGpuConfig*) {
     try {
+        // Bloodborne's verified GPU argument/texture path avoids draining
+        // unrelated CPU callbacks. Set the game defaults before creating the
+        // renderer so its admission mode and mapping-mutation hooks agree.
+        // Explicit environment overrides retain the synchronized comparison.
+        for(const char* key:{"BB_METAL_NATIVE_INDIRECT","BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT"})
+            if(!std::getenv(key) && ::setenv(key,"1",0))
+                throw std::runtime_error("Could not configure the Bloodborne Metal defaults.");
         device=std::make_unique<Gpu::Metal::Device>();
         renderer=std::make_unique<Gpu::Metal::MetalRenderer>(*device);
         renderer->SetFrameReadyCallback([](void* texture) {

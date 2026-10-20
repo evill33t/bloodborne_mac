@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "common/types.h"
+#include "gpu/metal/pipeline_recipe_identity.h"
 
 namespace Gpu::Metal {
 

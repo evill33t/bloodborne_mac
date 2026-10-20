@@ -553,13 +553,14 @@ void CommandProcessor::SetRegs(u32 index, const u32* values, u32 count) {
     std::memcpy(CurRegs().Data() + index, values, count * 4);
 }
 
-void CommandProcessor::AfterGpu(std::function<void()> fn,u64 write_address,std::size_t write_bytes) {
+void CommandProcessor::AfterGpu(std::function<void()> fn,u64 write_address,std::size_t write_bytes,bool write_only) {
     auto guarded=[gate=callback_gate,state=execution,fn=std::move(fn)] {
         std::lock_guard guard(gate->lock);
         if(gate->alive && !state->Failed()) fn();
     };
     if (renderer) {
-        if(write_bytes)renderer->SignalCpuWrite(write_address,write_bytes,std::move(guarded));
+        if(write_bytes && write_only)renderer->SignalCpuWriteOnly(write_address,write_bytes,std::move(guarded));
+        else if(write_bytes)renderer->SignalCpuWrite(write_address,write_bytes,std::move(guarded));
         else renderer->Signal(std::move(guarded));
     } else {
         guarded();
@@ -605,7 +606,10 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
         if (irq) {
             Interrupt(irq);
         }
-    },addr,bytes);
+    // Without an IRQ this closure's only guest-memory effect is the captured,
+    // identity-checked label store above. An arbitrary interrupt handler may
+    // write other memory, so irq-bearing callbacks retain the unknown effect.
+    },addr,bytes,irq==0);
 }
 
 bool CommandProcessor::PendingFence(u64 addr, u32* value) {

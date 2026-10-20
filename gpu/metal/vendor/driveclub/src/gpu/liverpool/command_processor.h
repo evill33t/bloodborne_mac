@@ -157,7 +157,7 @@ private:
     const u32* IndirectArgs(u32 offset, u32 dwords);
     bool SyncRenderer(u32 reason=0);
     // Runs `fn` once the renderer has executed everything recorded so far.
-    void AfterGpu(std::function<void()> fn,u64 write_address=0,std::size_t write_bytes=0);
+    void AfterGpu(std::function<void()> fn,u64 write_address=0,std::size_t write_bytes=0,bool write_only=false);
     // AfterGpu for a fence/label write (`data_sel` as in EVENT_WRITE_EOP),
     // remembered as pending until it lands; then `irq` if non-zero.
     void FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq);

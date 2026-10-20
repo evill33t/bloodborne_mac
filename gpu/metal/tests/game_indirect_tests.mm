@@ -4,12 +4,14 @@
 #import <Metal/Metal.h>
 #include "gpu/metal/native_indirect.h"
 #include "gpu/metal/native_worklist_extent.h"
+#include "gpu/metal/texture_write_journal.h"
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_renderer.h"
 #include "gpu/liverpool/command_processor.h"
 #include "gpu/liverpool/tiling.h"
 #include "gpu/shader/gcn.h"
 #include "gpu/shader/program.h"
+#include "hle/video_out/video_out.h"
 #include "src/runtime_gpu_memory.h"
 extern "C" {
 #include "src/runtime.h"
@@ -17,8 +19,10 @@ extern "C" {
 #include "gcn_fixtures.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -157,6 +161,7 @@ static std::array<unsigned char,4> Pixel(Gpu::Metal::Device& device,Gpu::Metal::
     std::memcpy(pixel.data(),static_cast<const unsigned char*>(readback.contents)+4*(4*8+4),4);return pixel;
 }
 static void GpuCases(u64 address,u64 alias) {
+    constexpr u32 journal_pressure=u32(Gpu::Metal::TextureWriteJournal::kMaximumRecords)+1;
     setenv("BB_METAL_NATIVE_INDIRECT","1",1);
     setenv("BB_METAL_NATIVE_WORKLIST_EXTENT","1",1);
     setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","0",1);
@@ -638,7 +643,7 @@ static void GpuCases(u64 address,u64 alias) {
     assert(renderer.TextureCoherenceWaitCount()==completed_waits);
     pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==121 && pixel[1]==0 && pixel[0]==0);
     assert(renderer.DmaData(0,large_centre,2,0xff000089u,4));Drain(renderer);
-    for(u32 k=0;k<513;++k)renderer.CpuWrite(address+72000,&k,4,false);
+    for(u32 k=0;k<journal_pressure;++k)renderer.CpuWrite(address+72000,&k,4,false);
     const auto forgotten_full=renderer.TextureCoherenceRefreshCount();
     renderer.Draw(large_sample,DrawCall{.count=3});
     assert(renderer.TextureCoherenceRefreshCount()==forgotten_full+1);
@@ -937,6 +942,393 @@ static void GpuCases(u64 address,u64 alias) {
         assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
         assert(snapshot.TextureGpuSnapshotCount()==cpu_rebuild_snapshots);
 
+        // An explicit per-call predicate must reach recording and its second
+        // source check as well as native preflight. Keep the installed guard
+        // empty so an accidental fallback cannot pass through that shortcut.
+        snapshot.SetCpuReadGuard({});
+        const auto explicit_versions=snapshot.TextureGpuSnapshotCount();
+        const auto explicit_waits=snapshot.TextureCoherenceWaitCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32,
+                [](GuestAddr,std::size_t){return true;}));
+            assert(snapshot.TextureGpuSnapshotCount()==explicit_versions+1);
+            assert(snapshot.TextureCoherenceWaitCount()==explicit_waits);
+        });
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        snapshot.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+
+        const u64 callback_destination=texture_alias+76000;
+        const u64 callback_source=texture_alias+(centre-address);
+        const auto snapshot_baseline=[&] {
+            // Establish a full CPU baseline before each independent policy
+            // case. Pixel advances the frame without rewriting guest texels.
+            snapshot.Draw(sampled,DrawCall{.count=3});
+            const auto baseline=Pixel(device,snapshot,address+16384);
+            assert(baseline[1]==0 && baseline[0]==0);
+        };
+
+        // Both callbacks stay at their original GPU event point and execute
+        // FIFO. Their narrow effects allow a queued immutable source version:
+        // the private callback touches no direct memory; the typed callback
+        // writes a different physical span through another guest alias.
+        std::atomic<unsigned> callback_order=0;
+        std::atomic<bool> private_callback_ran=false;
+        auto& video=Hle::VideoOut::Driver::Instance();
+        const s32 flip_port=video.Open(0,0);assert(flip_port>0);
+        Hle::Kernel::EventQueue flip_events("texture snapshot flip callback");
+        void* const flip_udata=reinterpret_cast<void*>(uintptr_t(0xbad1));
+        assert(video.AddFlipEvent(&flip_events,flip_port,flip_udata)==0);
+        const auto labels=reinterpret_cast<const u64*>(video.GetBufferLabelAddress(flip_port));
+        assert(labels);
+        std::array<u64,Hle::VideoOut::Driver::kMaxBuffers> old_labels{};
+        std::memcpy(old_labels.data(),labels,sizeof(old_labels));
+        constexpr u32 flip_buffer=2,poll_timeout=0;
+        constexpr s64 flip_argument=12345;
+        video.MarkFlipPending(flip_port,flip_buffer);
+        Hle::VideoOut::FlipStatus pending_flip;
+        assert(video.GetFlipStatus(flip_port,&pending_flip)==0 && pending_flip.count==0 &&
+            pending_flip.current_buffer==-1 && pending_flip.flip_pending_num==1);
+        const auto flip_still_pending=[&] {
+            Hle::VideoOut::FlipStatus current;
+            assert(video.GetFlipStatus(flip_port,&current)==0 &&
+                !std::memcmp(&current,&pending_flip,sizeof(current)));
+            assert(!std::memcmp(labels,old_labels.data(),sizeof(old_labels)));
+            Hle::Kernel::GuestKevent event{};
+            assert(flip_events.Wait(&event,1,&poll_timeout)==0);
+        };
+        // First construction allocates the Driver in a private low mapping
+        // and advances the runtime's shared mapping generation. Warm only
+        // after that setup so native admission is not testing a stale entry.
+        snapshot_baseline();
+        const auto queued_versions=snapshot.TextureGpuSnapshotCount();
+        const auto queued_waits=snapshot.TextureCoherenceWaitCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            snapshot.SignalNoDirectMemoryWrite([&] {
+                assert(callback_order.fetch_add(1)==0);
+                // The actual audited Flip completion updates its private
+                // labels/status and triggers an EventQueue with opaque udata.
+                video.OnFlipDone(flip_port,flip_buffer,flip_argument);
+                private_callback_ran=true;
+            });
+            snapshot.SignalCpuWriteOnly(callback_destination,4,[&] {
+                assert(callback_order.fetch_add(1)==1);
+                std::memcpy(reinterpret_cast<void*>(callback_destination),&red47,4);
+            });
+            assert(!private_callback_ran && callback_order==0);
+            flip_still_pending();
+            assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==queued_versions+1);
+            assert(snapshot.TextureCoherenceWaitCount()==queued_waits);
+            assert(!private_callback_ran && callback_order==0);
+            flip_still_pending();
+        });
+        assert(private_callback_ran && callback_order==2);
+        Hle::VideoOut::FlipStatus completed_flip;
+        assert(video.GetFlipStatus(flip_port,&completed_flip)==0 && completed_flip.count==1 &&
+            completed_flip.current_buffer==s32(flip_buffer) && completed_flip.flip_arg==flip_argument &&
+            completed_flip.flip_pending_num==0 && completed_flip.tsc);
+        for(unsigned k=0;k<old_labels.size();++k)assert(labels[k]==u64(k==flip_buffer));
+        Hle::Kernel::GuestKevent flip_event{};
+        assert(flip_events.Wait(&flip_event,1,&poll_timeout)==1 && flip_event.ident==6 &&
+            flip_event.filter==Hle::Kernel::kEvfiltVideoOut && flip_event.udata==flip_udata &&
+            flip_event.data==((flip_argument<<16)|1));
+        assert(flip_events.Wait(&flip_event,1,&poll_timeout)==0);
+        assert(video.Close(flip_port)==0);
+        assert(*reinterpret_cast<const u32*>(callback_destination)==red47);
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+        // The production irq0 CP route must announce the same exact physical
+        // effect. A pending unrelated alias fence must not veto the source.
+        snapshot_baseline();
+        {
+            CommandProcessor cp;cp.SetRenderer(&snapshot);
+            const auto cp_versions=snapshot.TextureGpuSnapshotCount();
+            const auto cp_waits=snapshot.TextureCoherenceWaitCount();
+            snapshot_blocked([&] {
+                snapshot.Dispatch(snapshot_compute,1,1,1);
+                std::vector<u32> fence;
+                Packet(fence,Op::EventWriteEop,{0x14,u32(callback_destination),
+                    u32(callback_destination>>32)|(1u<<29),71,0});
+                cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+                assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+                assert(snapshot.TextureGpuSnapshotCount()==cp_versions+1);
+                assert(snapshot.TextureCoherenceWaitCount()==cp_waits);
+            });
+            assert(*reinterpret_cast<const u32*>(callback_destination)==71 && !cp.Execution()->Failed());
+        }
+        snapshot.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+        // Active effects remain registered until callback RETURN, even after
+        // removal from the FIFO. Typed disjoint and NoDirect effects can
+        // overlap source copying; alias overlap and arbitrary code cannot.
+        for(unsigned effect=0;effect<4;++effect) {
+            snapshot_baseline();
+            const bool admitted=effect==0 || effect==3;
+            std::atomic<bool> entered=false,release=false,finished=false,timeout=false;
+            std::jthread watchdog([&](std::stop_token stop) {
+                for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if(!stop.stop_requested()){timeout=true;release=true;}
+            });
+            const u64 destination=effect==0 ? callback_destination : callback_source;
+            const auto callback=[&] {
+                entered=true;
+                while(!release.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if(effect!=3)std::memcpy(reinterpret_cast<void*>(destination),&red47,4);
+                finished=true;
+            };
+            if(effect<2)snapshot.SignalCpuWriteOnly(destination,4,callback);
+            else if(effect==2)snapshot.Signal(callback);
+            else snapshot.SignalNoDirectMemoryWrite(callback);
+            snapshot.OnSubmit();
+            const auto enter_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+            while(!entered && std::chrono::steady_clock::now()<enter_deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            assert(entered);
+            const auto active_versions=snapshot.TextureGpuSnapshotCount();
+            const auto active_waits=snapshot.TextureCoherenceWaitCount();
+            snapshot_blocked([&] {
+                snapshot.Dispatch(snapshot_compute,1,1,1);
+                assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32)==admitted);
+                assert(snapshot.TextureGpuSnapshotCount()==active_versions+(admitted ? 1 : 0));
+                assert(snapshot.TextureCoherenceWaitCount()==active_waits);
+                // Finish the callback BEFORE releasing the GPU producer, so
+                // the final sampled texel is deterministically its red23.
+                release=true;
+                const auto finish_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+                while(!finished && std::chrono::steady_clock::now()<finish_deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                assert(finished);
+            });
+            watchdog.request_stop();watchdog.join();assert(!timeout);
+            if(!admitted)snapshot.Draw(sampled,DrawCall{.count=3});
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        }
+
+        // A queued overlapping typed write and generic callback both veto an
+        // otherwise eligible source. Their event is AFTER the producer, so a
+        // completed ordinary same-frame draw must see the callback's red47.
+        // The generic variant proves unknown invalidation survives completion;
+        // the SignalCpuWrite variant may write beyond its declared label.
+        for(unsigned effect=0;effect<3;++effect) {
+            snapshot_baseline();
+            const auto rejected_versions=snapshot.TextureGpuSnapshotCount();
+            snapshot_blocked([&] {
+                snapshot.Dispatch(snapshot_compute,1,1,1);
+                const auto callback=[&] {
+                    std::memcpy(reinterpret_cast<void*>(callback_source),&red47,4);
+                };
+                if(effect==0)snapshot.SignalCpuWriteOnly(callback_source,4,callback);
+                else if(effect==1)snapshot.Signal(callback);
+                else snapshot.SignalCpuWrite(callback_destination,4,callback);
+                assert(!snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+                assert(snapshot.TextureGpuSnapshotCount()==rejected_versions);
+            });
+            assert(*reinterpret_cast<const u32*>(centre)==red47);
+            snapshot.Draw(sampled,DrawCall{.count=3});
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        }
+
+        // A trusted write with no complete direct physical destination cannot
+        // be classified as disjoint. Its callback still runs at the event.
+        snapshot_baseline();
+        u32 unresolved_label=0;
+        const auto unresolved_versions=snapshot.TextureGpuSnapshotCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            snapshot.SignalCpuWriteOnly(reinterpret_cast<GuestAddr>(&unresolved_label),4,[&] {
+                unresolved_label=113;
+            });
+            assert(!snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==unresolved_versions && unresolved_label==0);
+        });
+        assert(unresolved_label==113);
+        snapshot.Draw(sampled,DrawCall{.count=3});
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+        // IRQ-bearing fence closures invoke arbitrary handlers. Although the
+        // declared label is unrelated, this real handler writes the source.
+        snapshot_baseline();
+        {
+            CommandProcessor cp;cp.SetRenderer(&snapshot);
+            std::atomic<unsigned> interrupts=0;
+            cp.SetInterruptHandler([&](u32 irq) {
+                assert(irq==CommandProcessor::kIrqGfxEop);++interrupts;
+                std::memcpy(reinterpret_cast<void*>(callback_source),&red47,4);
+            });
+            const auto irq_versions=snapshot.TextureGpuSnapshotCount();
+            snapshot_blocked([&] {
+                snapshot.Dispatch(snapshot_compute,1,1,1);
+                std::vector<u32> fence;
+                Packet(fence,Op::EventWriteEop,{0x14,u32(callback_destination),
+                    u32(callback_destination>>32)|(1u<<29)|(2u<<24),89,0});
+                cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+                assert(!interrupts);
+                assert(!snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+                assert(snapshot.TextureGpuSnapshotCount()==irq_versions);
+            });
+            assert(interrupts==1 && *reinterpret_cast<const u32*>(callback_destination)==89);
+            assert(*reinterpret_cast<const u32*>(centre)==red47 && !cp.Execution()->Failed());
+            snapshot.Draw(sampled,DrawCall{.count=3});
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        }
+        snapshot.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+
+        // Forgotten historical records cannot supply a CPU hash baseline.
+        // Complete CURRENT callback effects plus exact backing/producer proof
+        // may instead create a fresh immutable GPU version. The later raw CPU
+        // edit still requires the normal hashless-to-CPU baseline rebuild.
+        snapshot_baseline();
+        for(u32 k=0;k<journal_pressure;++k)snapshot.CpuWrite(callback_destination,&k,4,false);
+        const auto forgotten_versions=snapshot.TextureGpuSnapshotCount();
+        const auto forgotten_waits=snapshot.TextureCoherenceWaitCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==forgotten_versions+1);
+            assert(snapshot.TextureCoherenceWaitCount()==forgotten_waits);
+        });
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        std::memcpy(reinterpret_cast<void*>(centre),&red47,4);
+        snapshot.Draw(sampled,DrawCall{.count=3});
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        assert(snapshot.TextureGpuSnapshotCount()==forgotten_versions+1);
+
+        // Ordinary Draw must still rehash a CPU-ready direct texture after
+        // historical uncertainty. A completed generic callback supplies a
+        // real unknown write even when the page index retains exact history.
+        // Its historical callback uncertainty need not wait
+        // unrelated CURRENT callbacks, and cannot authorize old cache reuse.
+        const auto prepare_ordinary_rehash=[&] {
+            snapshot.CpuWrite(centre,&black,4,false);snapshot_baseline();
+            snapshot.Signal([]{});Drain(snapshot);
+            for(u32 k=0;k<journal_pressure;++k)snapshot.CpuWrite(callback_destination,&k,4,false);
+            std::memcpy(reinterpret_cast<void*>(centre),&red47,4);
+        };
+        const auto wait_flag=[](const std::atomic<bool>& flag) {
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+            while(!flag && std::chrono::steady_clock::now()<deadline)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            assert(flag);
+        };
+        prepare_ordinary_rehash();
+        std::atomic<unsigned> ordinary_callbacks=0;
+        const auto ordinary_versions=snapshot.TextureGpuSnapshotCount();
+        const auto ordinary_waits=snapshot.TextureCoherenceWaitCount();
+        const auto ordinary_refreshes=snapshot.TextureCoherenceRefreshCount();
+        snapshot_blocked([&] {
+            snapshot.SignalNoDirectMemoryWrite([&]{++ordinary_callbacks;});
+            snapshot.SignalCpuWriteOnly(callback_destination,4,[&] {
+                std::memcpy(reinterpret_cast<void*>(callback_destination),&red47,4);
+                ++ordinary_callbacks;
+            });
+            snapshot.Draw(sampled,DrawCall{.count=3}); // no GPU source producer
+            assert(snapshot.TextureGpuSnapshotCount()==ordinary_versions);
+            assert(snapshot.TextureCoherenceWaitCount()==ordinary_waits);
+            assert(snapshot.TextureCoherenceRefreshCount()==ordinary_refreshes+1);
+            assert(ordinary_callbacks==0);
+        });
+        assert(ordinary_callbacks==2);
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+
+        // The same CPU rehash is safe while a typed-disjoint or NoDirect
+        // callback is ACTIVE. Keep it active through Draw's CPU payload read.
+        for(bool independent:{false,true}) {
+            prepare_ordinary_rehash();
+            std::atomic<bool> entered=false,release=false,finished=false,timeout=false;
+            std::jthread watchdog([&](std::stop_token stop) {
+                for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if(!stop.stop_requested()){timeout=true;release=true;}
+            });
+            const auto callback=[&] {
+                entered=true;
+                while(!release)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if(!independent)std::memcpy(reinterpret_cast<void*>(callback_destination),&red47,4);
+                finished=true;
+            };
+            if(independent)snapshot.SignalNoDirectMemoryWrite(callback);
+            else snapshot.SignalCpuWriteOnly(callback_destination,4,callback);
+            snapshot.OnSubmit();wait_flag(entered);
+            const auto versions_before=snapshot.TextureGpuSnapshotCount();
+            const auto waits_before=snapshot.TextureCoherenceWaitCount();
+            const auto refreshes_before=snapshot.TextureCoherenceRefreshCount();
+            snapshot_blocked([&] {
+                snapshot.Draw(sampled,DrawCall{.count=3});
+                assert(snapshot.TextureGpuSnapshotCount()==versions_before);
+                assert(snapshot.TextureCoherenceWaitCount()==waits_before);
+                assert(snapshot.TextureCoherenceRefreshCount()==refreshes_before+1);
+                assert(!finished);
+                release=true;wait_flag(finished);
+            });
+            watchdog.request_stop();watchdog.join();assert(!timeout);
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        }
+
+        // An overlapping typed callback or unknown closure must still drain.
+        // Their queued event writes red47 after Draw starts from black; the
+        // resulting actual pixel proves CPU hashing waited for the callback.
+        for(bool unknown:{false,true}) {
+            snapshot.CpuWrite(centre,&black,4,false);snapshot_baseline();
+            std::atomic<bool> finished=false;
+            auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+            [blocker encodeWaitForEvent:event value:1];[blocker commit];
+            const auto callback=[&] {
+                std::memcpy(reinterpret_cast<void*>(callback_source),&red47,4);finished=true;
+            };
+            if(unknown)snapshot.Signal(callback);
+            else snapshot.SignalCpuWriteOnly(callback_source,4,callback);
+            const auto versions_before=snapshot.TextureGpuSnapshotCount();
+            const auto waits_before=snapshot.TextureCoherenceWaitCount();
+            std::jthread release([event] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;
+            });
+            snapshot.Draw(sampled,DrawCall{.count=3});release.join();
+            assert(finished && snapshot.TextureCoherenceWaitCount()==waits_before+1);
+            assert(snapshot.TextureGpuSnapshotCount()==versions_before);
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        }
+
+        // Keep the veto until an ACTIVE overlapping/unknown closure returns,
+        // even though its GPU event and command buffer are already complete.
+        for(bool unknown:{false,true}) {
+            snapshot.CpuWrite(centre,&black,4,false);snapshot_baseline();
+            std::atomic<bool> entered=false,release=false,finished=false;
+            const auto callback=[&] {
+                entered=true;
+                while(!release)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                std::memcpy(reinterpret_cast<void*>(callback_source),&red47,4);finished=true;
+            };
+            if(unknown)snapshot.Signal(callback);
+            else snapshot.SignalCpuWriteOnly(callback_source,4,callback);
+            snapshot.OnSubmit();wait_flag(entered);
+            const auto versions_before=snapshot.TextureGpuSnapshotCount();
+            const auto waits_before=snapshot.TextureCoherenceWaitCount();
+            std::jthread finish([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));release=true;
+            });
+            snapshot.Draw(sampled,DrawCall{.count=3});finish.join();
+            assert(finished && snapshot.TextureCoherenceWaitCount()==waits_before+1);
+            assert(snapshot.TextureGpuSnapshotCount()==versions_before);
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        }
+
         // Two versions are queued before GPU completion. Replacing the cache
         // entry must not change the earlier draw's retained texture version.
         const auto versions=snapshot.TextureGpuSnapshotCount();
@@ -1027,6 +1419,7 @@ static void GpuCases(u64 address,u64 alias) {
             auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
             [blocker encodeWaitForEvent:event value:1];[blocker commit];
             std::vector<u32> fence;const u64 destination=texture_alias+(centre-address);
+            snapshot.Dispatch(snapshot_compute,1,1,1); // otherwise eligible pending GPU source
             Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),red47,0});
             cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
             const auto pending_snapshots=snapshot.TextureGpuSnapshotCount();
@@ -1039,6 +1432,46 @@ static void GpuCases(u64 address,u64 alias) {
             pixel=Pixel(device,snapshot,address+16384);
             assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0 && !cp.Execution()->Failed());
         }
+        snapshot.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+
+        // The source VA can move onto a fence destination after an earlier
+        // draw observed that deferred event as disjoint. A known GPU producer
+        // already writes the destination's physical alias; remapping must
+        // still veto native admission and drain the actual CPU label store.
+        assert(!runtime_gpu_memory_map(&remap_address,16384,3,0x10,remap_physical,16384));
+        snapshot.CpuWrite(remap_address,remap_pixels.data(),sizeof(remap_pixels),false);
+        snapshot.Draw(remap_sample,DrawCall{.count=3});
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==0 && pixel[1]==0 && pixel[0]==0);
+        {
+            CommandProcessor cp;cp.SetRenderer(&snapshot);
+            const u64 destination=fence_alias+(centre-address-32768);
+            auto remap_compute=snapshot_compute;
+            remap_compute[Reg::COMPUTE_USER_DATA_0]=u32(destination);
+            remap_compute[Reg::COMPUTE_USER_DATA_0+1]=u32(destination>>32)|(4u<<16);
+            auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+            [blocker encodeWaitForEvent:event value:1];[blocker commit];
+            snapshot.Dispatch(remap_compute,1,1,1);
+            std::vector<u32> fence;
+            Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),red47,0});
+            cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+            const auto disjoint_waits=snapshot.TextureCoherenceWaitCount();
+            snapshot.Draw(remap_sample,DrawCall{.count=3}); // observe disjoint epoch
+            assert(snapshot.TextureCoherenceWaitCount()==disjoint_waits);
+            const auto old_address=remap_address;
+            assert(!runtime_gpu_memory_map(&remap_address,16384,3,0x10,remap_physical+16384,16384));
+            assert(remap_address==old_address);
+            const auto remap_snapshots=snapshot.TextureGpuSnapshotCount();
+            assert(!snapshot.DrawIndirect(remap_sample,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==remap_snapshots);
+            std::jthread release([event] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;
+            });
+            snapshot.Draw(remap_sample,DrawCall{.count=3});release.join();
+            assert(snapshot.TextureCoherenceWaitCount()==disjoint_waits+1);
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0 && !cp.Execution()->Failed());
+        }
         Drain(snapshot);
         assert(runtime_gpu_memory_set_mutation_hooks(&renderer,
             [](void* p)->int{return static_cast<Gpu::Metal::MetalRenderer*>(p)->BeginGuestMemoryMutation();},
@@ -1046,7 +1479,7 @@ static void GpuCases(u64 address,u64 alias) {
     }
     setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","0",1);
     const u32 restore_red23=23;renderer.CpuWrite(centre,&restore_red23,4,false);
-    puts("texture GPU snapshot: no CPU wait, real23/47 pixels, queued immutable versions, alias/mapping read leases, hashless CPU rebuild and CP-fence fallback passed");
+    puts("texture GPU snapshot: explicit/installed readiness, queued/active callback effects and FIFO, irq0/IRQ guards, forgotten history, real23/47 pixels, immutable versions, alias/mapping leases, hashless CPU rebuild and CP fallback passed");
 
     // A later CP write to the table must not redirect an already queued
     // producer. Exercise the same VA, a physical alias, and zero records:
@@ -1253,19 +1686,55 @@ static void GpuCases(u64 address,u64 alias) {
     assert(!renderer.DrawIndirect(draw,DrawCall{},address+32));
     assert(!renderer.DrawIndirect(depth_only,DrawCall{},address+32));
     renderer.CpuWrite(address+32,triangle,sizeof(triangle),false);
-    // These optional modes can add CPU leaf reads beyond ordinary resource
-    // setup. An initialized, otherwise eligible target must still fallback.
-    for(const char* option:{"BB_METAL_STATIC_SMRD","BB_METAL_DIRECT_SMRD"}) {
-        const char* previous=std::getenv(option);const bool present=previous!=nullptr;
-        const std::string saved=previous ? previous : "";
-        setenv(option,"1",1);
+    // Static packing does not change setup for these ordinary PS programs.
+    // GPU-time argument versions and zero-count semantics must remain native
+    // with that option enabled. Address extraction still retains fallback.
+    for(const bool direct:{false,true}) {
+        const std::array<const char*,2> options{"BB_METAL_STATIC_SMRD","BB_METAL_DIRECT_SMRD"};
+        std::array<bool,2> present{};std::array<std::string,2> saved;
+        for(unsigned k=0;k<options.size();++k) {
+            const char* previous=std::getenv(options[k]);present[k]=previous!=nullptr;
+            saved[k]=previous ? previous : "";
+            setenv(options[k],(k==unsigned(direct)) ? "1" : "0",1);
+        }
         {
             Gpu::Metal::MetalRenderer optional(device);
-            optional.Draw(draw,DrawCall{.count=3});Pixel(device,optional,address+16384);
-            assert(!optional.DrawIndirect(draw,DrawCall{},address+32));
-            assert(optional.NativeIndirectDrawCount()==0);
+            optional.Draw(draw,DrawCall{.count=3});pixel=Pixel(device,optional,address+16384);
+            assert(pixel[2]==255 && pixel[1]==0 && pixel[0]==0);
+            if(direct) {
+                assert(!optional.DrawIndirect(draw,DrawCall{},address+32));
+                assert(optional.NativeIndirectDrawCount()==0);
+            } else {
+                auto blue_draw=draw;
+                blue_draw[Reg::SPI_SHADER_PGM_LO_PS]=u32(uintptr_t(shader+256)>>8);
+                optional.Draw(blue_draw,DrawCall{.count=0});Drain(optional);
+                const u32 stale_arguments[4]{};
+                optional.CpuWrite(address+32,stale_arguments,sizeof(stale_arguments),false);
+                auto event=[metal newSharedEvent];assert(event);
+                auto blocker=[queue commandBuffer];[blocker encodeWaitForEvent:event value:1];[blocker commit];
+                std::atomic<bool> timeout=false;
+                std::jthread watchdog([event,&timeout](std::stop_token stop) {
+                    for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    if(!stop.stop_requested()){timeout=true;event.signaledValue=1;}
+                });
+                assert(optional.DmaData(0,address+32,2,3,4));
+                assert(optional.DmaData(0,address+36,2,1,4));
+                assert(optional.DrawIndirect(blue_draw,DrawCall{},address+32));
+                assert(optional.DmaData(0,address+32,2,0,4));
+                assert(optional.DrawIndirect(draw,DrawCall{},address+32));
+                assert(optional.DmaData(0,address+32,2,3,4));
+                assert(optional.DmaData(0,address+36,2,0,4));
+                assert(optional.DrawIndirect(draw,DrawCall{},address+32));
+                assert(optional.NativeIndirectDrawCount()==3);
+                assert(!std::memcmp(reinterpret_cast<const void*>(address+32),stale_arguments,sizeof(stale_arguments)));
+                event.signaledValue=1;watchdog.request_stop();watchdog.join();assert(!timeout);
+                pixel=Pixel(device,optional,address+16384);
+                assert(pixel[0]==255 && pixel[1]==0 && pixel[2]==0);
+            }
         }
-        if(present)setenv(option,saved.c_str(),1);else unsetenv(option);
+        for(unsigned k=0;k<options.size();++k)
+            if(present[k])setenv(options[k],saved[k].c_str(),1);else unsetenv(options[k]);
     }
     puts("indirect GPU: ordered snapshots/self-modification, CPU/physical alias protection, zero dimensions/instances and pending resource producer guards passed");
 }

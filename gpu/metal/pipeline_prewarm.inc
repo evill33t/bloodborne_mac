@@ -3,6 +3,10 @@
 // compiler inputs. A current descriptor AND exact source must match for a hit.
 namespace {
 struct RecipeFile {NSString* name;std::uint64_t bytes;double modified;};
+std::string RecipeDigest(const void* bytes,std::size_t count) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(bytes,static_cast<CC_LONG>(count),digest);
+    std::string key;for(unsigned char b:digest){key+="0123456789abcdef"[b>>4];key+="0123456789abcdef"[b&15];}return key;
+}
 bool RecipeFilename(NSString* name) {
     if(name.length!=69 || ![name.pathExtension isEqualToString:@"json"]) return false;
     for(unsigned i=0;i<64;++i) {
@@ -31,8 +35,7 @@ NSData* RecipeData(NSDictionary* recipe) {
 }
 std::string RecipeKey(NSDictionary* recipe) {
     NSData* data=RecipeData(recipe);if(!data) return {};
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(data.bytes,static_cast<CC_LONG>(data.length),digest);
-    std::string key;for(unsigned char b:digest){key+="0123456789abcdef"[b>>4];key+="0123456789abcdef"[b&15];}return key;
+    return RecipeDigest(data.bytes,data.length);
 }
 bool RecipeNumber(id value,unsigned maximum) {
     return [value isKindOfClass:NSNumber.class] && [value doubleValue]==[value unsignedLongLongValue] &&
@@ -58,6 +61,69 @@ bool RecipeFormat(id value) {
     default:return false;
     }
 }
+bool RecipeSchema(NSDictionary* r) {
+    if(![r isKindOfClass:NSDictionary.class] || ![r[@"version"] isEqual:@1])return false;
+    if([r[@"kind"] isEqual:@"compute"])return r.count==5 &&
+        [r[@"source"] isKindOfClass:NSString.class] && [r[@"source"] length] &&
+        [r[@"source"] length]<=PipelinePrewarmLimits::RecipeBytes/2 &&
+        RecipeNumber(r[@"group"],1024) && RecipeNumber(r[@"multiple"],1);
+    if(![r[@"kind"] isEqual:@"render"] || r.count!=6)return false;
+    NSArray* s=r[@"state"];NSArray* colors=r[@"colors"];
+    if(![s isKindOfClass:NSArray.class] || s.count!=13 || ![colors isKindOfClass:NSArray.class] || colors.count!=8 ||
+        ![r[@"vertex"] isKindOfClass:NSString.class] || ![r[@"vertex"] length] ||
+        ![r[@"fragment"] isKindOfClass:NSString.class] ||
+        [r[@"vertex"] length]>PipelinePrewarmLimits::RecipeBytes/2 || [r[@"fragment"] length]>PipelinePrewarmLimits::RecipeBytes/2 ||
+        !RecipeFormat(s[0]) || !RecipeFormat(s[1]))return false;
+    for(unsigned i=2;i<13;++i)if(!RecipeNumber(s[i],i==8 ? 64 : i==2 ? 8 : i==12 ? 2 : i==6 || i==7 || i==10 ? 3 : 1))return false;
+    for(unsigned k=0;k<8;++k) {
+        NSArray* c=colors[k];if(![c isKindOfClass:NSArray.class] || c.count!=9 || !RecipeFormat(c[0]))return false;
+        for(unsigned i=1;i<9;++i)if(!RecipeNumber(c[i],i==1 ? 15 : i==2 ? 1 : i==5 || i==8 ? 4 : 18))return false;
+    }
+    return true;
+}
+bool RecipeRootSafe(NSString* root,bool allow_missing) {
+    const std::filesystem::path target(root.fileSystemRepresentation);
+    return PipelineRecipeIdentity::PlainDirectories(target.parent_path().parent_path().parent_path(),target,allow_missing);
+}
+// Bounded startup inventory. Never recurse, follow a cache-directory symlink,
+// or materialize an unbounded directory listing before enforcing the limit.
+std::vector<RecipeFile> StartupRecipes(NSString* root,std::size_t& remaining) {
+    std::vector<RecipeFile> result;
+    std::error_code error;
+    for(std::filesystem::directory_iterator it(root.fileSystemRepresentation,error),end;
+        !error && it!=end && remaining;it.increment(error)) {
+        --remaining;
+        const auto path=it->path();NSString* name=@(path.filename().c_str());
+        if(!RecipeFilename(name))continue;
+        struct stat status{};
+        if(::lstat(path.c_str(),&status) || !S_ISREG(status.st_mode) || status.st_nlink!=1 || status.st_size<0)continue;
+        result.push_back({name,static_cast<std::uint64_t>(status.st_size),
+            double(status.st_mtimespec.tv_sec)+double(status.st_mtimespec.tv_nsec)*1e-9});
+    }
+    return result;
+}
+NSData* ReadRecipe(NSString* path,std::uint64_t& read_budget) {
+    const int fd=::open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0)return nil;
+    struct stat status{};
+    if(::fstat(fd,&status) || !S_ISREG(status.st_mode) || status.st_nlink!=1 || status.st_size<=0 ||
+        static_cast<std::uint64_t>(status.st_size)>PipelinePrewarmLimits::RecipeBytes ||
+        static_cast<std::uint64_t>(status.st_size)>read_budget){::close(fd);return nil;}
+    // Charge every attempted input before reading or validating it. Rejected
+    // hashes, malformed JSON and interrupted reads must not bypass the bound.
+    read_budget-=static_cast<std::uint64_t>(status.st_size);
+    NSMutableData* bytes=[NSMutableData dataWithLength:static_cast<NSUInteger>(status.st_size)];
+    std::size_t copied=0;
+    while(copied<bytes.length) {
+        const auto count=::read(fd,static_cast<char*>(bytes.mutableBytes)+copied,bytes.length-copied);
+        if(count<=0)break;
+        copied+=static_cast<std::size_t>(count);
+    }
+    struct stat after{};
+    const bool complete=copied==bytes.length && !::fstat(fd,&after) && after.st_size==status.st_size &&
+        after.st_mtimespec.tv_sec==status.st_mtimespec.tv_sec && after.st_mtimespec.tv_nsec==status.st_mtimespec.tv_nsec;
+    ::close(fd);return complete ? bytes : nil;
+}
 }
 ShaderCompiler::WarmupStats ShaderCompiler::GetWarmupStats() {
     std::lock_guard guard(warm_lock);auto result=warm_stats;
@@ -71,46 +137,98 @@ void ShaderCompiler::EnablePrewarming() {
     if(warm_root) return;
     const char* enabled=std::getenv("BB_METAL_SHADER_PREWARM");const char* data=std::getenv("BB_DATA_DIR");
     if(archive || !data || !*data || (enabled && !std::strcmp(enabled,"0"))) return;
-    NSString* root=[NSURL fileURLWithPath:[@(data) stringByAppendingPathComponent:@"metal-cache/prewarm-v1"]].URLByResolvingSymlinksInPath.path;
+    NSString* resolved_data=[NSURL fileURLWithPath:@(data)].URLByResolvingSymlinksInPath.path;
+    NSString* root=[resolved_data stringByAppendingPathComponent:@"metal-cache/prewarm-v2"];
     for(const char* variable:{"BB_GAME_DIR","BB_SOURCE_GAME"}) if(const char* game=std::getenv(variable);game && *game) {
         NSString* source=[NSURL fileURLWithPath:@(game)].URLByResolvingSymlinksInPath.path;
         if([root isEqualToString:source] || [root hasPrefix:[source stringByAppendingString:@"/"]]) return;
     }
-    // Separate devices/OS versions; exact source and descriptors guard code changes.
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
-    root=[root stringByAppendingPathComponent:[NSString stringWithFormat:@"%llx-%ld.%ld.%ld",device.registryID,
-        os.majorVersion,os.minorVersion,os.patchVersion]];
+    NSString* name=device.name;if(!name.length || name.length>4096)return;
+    const auto material=PipelineRecipeIdentity::Material(name.UTF8String,PipelineRecipeIdentity::Architecture(),
+        os.majorVersion,os.minorVersion,os.patchVersion);
+    const auto identity=RecipeDigest(material.data(),material.size());
+    root=[root stringByAppendingPathComponent:@(identity.c_str())];
+    if(!RecipeRootSafe(root,true))return;
     warm_root=root;
-    auto files=RecipeInventory(root);
-    // Recently learned areas get the background worker first. This does not
-    // delay foreground requests or require separate area/configuration modes.
-    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
-        return a.modified!=b.modified ? a.modified>b.modified : [a.name compare:b.name]==NSOrderedAscending;
+    struct Candidate {NSString* root;RecipeFile file;unsigned priority;};
+    std::vector<Candidate> files;
+    std::size_t remaining=PipelineRecipeIdentity::InventoryEntries;
+    if(RecipeRootSafe(root,false))for(const auto& file:StartupRecipes(root,remaining))files.push_back({root,file,0});
+    NSString* legacy=[resolved_data stringByAppendingPathComponent:@"metal-cache/prewarm-v1"];
+    const auto version=PipelineRecipeIdentity::OsVersion(os.majorVersion,os.minorVersion,os.patchVersion);
+    NSString* current=[NSString stringWithFormat:@"%llx-%s",device.registryID,version.c_str()];
+    // Old IDs carry no persistent hardware identity. Import only source JSON
+    // from this data root and OS, then compile on the current device. Full source
+    // and descriptor equality still controls every eventual foreground hit.
+    std::vector<std::pair<NSString*,double>> directories;
+    if(PipelineRecipeIdentity::PlainDirectories(resolved_data.fileSystemRepresentation,legacy.fileSystemRepresentation,false)) {
+        std::error_code error;
+        std::size_t examined=0;
+        for(std::filesystem::directory_iterator it(legacy.fileSystemRepresentation,error),end;
+            !error && it!=end && examined<PipelineRecipeIdentity::InventoryEntries;it.increment(error),++examined) {
+            const auto path=it->path();const auto component=path.filename().string();
+            if(!PipelineRecipeIdentity::LegacyDirectory(component,version))continue;
+            NSString* directory=@(path.c_str());if(!RecipeRootSafe(directory,false))continue;
+            struct stat status{};if(::lstat(path.c_str(),&status))continue;
+            directories.emplace_back(directory,double(status.st_mtimespec.tv_sec)+double(status.st_mtimespec.tv_nsec)*1e-9);
+        }
+    }
+    std::sort(directories.begin(),directories.end(),[&](const auto& a,const auto& b) {
+        const bool ac=[a.first.lastPathComponent isEqualToString:current],bc=[b.first.lastPathComponent isEqualToString:current];
+        if(ac!=bc)return ac;
+        return a.second!=b.second ? a.second>b.second : [a.first compare:b.first]==NSOrderedAscending;
     });
-    unsigned count=0;std::uint64_t total=0;
+    if(directories.size()>PipelineRecipeIdentity::LegacyDirectories)directories.resize(PipelineRecipeIdentity::LegacyDirectories);
+    for(const auto& directory:directories)for(const auto& file:StartupRecipes(directory.first,remaining))
+        files.push_back({directory.first,file,[directory.first.lastPathComponent isEqualToString:current] ? 1u : 2u});
+    // Stable/current-runtime inputs first, then recently observed older inputs.
+    std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
+        if(a.priority!=b.priority)return a.priority<b.priority;
+        return a.file.modified!=b.file.modified ? a.file.modified>b.file.modified :
+            [a.file.name compare:b.file.name]==NSOrderedAscending;
+    });
+    unsigned count=0,stable_count=0,legacy_count=0;std::uint64_t total=0;
+    std::uint64_t read_budget=PipelinePrewarmLimits::Bytes;
+    std::unordered_set<std::string> admitted;
     for(const auto& entry:files) {
-        NSString* file=entry.name;
-        if(count>=PipelinePrewarmLimits::Recipes) break;
-        if(entry.bytes>PipelinePrewarmLimits::RecipeBytes || entry.bytes>PipelinePrewarmLimits::Bytes-total) continue;
-        NSURL* url=[NSURL fileURLWithPath:[root stringByAppendingPathComponent:file]];
-        NSNumber* size=nil;NSNumber* regular=nil;NSNumber* symlink=nil;
-        [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-        [url getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
-        [url getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil];
-        if(!regular.boolValue || symlink.boolValue || size.unsignedLongLongValue>PipelinePrewarmLimits::RecipeBytes ||
-            size.unsignedLongLongValue>PipelinePrewarmLimits::Bytes-total) continue;
-        NSData* bytes=[NSData dataWithContentsOfURL:url options:0 error:nil];
+        if(count>=PipelinePrewarmLimits::Recipes || !read_budget) break;
+        if(entry.file.bytes>PipelinePrewarmLimits::RecipeBytes || entry.file.bytes>PipelinePrewarmLimits::Bytes-total ||
+            entry.file.bytes>read_budget ||
+            !RecipeRootSafe(entry.root,false))continue;
+        const auto key=std::string(entry.file.name.stringByDeletingPathExtension.UTF8String);
+        if(admitted.contains(key))continue;
+        NSData* bytes=ReadRecipe([entry.root stringByAppendingPathComponent:entry.file.name],read_budget);
         if(!bytes || bytes.length>PipelinePrewarmLimits::RecipeBytes || bytes.length>PipelinePrewarmLimits::Bytes-total) continue;
+        if(RecipeDigest(bytes.bytes,bytes.length)!=key)continue;
         id recipe=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-        if(![recipe isKindOfClass:NSDictionary.class] || ![file.stringByDeletingPathExtension isEqualToString:@(RecipeKey(recipe).c_str())]) continue;
-        total+=bytes.length;++count;
+        if(!RecipeSchema(recipe) || RecipeKey(recipe)!=key)continue;
+        admitted.insert(key);total+=bytes.length;++count;
+        const bool imported=entry.priority!=0;
+        imported ? ++legacy_count : ++stable_count;
         const auto queued_bytes=bytes.length;
         {std::lock_guard guard(warm_lock);++warm_stats.loaded;++warm_queued_count;warm_queued_bytes+=queued_bytes;}
-        Submit([this,recipe,queued_bytes] {
+        Submit([this,recipe,bytes,key,imported,queued_bytes] {
             Prewarm(recipe);
-            std::lock_guard guard(warm_lock);--warm_queued_count;warm_queued_bytes-=queued_bytes;
+            bool write=false;
+            {
+                std::lock_guard guard(warm_lock);--warm_queued_count;warm_queued_bytes-=queued_bytes;
+                // Persist only after successful compilation on this device.
+                // Release the startup reservation before reusing that bounded
+                // input slot for the existing background atomic writer.
+                if(imported && warm_pipelines.contains(key) && !recipe_writes.contains(key) &&
+                    recipe_writes.size()+warm_queued_count<PipelinePrewarmLimits::Recipes &&
+                    queued_bytes<=PipelinePrewarmLimits::Bytes-pending_recipe_bytes-warm_queued_bytes) {
+                    recipe_writes.emplace(key,PendingRecipe{bytes,++warm_sequence});pending_recipe_bytes+=queued_bytes;
+                    if(!recipe_writer_queued){recipe_writer_queued=true;write=true;}
+                }
+            }
+            if(write)Submit([this]{WritePendingRecipe();},true);
         },true);
     }
+    DC_INFO("gpu prewarm recipes: namespace=%s source=%u legacy=%u bytes=%llu read_bytes=%llu",identity.c_str(),
+        stable_count,legacy_count,static_cast<unsigned long long>(total),
+        static_cast<unsigned long long>(PipelinePrewarmLimits::Bytes-read_budget));
 }
 NSDictionary* ShaderCompiler::RenderRecipe(MTLRenderPipelineDescriptor* d) {
     if(!warm_root) return nil;
@@ -213,7 +331,9 @@ void ShaderCompiler::WriteRecipe(const std::string& key) {
         bytes=it->second.data;pending_recipe_bytes-=bytes.length;recipe_writes.erase(it);
     }
     auto manager=NSFileManager.defaultManager;
+    if(!RecipeRootSafe(warm_root,true))return;
     if(![manager createDirectoryAtPath:warm_root withIntermediateDirectories:YES attributes:nil error:nil]) return;
+    if(!RecipeRootSafe(warm_root,false))return;
     NSString* path=[warm_root stringByAppendingPathComponent:[@(key.c_str()) stringByAppendingString:@".json"]];
     NSURL* destination=[NSURL fileURLWithPath:path];NSNumber *symlink=nil,*regular=nil;
     [destination getResourceValue:&symlink forKey:NSURLIsSymbolicLinkKey error:nil];
@@ -256,7 +376,7 @@ bool ShaderCompiler::QueueWarmUseLocked(const std::string& key,WarmPipeline& pip
 bool ShaderCompiler::TouchRecipe(const std::string& key) {
     std::lock_guard writer(recipe_write_lock);
     NSString* name=[@(key.c_str()) stringByAppendingString:@".json"];
-    if(!warm_root || !RecipeFilename(name))return false;
+    if(!warm_root || !RecipeFilename(name) || !RecipeRootSafe(warm_root,false))return false;
     NSString* path=[warm_root stringByAppendingPathComponent:name];
     // Update the already opened file, never a symlink or a hard-linked source
     // file substituted into the disposable cache. Do not rewrite its contents.
@@ -309,27 +429,19 @@ id<MTLComputePipelineState> ShaderCompiler::ComputePipeline(MTLComputePipelineDe
 }
 void ShaderCompiler::Prewarm(NSDictionary* r) {
     @autoreleasepool {
-        if(![r[@"version"] isEqual:@1]) return;
+        if(!RecipeSchema(r))return;
         WarmPipeline pipeline;
         if([r[@"kind"] isEqual:@"compute"]) {
-            if(![r[@"source"] isKindOfClass:NSString.class] || [r[@"source"] length]>PipelinePrewarmLimits::RecipeBytes/2 ||
-                !RecipeNumber(r[@"group"],1024) || !RecipeNumber(r[@"multiple"],1)) return;
             auto d=[MTLComputePipelineDescriptor new];d.computeFunction=Function(0,[r[@"source"] UTF8String],0);
             d.maxTotalThreadsPerThreadgroup=[r[@"group"] unsignedIntValue];
             d.threadGroupSizeIsMultipleOfThreadExecutionWidth=[r[@"multiple"] boolValue];
             if(d.computeFunction) pipeline.compute=NewComputePipeline(d,nil);
         } else if([r[@"kind"] isEqual:@"render"]) {
             NSArray* s=r[@"state"];NSArray* colors=r[@"colors"];
-            if(![s isKindOfClass:NSArray.class] || s.count!=13 || ![colors isKindOfClass:NSArray.class] || colors.count!=8 ||
-                ![r[@"vertex"] isKindOfClass:NSString.class] || ![r[@"fragment"] isKindOfClass:NSString.class] ||
-                [r[@"vertex"] length]>PipelinePrewarmLimits::RecipeBytes/2 || [r[@"fragment"] length]>PipelinePrewarmLimits::RecipeBytes/2 ||
-                !RecipeFormat(s[0]) || !RecipeFormat(s[1])) return;
-            for(unsigned i=2;i<13;++i) if(!RecipeNumber(s[i],i==8 ? 64 : i==2 ? 8 : i==12 ? 2 : i==6 || i==7 || i==10 ? 3 : 1)) return;
             if(![device supportsTextureSampleCount:[s[2] unsignedIntValue]]) return;
             auto d=[MTLRenderPipelineDescriptor new];
             for(unsigned k=0;k<8;++k) {
-                NSArray* c=colors[k];if(![c isKindOfClass:NSArray.class] || c.count!=9 || !RecipeFormat(c[0])) return;
-                for(unsigned i=1;i<9;++i) if(!RecipeNumber(c[i],i==1 ? 15 : i==2 ? 1 : i==5 || i==8 ? 4 : 18)) return;
+                NSArray* c=colors[k];
                 auto a=d.colorAttachments[k];a.pixelFormat=MTLPixelFormat([c[0] unsignedIntValue]);a.writeMask=MTLColorWriteMask([c[1] unsignedIntValue]);
                 a.blendingEnabled=[c[2] boolValue];a.sourceRGBBlendFactor=MTLBlendFactor([c[3] unsignedIntValue]);
                 a.destinationRGBBlendFactor=MTLBlendFactor([c[4] unsignedIntValue]);a.rgbBlendOperation=MTLBlendOperation([c[5] unsignedIntValue]);

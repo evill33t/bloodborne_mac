@@ -75,6 +75,15 @@ public:
     // Backends with CPU texture caches pair that marker and Signal atomically.
     virtual void NotePendingCpuWrite(GuestAddr,std::size_t) {}
     virtual void SignalCpuWrite(GuestAddr,std::size_t,std::function<void()> done) {Signal(std::move(done));}
+    // Trusted narrower effects, used only by audited host closures. The first
+    // performs no writes to the exposed direct-memory pool or its aliases and
+    // invokes no arbitrary/guest code. The second confines all such writes to
+    // exactly the declared destination. Unknown callbacks keep Signal (or
+    // SignalCpuWrite for journaling). Neither changes execution/FIFO ordering.
+    virtual void SignalNoDirectMemoryWrite(std::function<void()> done) {Signal(std::move(done));}
+    virtual void SignalCpuWriteOnly(GuestAddr address,std::size_t bytes,std::function<void()> done) {
+        SignalCpuWrite(address,bytes,std::move(done));
+    }
 
     // CP-side writes must not pass an earlier GPU indirect read of the same
     // bytes. Backends serialize admission and the write together; this also

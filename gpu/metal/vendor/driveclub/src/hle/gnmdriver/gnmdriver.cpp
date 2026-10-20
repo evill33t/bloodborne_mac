@@ -362,7 +362,12 @@ void FlipOnGpuThread(u32 vo_handle, u32 buf_idx, s64 flip_arg) {
         }
         // The flip is done when the host GPU has finished the frame: games reuse
         // the frame's buffers once they see it, and the GPU may still be reading.
-        r->Signal([vo_handle, buf_idx, flip_arg] {
+        // This exact closure changes only the permanent privately allocated
+        // VideoOut Driver labels/status and host EventQueue entries. Trigger
+        // wakes waiters without invoking guest code or dereferencing udata.
+        // Keep its GPU event and actual stores here; only its write effect is
+        // independent of the exposed direct-memory pool and physical aliases.
+        r->SignalNoDirectMemoryWrite([vo_handle, buf_idx, flip_arg] {
             VideoOut::Driver::Instance().OnFlipDone(static_cast<s32>(vo_handle), buf_idx, flip_arg);
         });
         return;

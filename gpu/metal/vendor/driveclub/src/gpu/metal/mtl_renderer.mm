@@ -42,11 +42,13 @@
 #include "gpu/metal/temporal_aa.h"
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/command_timeline.h"
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
+#include "gpu/metal/bound_vertex_fetch.h"
 #include "gpu/metal/native_indirect.h"
 #include "gpu/metal/native_writer_proof.h"
 #include "gpu/metal/native_writer_offsets.h"
@@ -294,6 +296,8 @@ struct MetalRenderer::Impl {
   // ---- recording ----
   id<MTLCommandBuffer> cmd = nil;
   id<MTLCommandBuffer> last_committed = nil;
+  std::shared_ptr<CommandTimeline::Log> command_timeline=CommandTimeline::Open();
+  double command_created=0;
   id<MTLRenderCommandEncoder> enc = nil;
   struct PassState {
     u64 color[8] = {};
@@ -342,11 +346,26 @@ struct MetalRenderer::Impl {
   id<MTLSharedEvent> signal_event = nil;
   MTLSharedEventListener *signal_listener = nil;
   u64 signal_value = 0;
+  struct SignalEffect {
+    enum class Kind {Unknown,NoDirectMemoryWrite,PhysicalWrite};
+    Kind kind=Kind::Unknown;
+    std::vector<NativeIndirect::Range> physical;
+    u64 mapping_generation=0;
+  };
+  struct SignalCallback {
+    u64 value;
+    std::function<void()> done;
+    SignalEffect effect;
+  };
   struct Signals {
     std::mutex lock;
-    std::deque<std::pair<u64,std::function<void()>>> queue;
+    std::deque<SignalCallback> queue;
     std::condition_variable changed;
     std::size_t active=0;
+    // The listener dispatch queue is serial. Moving the popped effect here
+    // under lock prevents an admission gap before the callback's actual store.
+    std::optional<SignalEffect> active_effect;
+    std::array<u64,3> enqueued_effects{};
     bool closed=false;
   };
   std::shared_ptr<Signals> signals=std::make_shared<Signals>();
@@ -638,8 +657,8 @@ struct MetalRenderer::Impl {
   u64 gpu_texture_uploads=0,gpu_texture_upload_bytes=0;
   bool gpu_written_texture_snapshot=std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT") &&
       !std::strcmp(std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT"),"1");
-  u64 texture_gpu_snapshots=0;
-  std::array<u64,9> texture_gpu_snapshot_rejects{};
+  u64 texture_gpu_snapshots=0,texture_gpu_snapshot_history_versions=0;
+  std::array<u64,13> texture_gpu_snapshot_rejects{};
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
@@ -652,6 +671,18 @@ struct MetalRenderer::Impl {
   std::unordered_map<u64,bool> native_vertex_fetch_programs;
   u64 native_vertex_fetch_draws=0;
   u64 native_vertex_fetch_extended_draws=0;
+  // Admission measurement only. No shader option, pointer binding or GPU
+  // read lease is changed until actual owned V# coverage is established.
+  bool bound_vertex_fetch_audit=std::getenv("BB_METAL_BOUND_VERTEX_FETCH_AUDIT") &&
+      !std::strcmp(std::getenv("BB_METAL_BOUND_VERTEX_FETCH_AUDIT"),"1");
+  enum class BoundReject : u32 { Context,Shape,Guard,DumpMissing,DumpBounds,DumpPending,
+      MapChanged,DumpChanged,Snapshot,PayloadMap,PayloadCp,PayloadCallback,Lease,Count };
+  std::array<u64,u32(BoundReject::Count)> bound_vertex_rejects{};
+  std::array<u64,u32(BoundVertexFetch::Reject::Count)> bound_vertex_snapshot_rejects{};
+  std::unordered_set<u64> bound_vertex_diagnostics;
+  std::unordered_set<u64> bound_vertex_positive_diagnostics;
+  u64 bound_vertex_candidates=0,bound_vertex_source_ready=0,bound_vertex_metadata_ready=0;
+  struct BoundVertexSource {u64 address=0,bytes=0,generation=0,map_generation=0,root_offset=0;};
   bool readonly_guest_memory_enabled=std::getenv("BB_METAL_READONLY_GUEST_MEMORY") &&
       std::strcmp(std::getenv("BB_METAL_READONLY_GUEST_MEMORY"),"1")==0;
   std::unordered_map<const Program*,bool> readonly_guest_programs;
@@ -664,7 +695,10 @@ struct MetalRenderer::Impl {
       std::getenv("BB_METAL_NATIVE_WORKLIST_EXTENT"));
   u64 native_worklist_refined=0,native_worklist_fallbacks=0;
   std::array<u64,7> native_worklist_fallback_reason{};
-  TextureWriteJournal texture_write_journal;
+  TextureWriteJournal texture_write_journal{TextureWriteJournal::ConfiguredLimit(
+      std::getenv("BB_METAL_TEXTURE_JOURNAL_RECORDS")),0,
+      native_texture_coherence && TextureWriteJournal::PageIndexEnabled(
+          std::getenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX")) ? Core::Memory::kDirectSize : 0};
   u64 texture_coherence_checks=0,texture_coherence_refreshes=0,texture_coherence_waits=0;
   WorldFrameQueue world_frames;
   const unsigned world_frame_limit=WorldFrameQueue::ConfiguredLimit();
@@ -685,6 +719,17 @@ struct MetalRenderer::Impl {
   static constexpr std::size_t kIndirectReadLimit=512;
   using CpuReadReady=std::function<bool(GuestAddr,std::size_t)>;
   CpuReadReady cp_cpu_read_ready;
+  CpuReadReady active_cpu_read_ready;
+  const CpuReadReady& CurrentCpuReadReady() const {
+    return active_cpu_read_ready ? active_cpu_read_ready : cp_cpu_read_ready;
+  }
+  struct ScopedCpuReadReady {
+    Impl& owner;
+    CpuReadReady previous;
+    ScopedCpuReadReady(Impl& owner,CpuReadReady next):owner(owner),
+        previous(std::move(owner.active_cpu_read_ready)) {owner.active_cpu_read_ready=std::move(next);}
+    ~ScopedCpuReadReady() {owner.active_cpu_read_ready=std::move(previous);}
+  };
   struct GuestWriter {
     std::vector<NativeIndirect::Range> physical;
     bool unknown=false;
@@ -1007,7 +1052,11 @@ struct MetalRenderer::Impl {
       return reject(1,"unreadable-or-invalid");
     if(ready && !ready(address,bytes))return reject(2,"pending-cpu-fence");
     PruneGuestWriters();
-    if(guest_writers.empty()) return true;
+    // Unknown closures (including arbitrary IRQ handlers) may change code or
+    // descriptors outside their announced label. Check before any CPU read,
+    // not only after the texture payload reaches GPU-source admission.
+    const bool callback_proof=gpu_written_texture_snapshot && native_indirect_enabled && native_texture_coherence;
+    if(guest_writers.empty() && !callback_proof) return true;
     std::vector<NativeIndirect::Range> physical;
     if(!PhysicalRanges(address,bytes,physical)) {
       // Runtime low mappings use private anonymous pages; flexible memory is
@@ -1019,8 +1068,18 @@ struct MetalRenderer::Impl {
           return reject(3,"partial-direct-mapping");
       for(id<MTLBuffer> buffer:mem) if(buffer && NativeIndirect::Overlap({address,bytes},
           {reinterpret_cast<u64>(buffer.contents),buffer.length}))return reject(4,"host-backing-view");
+      // The negative-alias proof excludes GPU direct-pool writers only. Even
+      // NoDirectMemoryWrite callbacks can change private labels/status, and
+      // a typed direct-write contract does not exclude other host-private
+      // stores. Neither proves an arbitrary private CPU read disjoint.
+      if(callback_proof) {
+        std::scoped_lock lk(signals->lock);
+        if(!signals->queue.empty() || signals->active)return reject(7,"pending-private-callback-effect");
+      }
       return true;
     }
+    if(callback_proof)for(const auto& range:physical)
+      if(SignalSourceBlock(range)!=UINT32_MAX)return reject(7,"pending-callback-effect");
     for(const auto& writer:guest_writers) {
       if(writer.unknown)return reject(5,"unknown-writer");
       for(const auto& a:writer.physical)for(const auto& b:physical)
@@ -1035,7 +1094,7 @@ struct MetalRenderer::Impl {
     if(source.kind==Shader::SgprSource::UserData) {value=ud[source.ud];return true;}
     // A producer's pointer-loaded V# can itself be changed by an earlier CPU
     // fence callback. Without the CP's read predicate, never infer its extent.
-    const auto& predicate=ready ? ready : cp_cpu_read_ready;
+    const auto& predicate=ready ? ready : CurrentCpuReadReady();
     if(producer && !predicate) return false;
     if(source.ud>=15 || (source.kind!=Shader::SgprSource::PointerLoad &&
         source.kind!=Shader::SgprSource::BufferLoad)) return false;
@@ -1116,6 +1175,17 @@ struct MetalRenderer::Impl {
       std::scoped_lock lk(signals->lock);
       return signals->queue.empty() && !signals->active;
     };
+    // Forgotten history still requires the caller's full content/hash check.
+    // It does not require draining disjoint callbacks when the current source
+    // has complete direct backing and BOTH the CP's pre-enqueue fence guard
+    // and queued/active callback effects prove it CPU-readable. Private or
+    // unresolved spans retain the original global-callback fallback below.
+    if(gpu_written_texture_snapshot && native_indirect_enabled && native_texture_coherence &&
+        CurrentCpuReadReady()) {
+      std::vector<NativeIndirect::Range> physical;
+      if(PhysicalRanges(address,bytes,physical) && !physical.empty() &&
+          CpuResourceRead(address,bytes,CurrentCpuReadReady()))return true;
+    }
     if(CpuResourceRead(address,bytes) && (!cpu_callbacks || signals_idle()))return true;
     ++texture_coherence_waits;
     StutterTrace::Scope timing("texture_source_wait",frame_count,address,bytes,0);
@@ -1177,7 +1247,7 @@ struct MetalRenderer::Impl {
     const u64 table=u64(ud[8])|(u64(ud[9]&0xfff)<<32);
     const u64 destination=u64(ud[12])|(u64(ud[13]&0xfff)<<32);
     const u64 bytes=u64(groups[0])*sizeof(NativeWorklist::Job);
-    const auto& predicate=ready ? ready : cp_cpu_read_ready;
+    const auto& predicate=ready ? ready : CurrentCpuReadReady();
     id<MTLBuffer> buffer=nil;u64 offset=0;
     if(!predicate || table>kGpuAddrMask || destination>kGpuAddrMask || (table&3) ||
         !CpuResourceRead(table,bytes,predicate) || !LocateIndirect(table,bytes,&buffer,&offset))
@@ -1245,7 +1315,7 @@ struct MetalRenderer::Impl {
       // Its GPU load returns all zeros unless its WHOLE footprint translates
       // to one contiguous buffer, so prove that before individual word copies.
       if(source[0].kind==Shader::SgprSource::PointerLoad) {
-        const auto& root=source[0];const auto& predicate=ready ? ready : cp_cpu_read_ready;
+        const auto& root=source[0];const auto& predicate=ready ? ready : CurrentCpuReadReady();
         const u64 table=(u64(ud[root.ud])|(u64(ud[root.ud+1])<<32))&0xffffffffffffull;
         id<MTLBuffer> buffer=nil;u64 offset=0;
         if(!predicate || table>UINT64_MAX-root.offset ||
@@ -1335,23 +1405,43 @@ struct MetalRenderer::Impl {
   }
   // No CPU payload read: only exact direct backing and tracked same-queue
   // writers. CP callbacks cannot be ordered by the source-copy GPU command.
+  u32 SignalSourceBlock(NativeIndirect::Range source) {
+    const u64 generation=Core::Memory::DirectMapGeneration();
+    std::scoped_lock lk(signals->lock);
+    const auto blocked=[&](const SignalEffect& effect,bool active)->u32 {
+      if(effect.kind==SignalEffect::Kind::NoDirectMemoryWrite)return UINT32_MAX;
+      if(effect.kind!=SignalEffect::Kind::PhysicalWrite)return active ? 4 : 3;
+      // A raw trusted closure is not a mapping lease. Any map change makes
+      // its captured physical destination uncertain until it has returned.
+      if(effect.mapping_generation!=generation)return active ? 12 : 11;
+      for(const auto& range:effect.physical)
+        if(NativeIndirect::Overlap(range,source))return active ? 10 : 9;
+      return UINT32_MAX;
+    };
+    if(signals->closed)return 3;
+    for(const auto& callback:signals->queue) {
+      const auto reason=blocked(callback.effect,false);
+      if(reason!=UINT32_MAX)return reason;
+    }
+    if(signals->active) {
+      if(!signals->active_effect)return 4;
+      return blocked(*signals->active_effect,true);
+    }
+    return UINT32_MAX;
+  }
   bool GpuTextureSource(u64 address,u64 bytes,const CpuReadReady& ready,
       id<MTLBuffer>* source,u64* offset) {
     if(!gpu_written_texture_snapshot || !native_indirect_enabled || !native_texture_coherence)return false;
     const auto reject=[&](u32 reason){++texture_gpu_snapshot_rejects[reason];return false;};
     if(!texture_uploader || !texture_uploader->Ready() || !bytes || bytes>(128ull<<20) ||
         (bytes&3))return reject(0);
-    const auto& predicate=ready ? ready : cp_cpu_read_ready;
+    const auto& predicate=ready ? ready : CurrentCpuReadReady();
     if(!predicate)return reject(1);
     if(!predicate(address,bytes))return reject(2);
     if(!IndirectReadAvailable())return reject(5);
     if(!LocateIndirect(address,bytes,source,offset))return reject(6);
-    {
-      std::scoped_lock lk(signals->lock);
-      if(!signals->queue.empty())return reject(3);
-      if(signals->active)return reject(4);
-    }
     const NativeIndirect::Range physical{*offset+(*source==mem[0] ? 0 : mem_split),bytes};
+    if(const auto reason=SignalSourceBlock(physical);reason!=UINT32_MAX)return reject(reason);
     PruneGuestWriters();bool overlap=false;
     for(const auto& writer:guest_writers) {
       if(writer.unknown)return reject(7);
@@ -1390,15 +1480,14 @@ struct MetalRenderer::Impl {
     u64 key=Hash(address);for(u32 k=1;k<6;++k)key=Hash(t[k],key);
     const auto cached=textures.find(key);
     const u64 generation=Core::Memory::DirectMapGeneration();
-    // Match GetTexture's conservative remap/history/callback gates without
-    // creating or changing an entry during native admission.
+    // Match GetTexture's exact existing entry and mapping gates without
+    // creating or changing an entry during native admission. Forgotten write
+    // history still invalidates its content, but a fresh immutable GPU copy
+    // may recover it only after GpuTextureSource proves all CURRENT writers.
     if(cached==textures.end() || !cached->second.tex ||
         cached->second.mapping_generation!=generation ||
         cached->second.source_range_generation!=generation ||
         !cached->second.source_physical_complete || cached->second.size!=bytes)return false;
-    const auto change=texture_write_journal.Inspect(cached->second.source_write_epoch,
-        cached->second.source_physical,true);
-    if(change.cpu_callbacks || change.relation==TextureWriteJournal::Relation::Unknown)return false;
     for(u32 level=0;level<levels;++level)
       if(!texture_uploader->SupportsGpuSourceTile(mips[level].tile_index))return false;
     id<MTLBuffer> source=nil;u64 offset=0;
@@ -1428,6 +1517,95 @@ struct MetalRenderer::Impl {
       }
     }
     return true;
+  }
+  bool RejectBoundVertex(BoundReject reason,const Program& program,const u32* ud,
+      const BoundVertexSource& source,const char* detail="") {
+    ++bound_vertex_rejects[u32(reason)];
+    const u64 root=(u64(ud[2])|(u64(ud[3])<<32))&0xffffffffffffull;
+    const u64 key=Hash(u32(reason),Hash(root,Hash(program.hash)));
+    if(bound_vertex_diagnostics.size()<64 && bound_vertex_diagnostics.insert(key).second)
+      DC_INFO("gpu bound vertex audit reject: frame=%llu vs=%#llx hash=%#llx reason=%u detail=%s root=%#llx dump=%#llx+%llu gen=%llu map=%llu",
+          frame_count,program.address,program.hash,u32(reason),detail,root,
+          source.address,source.bytes,source.generation,source.map_generation);
+    return false;
+  }
+  bool InspectBoundVertexSource(const Program& program,const u32* ud,bool wrapper,
+      BoundVertexSource& source) {
+    source={};++bound_vertex_candidates;
+    if(!wrapper || !gpu_written_texture_snapshot || !native_indirect_enabled || !native_texture_coherence)
+      return RejectBoundVertex(BoundReject::Context,program,ud,source);
+    auto [proof,inserted]=native_vertex_fetch_programs.try_emplace(program.hash,false);
+    if(inserted)proof->second=Shader::VertexNativeFetchEligible(program);
+    if(!proof->second)return RejectBoundVertex(BoundReject::Shape,program,ud,source);
+    const auto& ready=CurrentCpuReadReady();
+    if(!ready)return RejectBoundVertex(BoundReject::Guard,program,ud,source);
+    const u64 root=(u64(ud[2])|(u64(ud[3])<<32))&0xffffffffffffull;
+    const u64 patched_lookup=u64(ud[2])|(u64(ud[3]&0xfff)<<32);
+    auto dump=const_dumps.upper_bound(patched_lookup);
+    if(root!=patched_lookup || dump==const_dumps.begin())
+      return RejectBoundVertex(BoundReject::DumpMissing,program,ud,source);
+    --dump;
+    source={dump->first,dump->second.bytes,dump->second.gen,Core::Memory::DirectMapGeneration()};
+    const u64 table=root&~3ull;
+    const u64 bytes=u64(NativeVertexFetch::Layout(program.hash)->attributes)*16;
+    if(root<source.address || root-source.address>=source.bytes || table<source.address ||
+        bytes>source.bytes-(table-source.address))
+      return RejectBoundVertex(BoundReject::DumpBounds,program,ud,source);
+    source.root_offset=root-source.address;
+    // BEFORE PatchUserData's memcpy: ownership of its later arena allocation
+    // does not prove this complete guest source was CPU-readable now.
+    if(!CpuResourceRead(source.address,source.bytes,ready))
+      return RejectBoundVertex(BoundReject::DumpPending,program,ud,source);
+    ++bound_vertex_source_ready;return true;
+  }
+  void InspectBoundVertexPrepared(const Program& program,const u32* ud,
+      const BoundVertexSource& source,std::span<const StaticSmrd::Snapshot> snapshots) {
+    if(source.map_generation!=Core::Memory::DirectMapGeneration()) {
+      RejectBoundVertex(BoundReject::MapChanged,program,ud,source);return;
+    }
+    const auto dump=const_dumps.find(source.address);
+    if(dump==const_dumps.end() || dump->second.bytes!=source.bytes || dump->second.gen!=source.generation) {
+      RejectBoundVertex(BoundReject::DumpChanged,program,ud,source);return;
+    }
+    const StaticSmrd::Window window{arena_va,kArenaSize,arena_head,arena_commit_head,arena_pin};
+    const u64 patched_root=(u64(ud[2])|(u64(ud[3])<<32))&0xffffffffffffull;
+    const StaticSmrd::Snapshot* owner=nullptr;
+    for(const auto& snapshot:snapshots)if(StaticSmrd::Valid(snapshot,window) &&
+        snapshot.generation==source.generation && snapshot.bytes==source.bytes &&
+        source.root_offset<snapshot.bytes && patched_root==snapshot.address+source.root_offset) {
+      if(owner) {RejectBoundVertex(BoundReject::Snapshot,program,ud,source,"ambiguous-source-owner");return;}
+      owner=&snapshot;
+    }
+    if(!owner) {RejectBoundVertex(BoundReject::Snapshot,program,ud,source,"root-not-prepared-from-source");return;}
+    BoundVertexFetch::Prepared prepared;
+    const auto result=BoundVertexFetch::Prepare(program.hash,std::span<const u32,16>(ud,16),
+        std::span<const StaticSmrd::Snapshot>(owner,1),window,prepared);
+    if(result!=BoundVertexFetch::Reject::None) {
+      ++bound_vertex_snapshot_rejects[u32(result)];
+      RejectBoundVertex(BoundReject::Snapshot,program,ud,source,BoundVertexFetch::Names[u32(result)]);return;
+    }
+    id<MTLBuffer> buffer=nil;u64 offset=0;
+    if(!LocateIndirect(prepared.payload,prepared.bytes,&buffer,&offset)) {
+      RejectBoundVertex(BoundReject::PayloadMap,program,ud,source);return;
+    }
+    const auto& ready=CurrentCpuReadReady();
+    if(!ready || !ready(prepared.payload,prepared.bytes)) {
+      RejectBoundVertex(BoundReject::PayloadCp,program,ud,source);return;
+    }
+    const NativeIndirect::Range physical{offset+(buffer==mem[0] ? 0 : mem_split),prepared.bytes};
+    if(SignalSourceBlock(physical)!=UINT32_MAX) {
+      RejectBoundVertex(BoundReject::PayloadCallback,program,ud,source);return;
+    }
+    if(!IndirectReadAvailable()) {RejectBoundVertex(BoundReject::Lease,program,ud,source);return;}
+    // This is an observation, not an admission: no payload pointer is bound,
+    // and no read lease is published by the audit. A future GPU path must
+    // lease these bytes on the ACTUAL consumer command after any setup cuts.
+    ++bound_vertex_metadata_ready;
+    if(bound_vertex_positive_diagnostics.size()<16 &&
+        bound_vertex_positive_diagnostics.insert(Hash(source.address,Hash(program.hash))).second)
+      DC_INFO("gpu bound vertex audit ready: frame=%llu hash=%#llx dump=%#llx+%llu gen=%llu prepared-table=%#llx payload=%#llx+%llu stride=%u attributes=%u records=%u..%u; metadata only",
+          frame_count,program.hash,source.address,source.bytes,source.generation,prepared.table,
+          prepared.payload,prepared.bytes,prepared.stride,prepared.attributes,prepared.min_records,prepared.max_records);
   }
   void PruneIndirectReads() {
     std::erase_if(indirect_reads,[](const IndirectRead& read) {
@@ -1569,6 +1747,7 @@ struct MetalRenderer::Impl {
     if (!cmd) {
       StutterTrace::Scope timing("command_buffer_create",frame_count,last_vs,last_ps,1);
       cmd = [queue commandBuffer];
+      if(command_timeline)command_created=StutterTrace::Now();
     }
   }
 
@@ -1773,6 +1952,19 @@ struct MetalRenderer::Impl {
       }
       state->Notify();
     }];
+    if(command_timeline) {
+      const auto log=command_timeline;
+      const CommandTimeline::Submission submission{submission_id,frame_count,last_vs,last_ps,last_cs,
+          command_created,StutterTrace::Now(),wait};
+      const auto scheduled=std::make_shared<std::atomic<double>>(0);
+      [cmd addScheduledHandler:^(id<MTLCommandBuffer>) {
+        scheduled->store(StutterTrace::Now(),std::memory_order_release);
+      }];
+      [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        log->Complete(submission,scheduled->load(std::memory_order_acquire),completed.GPUStartTime,
+            completed.GPUEndTime,StutterTrace::Now(),long(completed.status),long(completed.error.code));
+      }];
+    }
     [cmd commit];
     last_committed = cmd;
     cmd = nil;
@@ -1939,15 +2131,21 @@ struct MetalRenderer::Impl {
 
   // Command buffers on one queue complete in order, and their completion
   // handlers run in order on Metal's serial completion queue.
-  void Signal(std::function<void()> done) {
+  void SignalWithEffect(std::function<void()> done,SignalEffect effect,bool unknown_content=false) {
     EndPass();
     EnsureCommandBuffer();
     const u64 v = ++signal_value;
     const auto callbacks=signals;
     const auto state=execution;
+    // Unknown closures may modify more than an announced fence destination.
+    // Retain their invalidation after completion as well as during admission.
+    // The renderer lock covers this marker and the following queue insertion.
+    if(native_texture_coherence && unknown_content)
+      texture_write_journal.Publish({},true,true);
     {
       std::scoped_lock lk(callbacks->lock);
-      callbacks->queue.emplace_back(v, std::move(done));
+      ++callbacks->enqueued_effects[static_cast<std::size_t>(effect.kind)];
+      callbacks->queue.push_back({v,std::move(done),std::move(effect)});
     }
     [cmd encodeSignalEvent:signal_event value:v];
     [signal_event notifyListener:signal_listener
@@ -1955,6 +2153,20 @@ struct MetalRenderer::Impl {
                            block:^(id<MTLSharedEvent> e, uint64_t) {
                              RunSignals(callbacks,state,e.signaledValue);
                            }];
+  }
+  void Signal(std::function<void()> done) {SignalWithEffect(std::move(done),SignalEffect{},true);}
+  SignalEffect CpuWriteSignalEffect(u64 address,u64 bytes) {
+    SignalEffect effect;
+    // Effect ranges serve only the opt-in GPU-source admission. Keep the
+    // default renderer and native-without-snapshots free of this map walk.
+    if(!gpu_written_texture_snapshot || !native_indirect_enabled || !native_texture_coherence)return effect;
+    if(!bytes || !PhysicalRanges(address,bytes,effect.physical) || effect.physical.empty())return effect;
+    for(const auto& range:effect.physical)
+      if(!range.bytes || range.address>=Core::Memory::kDirectSize ||
+          range.bytes>Core::Memory::kDirectSize-range.address) {effect.physical.clear();return effect;}
+    effect.kind=SignalEffect::Kind::PhysicalWrite;
+    effect.mapping_generation=Core::Memory::DirectMapGeneration();
+    return effect;
   }
 
   // Listener queue: runs, in order, the callbacks of every value reached.
@@ -1965,10 +2177,17 @@ struct MetalRenderer::Impl {
       {
         std::scoped_lock lk(callbacks->lock);
         if(callbacks->closed || state->Failed()) {callbacks->queue.clear();callbacks->changed.notify_all();return;}
-        if (callbacks->queue.empty() || callbacks->queue.front().first > reached) {
+        if (callbacks->queue.empty() || callbacks->queue.front().value > reached) {
           return;
         }
-        fn = std::move(callbacks->queue.front().second);
+        // All listener notifications run on one serial dispatch queue. Keep
+        // the effect visible from the pop until after the closure returns.
+        if(callbacks->active || callbacks->active_effect) {
+          state->Fail("GPU signal listener lost its serial callback ordering.");
+          callbacks->changed.notify_all();return;
+        }
+        fn = std::move(callbacks->queue.front().done);
+        callbacks->active_effect.emplace(std::move(callbacks->queue.front().effect));
         callbacks->queue.pop_front();
         ++callbacks->active;
       }
@@ -1978,6 +2197,7 @@ struct MetalRenderer::Impl {
       {
         std::scoped_lock lk(callbacks->lock);
         --callbacks->active;
+        callbacks->active_effect.reset();
       }
       callbacks->changed.notify_all();
     }
@@ -2578,12 +2798,16 @@ struct MetalRenderer::Impl {
             e.source_physical,e.source_physical_complete);
         source_callbacks|=change.cpu_callbacks;
       }
-      bool supported=gpu_written_texture_snapshot && tt.dim==TexDim::Tex2D && !source_remapped && !source_callbacks &&
+      // Historical uncertainty still forces a new version. A complete current
+      // callback-effect proof can safely copy its present bytes on the GPU;
+      // it does not validate/reuse the old CPU hash baseline or skip a remap.
+      bool supported=gpu_written_texture_snapshot && tt.dim==TexDim::Tex2D && !source_remapped &&
+          e.tex && e.size==size && e.source_range_generation==generation && e.source_physical_complete &&
           !std::getenv("BB_METAL_CAPTURE_TEXTURE") && capture_root.empty() && dump_texture!=addr && texture_uploader &&
           texture_uploader->SupportsFormat(fi.format);
       for(u32 level=0;supported && level<levels;++level)
         supported=texture_uploader->SupportsGpuSourceTile(mips[level].tile_index);
-      gpu_source=supported && GpuTextureSource(addr,size,cp_cpu_read_ready,&gpu_source_buffer,&gpu_source_offset);
+      gpu_source=supported && GpuTextureSource(addr,size,CurrentCpuReadReady(),&gpu_source_buffer,&gpu_source_offset);
       if(!gpu_source && !ReadyTextureSource(addr,size,source_callbacks))return Dummy(tt);
       if(force_content_check)++texture_coherence_refreshes;
     }
@@ -2671,7 +2895,7 @@ struct MetalRenderer::Impl {
       if(gpu_source) {
         // Recheck capacity/mapping after EndPass (profiling may submit it).
         id<MTLBuffer> checked=nil;u64 checked_offset=0;
-        if(GpuTextureSource(addr,size,cp_cpu_read_ready,&checked,&checked_offset) &&
+        if(GpuTextureSource(addr,size,CurrentCpuReadReady(),&checked,&checked_offset) &&
             checked==gpu_source_buffer && checked_offset==gpu_source_offset) {
           TrackIndirectRead(addr,size,checked,checked_offset);
         } else gpu_source=false;
@@ -2698,7 +2922,10 @@ struct MetalRenderer::Impl {
       gpu_uploaded=result==GpuTextureUploader::Result::Encoded;
       if(gpu_uploaded) {
         ++gpu_texture_uploads;gpu_texture_upload_bytes+=size;
-        if(gpu_source)++texture_gpu_snapshots;
+        if(gpu_source) {
+          ++texture_gpu_snapshots;
+          if(source_callbacks)++texture_gpu_snapshot_history_versions;
+        }
       }
     }
     // A selected GPU source must never reach a CPU content path without
@@ -3835,9 +4062,8 @@ struct MetalRenderer::Impl {
 };
 
 bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 address,const CpuReadReady& ready) {
-  // Optional SMRD packing/address extraction has additional CPU leaf reads.
-  // Keep its combination on the drained path until those spans are proved.
-  if(!native_indirect_enabled || static_smrd_enabled || direct_smrd_enabled ||
+  // Address extraction retains its conservative drained-path admission.
+  if(!native_indirect_enabled || direct_smrd_enabled ||
       dc.indexed || !IndirectReadAvailable() ||
       r[Reg::DB_RENDER_CONTROL] || Bits(r[Reg::CB_COLOR_CONTROL],4,3)!=1) return false;
   switch(r.Primitive()) {
@@ -3891,6 +4117,10 @@ bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 a
   const u64 pixel_address=r.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS);
   auto* pixel=pixel_address ? NativeProgram(Stage::Fragment,pixel_address,pud,
       Bits(r[Reg::SPI_SHADER_PGM_RSRC2_PS],1,5),0,0,ready) : nullptr;
+  // Static packing changes setup only for these exact retail layouts. Keep
+  // those indirect draws on the drained path; all other PS programs execute
+  // the identical preparation path with this flag on or off.
+  if(static_smrd_enabled && pixel && !StaticSmrd::Layout(pixel->hash).empty())return false;
   unsigned target_count=0;
   for(u32 k=0;k<8;++k) if(((r[Reg::CB_TARGET_MASK]>>(4*k))&15) &&
       ((r[Reg::SPI_SHADER_COL_FORMAT]>>(4*k))&15)) ++target_count;
@@ -4266,6 +4496,10 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     prepared[prepared_count++]=lud;prepared[prepared_count++]=hud;
   }
   SnapshotArena::Pin snapshot_pin(arena_pin);
+  BoundVertexSource bound_vertex_source;
+  const bool inspect_bound_vertex=bound_vertex_fetch_audit && NativeVertexFetch::Layout(vs->hash) &&
+      InspectBoundVertexSource(*vs,vud,!tessellated && prim!=PrimType::RectList &&
+          prim!=PrimType::PointList && !debug_vsout && !probe_buf,bound_vertex_source);
   bool static_smrd_eligible=false;
   if((static_smrd_enabled || direct_smrd_enabled) && ps && !probe_buf && !StaticSmrd::Layout(ps->hash).empty()) {
     if(static_smrd_enabled) ++static_smrd_attempts;
@@ -4275,7 +4509,9 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
   const bool use_direct_smrd=direct_smrd_enabled && !static_smrd_enabled && static_smrd_eligible;
   std::vector<StaticSmrd::Snapshot> static_smrd_sources;
-  if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),static_smrd_enabled && static_smrd_eligible ? &static_smrd_sources : nullptr)) return;
+  if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),
+      (inspect_bound_vertex || (static_smrd_enabled && static_smrd_eligible)) ? &static_smrd_sources : nullptr)) return;
+  if(inspect_bound_vertex)InspectBoundVertexPrepared(*vs,vud,bound_vertex_source,static_smrd_sources);
   StaticSmrd::Packed static_smrd_packed;
   const bool use_static_smrd=static_smrd_enabled && !direct_smrd_enabled && static_smrd_eligible && StaticSmrd::Pack(ps->hash,std::span<const u32,16>(pud),static_smrd_sources,
       {arena_va,kArenaSize,arena_head,arena_commit_head,arena_pin},static_smrd_packed);
@@ -5493,18 +5729,52 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_vertex_fetch_draws);
       if(native_vertex_fetch_extended_enabled) DC_INFO("gpu extended vertex fetch: %llu guarded candidate draws (cumulative)",
           native_vertex_fetch_extended_draws);
+      if(bound_vertex_fetch_audit) {
+        DC_INFO("gpu bound vertex audit: %llu candidates, %llu complete dump sources ready, %llu metadata ready; NO GPU bindings or leases (cumulative)",
+            bound_vertex_candidates,bound_vertex_source_ready,bound_vertex_metadata_ready);
+        DC_INFO("gpu bound vertex audit rejects: context=%llu shape=%llu guard=%llu dump-missing=%llu dump-bounds=%llu dump-pending=%llu map-changed=%llu dump-changed=%llu snapshot=%llu payload-map=%llu payload-cp=%llu payload-callback=%llu lease=%llu (cumulative)",
+            bound_vertex_rejects[0],bound_vertex_rejects[1],bound_vertex_rejects[2],bound_vertex_rejects[3],
+            bound_vertex_rejects[4],bound_vertex_rejects[5],bound_vertex_rejects[6],bound_vertex_rejects[7],
+            bound_vertex_rejects[8],bound_vertex_rejects[9],bound_vertex_rejects[10],bound_vertex_rejects[11],bound_vertex_rejects[12]);
+        DC_INFO("gpu bound vertex snapshot rejects: layout=%llu root=%llu ownership=%llu ambiguous=%llu flags=%llu format=%llu empty=%llu base=%llu overflow=%llu (cumulative; source-owner failures also use snapshot total)",
+            bound_vertex_snapshot_rejects[1],bound_vertex_snapshot_rejects[2],bound_vertex_snapshot_rejects[3],
+            bound_vertex_snapshot_rejects[4],bound_vertex_snapshot_rejects[5],bound_vertex_snapshot_rejects[6],
+            bound_vertex_snapshot_rejects[7],bound_vertex_snapshot_rejects[8],bound_vertex_snapshot_rejects[9]);
+      }
       if(readonly_guest_memory_enabled) DC_INFO("gpu readonly guest: %llu qualified vertex bindings, %llu qualified fragment bindings (cumulative)",
           readonly_guest_vs_bindings,readonly_guest_ps_bindings);
       if(native_indirect_enabled) DC_INFO("gpu indirect: %llu native draws, %llu native dispatches, %llu CP write waits, %zu pending reads (cumulative)",
           native_indirect_draws,native_indirect_dispatches,indirect_cpu_write_waits,indirect_reads.size());
       if(native_indirect_enabled) DC_INFO("gpu indirect resources: %llu rejected admissions, %llu unknown writer tickets, %zu pending writers (cumulative)",
           indirect_resource_rejects,unknown_guest_writers,guest_writers.size());
-      if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions; source probes rejected [context=%llu missing-guard=%llu cp-overlap=%llu callback-queued=%llu callback-active=%llu lease=%llu mapping=%llu unknown=%llu no-overlap=%llu] (cumulative)",
-          texture_gpu_snapshots,texture_gpu_snapshot_rejects[0],texture_gpu_snapshot_rejects[1],
+      if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions, %llu recovered historical callback uncertainty; source probes rejected [context=%llu missing-guard=%llu cp-overlap=%llu callback-queued-unknown=%llu callback-active-unknown=%llu lease=%llu mapping=%llu unknown-gpu-writer=%llu no-overlap=%llu callback-queued-overlap=%llu callback-active-overlap=%llu callback-queued-remap=%llu callback-active-remap=%llu] (cumulative)",
+          texture_gpu_snapshots,texture_gpu_snapshot_history_versions,texture_gpu_snapshot_rejects[0],texture_gpu_snapshot_rejects[1],
           texture_gpu_snapshot_rejects[2],texture_gpu_snapshot_rejects[3],texture_gpu_snapshot_rejects[4],
-          texture_gpu_snapshot_rejects[5],texture_gpu_snapshot_rejects[6],texture_gpu_snapshot_rejects[7],texture_gpu_snapshot_rejects[8]);
+          texture_gpu_snapshot_rejects[5],texture_gpu_snapshot_rejects[6],texture_gpu_snapshot_rejects[7],texture_gpu_snapshot_rejects[8],
+          texture_gpu_snapshot_rejects[9],texture_gpu_snapshot_rejects[10],texture_gpu_snapshot_rejects[11],texture_gpu_snapshot_rejects[12]);
+      if(gpu_written_texture_snapshot) {
+        std::array<u64,3> enqueued{},queued{},active{};
+        {
+          std::scoped_lock lk(signals->lock);enqueued=signals->enqueued_effects;
+          for(const auto& callback:signals->queue)++queued[static_cast<std::size_t>(callback.effect.kind)];
+          if(signals->active_effect)++active[static_cast<std::size_t>(signals->active_effect->kind)];
+        }
+        DC_INFO("gpu callback effects: enqueued [unknown=%llu independent=%llu physical=%llu]; queued [%llu,%llu,%llu] active [%llu,%llu,%llu] (cumulative enqueues)",
+            enqueued[0],enqueued[1],enqueued[2],queued[0],queued[1],queued[2],active[0],active[1],active[2]);
+      }
       if(native_texture_coherence) DC_INFO("gpu texture coherence: %llu checks, %llu full refresh checks, %llu source waits, %zu retained ranges (cumulative)",
           texture_coherence_checks,texture_coherence_refreshes,texture_coherence_waits,texture_write_journal.Size());
+      if(native_texture_coherence) {
+        const auto journal=texture_write_journal.GetStats();
+        DC_INFO("gpu texture journal: capacity=%zu retained=%zu evictions=%llu queries=%llu queried-source-bytes=%llu forgotten-queries=%llu forgotten-source-bytes=%llu examined-records=%llu (cumulative; supplied physical spans, not hash bytes)",
+            texture_write_journal.Capacity(),texture_write_journal.Size(),journal.evicted_records,
+            journal.queries,journal.queried_source_bytes,journal.forgotten_queries,
+            journal.forgotten_source_bytes,journal.examined_records);
+        DC_INFO("gpu texture journal pages: enabled=%u extent=%llu bytes=%zu queries=%llu checks=%llu updates=%llu allocation-failures=%llu (cumulative; 16KiB physical pages)",
+            unsigned(texture_write_journal.PageIndexActive()),texture_write_journal.PageIndexExtent(),
+            texture_write_journal.PageIndexBytes(),journal.indexed_queries,journal.page_checks,
+            journal.page_updates,journal.index_allocation_failures);
+      }
       if(native_worklist_extent) DC_INFO("gpu worklist extents: %llu refined, %llu conservative fallbacks "
           "[context=%llu layout=%llu input=%llu overflow=%llu output=%llu self=%llu capacity=%llu] (cumulative)",
           native_worklist_refined,native_worklist_fallbacks,native_worklist_fallback_reason[0],
@@ -5691,7 +5961,8 @@ bool MetalRenderer::DrawIndirect(const RegFile& regs,const DrawCall& draw,GuestA
     const std::function<bool(GuestAddr,std::size_t)>& ready) {
   std::scoped_lock lk(impl->lock);
   FrameWork::Bind frame_work(impl->frame_work);
-  const auto& predicate=ready ? ready : impl->cp_cpu_read_ready;
+  const auto predicate=ready ? ready : impl->CurrentCpuReadReady();
+  Impl::ScopedCpuReadReady scoped_ready(*impl,predicate);
   if(Execution()->Failed() || (predicate && !predicate(address,16))) return false;
   impl->last_vs=regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_VS);
   impl->last_ps=regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS);
@@ -5703,7 +5974,8 @@ bool MetalRenderer::DispatchIndirect(const RegFile& regs,GuestAddr address,
     const std::function<bool(GuestAddr,std::size_t)>& ready) {
   std::scoped_lock lk(impl->lock);
   FrameWork::Bind frame_work(impl->frame_work);
-  const auto& predicate=ready ? ready : impl->cp_cpu_read_ready;
+  const auto predicate=ready ? ready : impl->CurrentCpuReadReady();
+  Impl::ScopedCpuReadReady scoped_ready(*impl,predicate);
   if(Execution()->Failed() || (predicate && !predicate(address,12))) return false;
   impl->last_cs=regs.ProgramAddr(Reg::COMPUTE_PGM_LO);
   StutterTrace::Scope timing("dispatch_indirect_record",impl->frame_count,address,impl->last_cs);
@@ -5873,6 +6145,25 @@ void MetalRenderer::SignalCpuWrite(GuestAddr address,std::size_t bytes,std::func
     // marker whose callback has not yet been enqueued on the signal worker.
     impl->NoteTextureCpuWrite(address,bytes,true);
     impl->Signal(std::move(done));
+  }
+}
+void MetalRenderer::SignalNoDirectMemoryWrite(std::function<void()> done) {
+  std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed())return;
+  @autoreleasepool {
+    Impl::SignalEffect effect;effect.kind=Impl::SignalEffect::Kind::NoDirectMemoryWrite;
+    impl->SignalWithEffect(std::move(done),std::move(effect));
+  }
+}
+void MetalRenderer::SignalCpuWriteOnly(GuestAddr address,std::size_t bytes,std::function<void()> done) {
+  std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed())return;
+  @autoreleasepool {
+    auto effect=impl->CpuWriteSignalEffect(address,bytes);
+    // The precise content marker and callback effect are published under one
+    // admission lock. Unresolved/non-direct destinations stay unknown.
+    impl->NoteTextureCpuWrite(address,bytes,true);
+    impl->SignalWithEffect(std::move(done),std::move(effect));
   }
 }
 

@@ -61,6 +61,8 @@ public:
     void Signal(std::function<void()> done) override;
     void NotePendingCpuWrite(GuestAddr address,std::size_t bytes) override;
     void SignalCpuWrite(GuestAddr address,std::size_t bytes,std::function<void()> done) override;
+    void SignalNoDirectMemoryWrite(std::function<void()> done) override;
+    void SignalCpuWriteOnly(GuestAddr address,std::size_t bytes,std::function<void()> done) override;
     void NoteConstDump(std::uint64_t addr, std::uint32_t bytes) override;
     void Flip(const FlipInfo& flip) override;
     void OnContextRegs(const std::uint32_t* body, std::uint32_t body_dwords,std::size_t available_words) override;

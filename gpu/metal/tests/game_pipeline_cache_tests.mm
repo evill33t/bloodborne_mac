@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #import <Metal/Metal.h>
+#include <CommonCrypto/CommonDigest.h>
 #include "gpu/metal/mtl_compiler.h"
 #include <cassert>
 #include <atomic>
@@ -50,12 +51,55 @@ std::string FileContents(const std::filesystem::path& path) {
     std::ifstream input(path,std::ios::binary);
     return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};
 }
+std::string Digest(const void* bytes,std::size_t count) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(bytes,static_cast<CC_LONG>(count),digest);
+    std::string result;for(unsigned char byte:digest){result+="0123456789abcdef"[byte>>4];result+="0123456789abcdef"[byte&15];}return result;
+}
+std::string Identity(const char* name,const char* architecture,std::uint64_t major,std::uint64_t minor,std::uint64_t patch) {
+    const auto material=Gpu::Metal::PipelineRecipeIdentity::Material(name,architecture,major,minor,patch);
+    return Digest(material.data(),material.size());
+}
 std::filesystem::path RecipeRoot(const std::filesystem::path& directory,id<MTLDevice> device) {
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
-    char identity[128];
-    std::snprintf(identity,sizeof(identity),"%llx-%ld.%ld.%ld",device.registryID,
+    return directory/"metal-cache"/"prewarm-v2"/Identity(device.name.UTF8String,
+        Gpu::Metal::PipelineRecipeIdentity::Architecture(),os.majorVersion,os.minorVersion,os.patchVersion);
+}
+std::filesystem::path LegacyRoot(const std::filesystem::path& directory,std::uint64_t registry) {
+    const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
+    char identity[128];std::snprintf(identity,sizeof(identity),"%llx-%ld.%ld.%ld",static_cast<unsigned long long>(registry),
         os.majorVersion,os.minorVersion,os.patchVersion);
     return directory/"metal-cache"/"prewarm-v1"/identity;
+}
+int MetadataIdentityTests() {
+    using namespace Gpu::Metal::PipelineRecipeIdentity;
+    const auto identity=Identity("Example GPU / private device","x86_64",27,0,0);
+    assert(identity.size()==64 && identity.find("Example")==std::string::npos && identity.find('/')==std::string::npos);
+    assert(identity==Identity("Example GPU / private device","x86_64",27,0,0));
+    assert(identity!=Identity("Other GPU","x86_64",27,0,0));
+    assert(identity!=Identity("Example GPU / private device","arm64",27,0,0));
+    assert(identity!=Identity("Example GPU / private device","x86_64",27,0,1));
+    assert(Material("ab","c",27,0,0)!=Material("a","bc",27,0,0));
+    assert(LegacyDirectory("100000575-27.0.0","27.0.0"));
+    assert(!LegacyDirectory("100000575-26.0.0","27.0.0"));
+    assert(!LegacyDirectory("../100000575-27.0.0","27.0.0"));
+    assert(!LegacyDirectory("100000575-27.0.0/child","27.0.0"));
+    assert(!LegacyDirectory("10000000000000000-27.0.0","27.0.0"));
+    char directory[]="/tmp/bb-metal-identity-XXXXXX";assert(mkdtemp(directory));
+    const std::filesystem::path base=std::filesystem::canonical(directory),target=base/"metal-cache"/"prewarm-v2"/identity;
+    assert(PlainDirectories(base,target,true) && !PlainDirectories(base,target,false));
+    std::filesystem::create_directories(target);
+    assert(PlainDirectories(base,target,false));
+    assert(!PlainDirectories(base,base/".."/"outside",true));
+    const auto private_directory=base/"private";std::filesystem::create_directory(private_directory);
+    std::filesystem::remove_all(base/"metal-cache");
+    std::filesystem::create_directory_symlink(private_directory,base/"metal-cache");
+    assert(!PlainDirectories(base,target,true));
+    std::filesystem::remove(base/"metal-cache");std::filesystem::create_directories(target.parent_path());
+    std::filesystem::create_directory_symlink(private_directory,target);
+    assert(!PlainDirectories(base,target,false));
+    std::filesystem::remove_all(base);
+    puts("Source-recipe identity: device/architecture/OS separation, private hashed paths, bounded legacy names and symlink containment passed (no GPU)");
+    return 0;
 }
 void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64_t bytes) {
     std::filesystem::create_directories(root);
@@ -80,6 +124,7 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
 @property(nonatomic) unsigned archiveCalls;
 @property(nonatomic,readonly) unsigned libraryCalls;
 @property(nonatomic) BOOL captureDescriptors;
+@property(nonatomic) std::uint64_t registryOverride;
 @property(nonatomic,strong) NSMutableArray<MTLRenderPipelineDescriptor*>* renderDescriptors;
 @property(nonatomic,strong) NSMutableArray<MTLComputePipelineDescriptor*>* computeDescriptors;
 + (instancetype)wrapping:(id<MTLDevice>)device;
@@ -111,6 +156,7 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
     [invocation invokeWithTarget:underlying];
 }
 - (unsigned)libraryCalls {return library_calls.load(std::memory_order_relaxed);}
+- (uint64_t)registryID {return _registryOverride ? _registryOverride : underlying.registryID;}
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor*)descriptor error:(NSError**)error {
     (void)descriptor;
     ++_archiveCalls;
@@ -118,6 +164,111 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
     return nil;
 }
 @end
+
+static void LegacyRecipeMigration(id<MTLDevice> device) {
+    using Compiler=Gpu::Metal::ShaderCompiler;
+    char directory[]="/tmp/bb-metal-legacy-XXXXXX";assert(mkdtemp(directory));
+    setenv("BB_DATA_DIR",directory,1);unsetenv("BB_GAME_DIR");unsetenv("BB_SOURCE_GAME");unsetenv("BB_METAL_SHADER_PREWARM");
+    const auto stable=RecipeRoot(directory,device),legacy=LegacyRoot(directory,0x111),duplicate=LegacyRoot(directory,0x222);
+    {
+        Compiler compiler(device,2);compiler.EnablePrewarming();
+        for(unsigned group:{41u,42u})AreaPipeline(compiler,group);
+    }
+    const auto originals=Recipes(directory);assert(originals.size()==2);
+    std::filesystem::create_directories(legacy);std::filesystem::create_directories(duplicate);
+    std::vector<std::pair<std::filesystem::path,std::string>> preserved;
+    for(const auto& source:originals)for(const auto& root:{legacy,duplicate}) {
+        const auto destination=root/source.filename();std::filesystem::copy_file(source,destination);
+        preserved.emplace_back(destination,FileContents(destination));
+    }
+    NSData* seed=[NSData dataWithContentsOfFile:@(originals.front().c_str())];
+    NSDictionary* seed_recipe=[NSJSONSerialization JSONObjectWithData:seed options:0 error:nil];
+    const auto write_recipe=[&](const std::filesystem::path& root,unsigned group) {
+        std::filesystem::create_directories(root);
+        NSMutableDictionary* recipe=[seed_recipe mutableCopy];recipe[@"group"]=@(group);
+        NSData* bytes=[NSJSONSerialization dataWithJSONObject:recipe options:NSJSONWritingSortedKeys error:nil];
+        const auto path=root/(Digest(bytes.bytes,bytes.length)+".json");
+        assert([bytes writeToFile:@(path.c_str()) atomically:YES]);return path;
+    };
+    // Valid bytes with an incorrect filename and hash-valid invalid schemas
+    // must not be admitted or passed to Metal.
+    std::ofstream(legacy/(std::string(64,'0')+".json"))<<FileContents(originals.front());
+    const auto invalid=write_recipe(legacy,2048);
+    const auto protected_root=std::filesystem::path(directory)/"protected";
+    const auto protected_link=write_recipe(protected_root,43),protected_hardlink=write_recipe(protected_root,44);
+    std::filesystem::create_symlink(protected_link,legacy/protected_link.filename());
+    std::filesystem::create_hard_link(protected_hardlink,legacy/protected_hardlink.filename());
+    const auto linked_directory=LegacyRoot(directory,0x333);
+    std::filesystem::create_directory_symlink(protected_root,linked_directory);
+    const auto wrong_os=std::filesystem::path(directory)/"metal-cache"/"prewarm-v1"/"444-0.0.0";
+    write_recipe(wrong_os,45);
+    for(const auto& file:{invalid,protected_link,protected_hardlink})preserved.emplace_back(file,FileContents(file));
+    std::vector<std::filesystem::file_time_type> original_times;
+    for(const auto& file:preserved)original_times.push_back(std::filesystem::last_write_time(file.first));
+    std::filesystem::remove_all(stable);
+    {
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.registryOverride=device.registryID+0x1000;spy.captureDescriptors=YES;
+        assert(RecipeRoot(directory,(id<MTLDevice>)spy)==stable); // a different boot ID retains the source namespace
+        Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+        while((compiler.GetWarmupStats().ready<2 || !std::filesystem::exists(stable/originals[0].filename()) ||
+               !std::filesystem::exists(stable/originals[1].filename())) && std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(compiler.GetWarmupStats().loaded==2 && compiler.GetWarmupStats().ready==2);
+        assert(spy.computeDescriptors.count==2 && spy.renderDescriptors.count==0 && spy.libraryCalls==1);
+        for(const auto& original:originals)assert(FileContents(stable/original.filename())==FileContents(legacy/original.filename()));
+        std::promise<void> started,release;auto gate=release.get_future().share();
+        compiler.Submit([&started,gate]{started.set_value();gate.wait();},true);started.get_future().wait();
+        std::vector<std::filesystem::file_time_type> stable_times;
+        for(const auto& original:originals)stable_times.push_back(std::filesystem::last_write_time(stable/original.filename()));
+        for(unsigned repeat=0;repeat<3;++repeat)for(unsigned group:{41u,42u})AreaPipeline(compiler,group);
+        assert(compiler.GetWarmupStats().hits==6 && compiler.GetWarmupStats().pending==0);
+        assert(spy.computeDescriptors.count==2 && spy.libraryCalls==1 && spy.archiveCalls==0);
+        for(unsigned i=0;i<originals.size();++i)
+            assert(std::filesystem::last_write_time(stable/originals[i].filename())==stable_times[i]); // no foreground file touch/store
+        release.set_value();
+    }
+    for(unsigned i=0;i<preserved.size();++i) {
+        assert(FileContents(preserved[i].first)==preserved[i].second);
+        assert(std::filesystem::last_write_time(preserved[i].first)==original_times[i]);
+    }
+    assert(std::filesystem::is_symlink(linked_directory));
+    // A subsequent boot loads the persisted stable entries, without admitting
+    // the same legacy source again or compiling a new foreground pipeline.
+    {
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.registryOverride=device.registryID+0x2000;spy.captureDescriptors=YES;
+        Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+        while(compiler.GetWarmupStats().ready<2 && std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(compiler.GetWarmupStats().loaded==2 && compiler.GetWarmupStats().ready==2);
+        for(unsigned group:{41u,42u})AreaPipeline(compiler,group);
+        assert(compiler.GetWarmupStats().hits==2 && spy.computeDescriptors.count==2 && spy.libraryCalls==1 && spy.archiveCalls==0);
+    }
+    // Malformed inputs consume the startup read budget even though none are
+    // admitted. Put valid source behind 128 MiB of newer sparse invalid files:
+    // an admission-only budget would read through and compile those sources.
+    {
+        const auto bounded_data=std::filesystem::path(directory)/"read-budget";
+        const auto bounded_legacy=LegacyRoot(bounded_data,0x111);
+        std::filesystem::create_directories(bounded_legacy);
+        for(const auto& original:originals) {
+            const auto target=bounded_legacy/original.filename();
+            std::filesystem::copy_file(stable/original.filename(),target);
+            std::filesystem::last_write_time(target,std::filesystem::file_time_type::clock::now()-std::chrono::hours(1));
+        }
+        const auto bytes=Gpu::Metal::PipelinePrewarmLimits::RecipeBytes;
+        FillOldRecipes(bounded_legacy,Gpu::Metal::PipelinePrewarmLimits::Bytes/bytes,bytes);
+        setenv("BB_DATA_DIR",bounded_data.c_str(),1);
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.captureDescriptors=YES;
+        Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+        assert(compiler.GetWarmupStats().loaded==0 && compiler.GetWarmupStats().queued==0);
+        assert(spy.libraryCalls==0 && spy.computeDescriptors.count==0 && spy.archiveCalls==0);
+        assert(!std::filesystem::exists(RecipeRoot(bounded_data,device)));
+    }
+    std::filesystem::remove_all(directory);
+    puts("Source-recipe migration: changed registry ID, exact-source reuse, bounded read/schema/hash/link admission, stable persistence and untouched legacy inputs passed");
+}
 
 static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* paths) {
     char directory[]="/tmp/bb-metal-real-recipes-XXXXXX";assert(mkdtemp(directory));
@@ -181,6 +332,8 @@ static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* pat
 
 int main(int argc,const char** argv) {
     @autoreleasepool {
+        if(argc==2 && !std::strcmp(argv[1],"--metadata-only"))return MetadataIdentityTests();
+        MetadataIdentityTests();
         auto device=MTLCreateSystemDefaultDevice(); if (!device) return 77;
         if(argc>=3 && !std::strcmp(argv[1],"--recipes"))return CapturedRecipes(device,argc-2,argv+2);
         if(argc!=1)return 2;
@@ -290,6 +443,7 @@ int main(int argc,const char** argv) {
             changed.maxTotalThreadsPerThreadgroup=64;
             assert(compiler.ComputePipeline(changed,nil));assert(compiler.GetWarmupStats().hits==2);
         }
+        LegacyRecipeMigration(device);
         // A route visiting several areas must learn beyond the former 512
         // recipes. Hold the background worker to exercise pending admission,
         // rather than merely compiling/writing one descriptor at a time.
