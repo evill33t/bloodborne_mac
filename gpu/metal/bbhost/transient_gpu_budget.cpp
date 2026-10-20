@@ -38,16 +38,16 @@ __attribute__((noinline)) GUEST_ABI std::int64_t ApplyBudget(std::uint64_t,const
     const bool verified=status==KERN_SUCCESS && host_read_safe(
         reinterpret_cast<const void*>(config_address+BudgetOffset),&actual,sizeof(actual)) && actual==ExpandedBytes;
     if(budget.reports.fetch_add(1,std::memory_order_relaxed)<8)
-        host_log("Native transient GPU pool: config=%p budget160->320MiB %s",
+        host_log("Native transient GPU pool: config=%p budget 160 -> 320 MiB %s",
             reinterpret_cast<void*>(config_address),verified?"verified":"write/readback failed");
     return 0; // Execute exact displaced prologue and original creation.
 }
 }
 void InstallTransientGpuBudget(ElfImage* image) {
     using namespace TransientGpuBudget;
-    const char* option=std::getenv("BBHOST_TRANSIENT_GPU_MB");
-    if(!option || !*option || !std::strcmp(option,"160")) return;
-    if(std::strcmp(option,"320")) {host_log("Native transient GPU budget refused: only160/320MiB accepted");return;}
+    const auto requested=RequestedMiB(std::getenv("BBHOST_TRANSIENT_GPU_MB"));
+    if(requested==160) return;
+    if(!requested) {host_log("Native transient GPU budget refused: only 160/320 MiB accepted");return;}
     if(installed || !image || Rva>image->mem.size || Prologue.size()>image->mem.size-Rva ||
        image->mem.slide>UINT64_MAX-Rva-Prologue.size()) return;
     std::array<std::uint8_t,Prologue.size()> code{};
@@ -66,7 +66,7 @@ void InstallTransientGpuBudget(ElfImage* image) {
                 host_log("Native transient GPU budget: original-byte RX restore failed");
         } else host_log("Native transient GPU budget: original-byte restore protection failed");
     }
-    host_log("Native transient GPU budget320MiB experiment %s; original retirement preserved",
+    host_log("Native transient GPU budget 320 MiB %s; original retirement preserved",
         installed?"installed":"refused: hook unavailable");
 }
 }

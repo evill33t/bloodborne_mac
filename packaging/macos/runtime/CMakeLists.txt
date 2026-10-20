@@ -161,6 +161,7 @@ foreach(fixture IN ITEMS pipeline_cache temporal_aa native_motion native_tessell
     add_test(NAME darwin-metal-${fixture} COMMAND bb-metal-${fixture}-tests)
     set_tests_properties(darwin-metal-${fixture} PROPERTIES TIMEOUT 45 SKIP_RETURN_CODE 77)
 endforeach()
+set_tests_properties(darwin-metal-pipeline_cache PROPERTIES TIMEOUT 120)
 
 add_executable(bb-presenter-tests "${BB_ROOT}/gpu/metal/tests/game_presenter_tests.mm")
 target_include_directories(bb-presenter-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
@@ -168,6 +169,8 @@ target_compile_options(bb-presenter-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror
 target_link_libraries(bb-presenter-tests PRIVATE bb-ps4-metal)
 add_test(NAME darwin-metal-presentation COMMAND bb-presenter-tests)
 set_tests_properties(darwin-metal-presentation PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
+add_test(NAME darwin-metal-presentation-latency2 COMMAND bb-presenter-tests --latency2)
+set_tests_properties(darwin-metal-presentation-latency2 PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
 target_link_libraries(bb-metal-worklist-tests PRIVATE bbruntime)
 target_link_libraries(bb-metal-native_tessellation-tests PRIVATE bbruntime)
 target_link_options(bb-metal-native_tessellation-tests PRIVATE

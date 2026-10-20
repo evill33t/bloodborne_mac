@@ -18,6 +18,13 @@ constexpr std::uint32_t OriginalBytes=160u*1024*1024,ExpandedBytes=320u*1024*102
 constexpr std::array<std::uint8_t,20> Prologue{0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
     0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x4d,0x89,0xcf};
 enum class Decision {Refuse,Original,Expanded,AlreadyExpanded};
+// Unset/empty uses the validated production capacity. An explicit 160 keeps
+// the original reference path; malformed values never select a capacity.
+inline constexpr std::uint32_t RequestedMiB(const char* option) {
+    if(!option || !*option) return 320;
+    const std::string_view value(option);
+    return value=="160" ? 160 : value=="320" ? 320 : 0;
+}
 inline bool SupportedSite(std::string_view hash,std::span<const std::uint8_t> code) {
     return engine_eboot_supported(hash) && code.size()==Prologue.size() &&
         std::equal(code.begin(),code.end(),Prologue.begin());
@@ -39,7 +46,7 @@ inline Decision Prepare(std::string_view hash,std::span<const std::uint8_t> code
     return Decision::Expanded;
 }
 }
-// Default original. BBHOST_TRANSIENT_GPU_MB accepts only160 or320; changes
-// loaded config memory before native creation, never the eboot/game files.
+// Default: 320 MiB. BBHOST_TRANSIENT_GPU_MB=160 retains the original reference
+// capacity; 320 selects the default explicitly. Only loaded config changes.
 void InstallTransientGpuBudget(ElfImage* image);
 }

@@ -449,7 +449,9 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                                 last_display_time=sample.presented_time;
                                 if (interval>0) intervals.push_back(interval);
                             }
-                            if (sample.presented_time==0) { ++skipped;last_display_time=0; }
+                            // Keep the last displayed time across dropped drawables
+                            // so the next interval includes the visible gap.
+                            if (sample.presented_time==0) ++skipped;
                             std::fprintf(frame_times.get(),"%llu,%.9f,%.9f,%.3f,%.3f\n",
                                 static_cast<unsigned long long>(sample.sequence),sample.submitted_time,
                                 sample.presented_time,interval,sample.presented_time>0

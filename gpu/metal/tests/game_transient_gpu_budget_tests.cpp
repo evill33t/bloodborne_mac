@@ -24,15 +24,23 @@ void Refused(std::string_view hash,std::span<const std::uint8_t> code,
 int main() {
     using namespace MacFeatures::TransientGpuBudget;
     constexpr auto hash="cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86";
+    Check(RequestedMiB(nullptr)==320);Check(RequestedMiB("")==320);
+    Check(RequestedMiB("160")==160);Check(RequestedMiB("320")==320);
+    for(const char* invalid:{"0","159","161","256","321"," 320","320 ","0320","0x140","+320","-160","320MB"}) {
+        Check(RequestedMiB(invalid)==0);
+        Refused(hash,Prologue,0x80001000,RequestedMiB(invalid));
+    }
     for(const auto supported:{std::string_view(hash),std::string_view(kEboot109Sha256)}) {
         auto c=Original(),before=c;
-        Check(Prepare(supported,Prologue,c,0x80001000,160)==Decision::Original);Check(c==before);
-        Check(Prepare(supported,Prologue,c,0x80001000,320)==Decision::Expanded);
+        Check(Prepare(supported,Prologue,c,0x80001000,RequestedMiB("160"))==Decision::Original);Check(c==before);
+        Check(Prepare(supported,Prologue,c,0x80001000,RequestedMiB(nullptr))==Decision::Expanded);
         std::uint32_t budget=0;std::memcpy(&budget,c.data()+BudgetOffset,sizeof(budget));Check(budget==ExpandedBytes);
         for(unsigned n=0;n<c.size();++n)
             if(n<BudgetOffset || n>=BudgetOffset+sizeof(budget)) Check(c[n]==before[n]);
         const auto expanded=c;
-        Check(Prepare(supported,Prologue,c,0x80001000,320)==Decision::AlreadyExpanded);Check(c==expanded);
+        Check(Prepare(supported,Prologue,c,0x80001000,RequestedMiB("320"))==Decision::AlreadyExpanded);Check(c==expanded);
+        c=Original();Check(Prepare(supported,Prologue,c,0x80001000,RequestedMiB(""))==Decision::Expanded);
+        Check(c==expanded);
     }
     for(const auto unsupported:{std::string_view{},std::string_view("unsupported"),
              std::string_view("1ec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86")})

@@ -574,7 +574,7 @@ struct MetalRenderer::Impl {
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
-  bool native_vertex_fetch_enabled=std::getenv("BB_METAL_NATIVE_VERTEX_FETCH") && std::strcmp(std::getenv("BB_METAL_NATIVE_VERTEX_FETCH"),"1")==0;
+  bool native_vertex_fetch_enabled=!std::getenv("BB_METAL_NATIVE_VERTEX_FETCH") || std::strcmp(std::getenv("BB_METAL_NATIVE_VERTEX_FETCH"),"0")!=0;
   std::unordered_map<u64,bool> native_vertex_fetch_programs;
   u64 native_vertex_fetch_draws=0;
   std::unordered_map<const Program*,bool> static_smrd_programs;
