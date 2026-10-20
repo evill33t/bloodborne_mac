@@ -15,6 +15,7 @@
 #include <chrono>
 #include <string>
 #include <memory>
+#include <cstring>
 #include "gpu/metal/gpu_execution.h"
 
 namespace Gpu {
@@ -55,6 +56,28 @@ public:
     virtual void Draw(const Liverpool::RegFile& regs, const DrawCall& draw) = 0;
     virtual void Dispatch(const Liverpool::RegFile& regs, std::uint32_t x, std::uint32_t y,
                           std::uint32_t z) = 0;
+
+    // Return false without recording work when the backend cannot preserve
+    // this packet's semantics. The CP then drains and snapshots as before.
+    // `ready` is checked under the backend's admission lock. A queued CPU
+    // fence-store must not race between this check and GPU command admission.
+    // Check every CPU-resolved descriptor/payload span, not just arguments.
+    virtual bool DrawIndirect(const Liverpool::RegFile&,const DrawCall&,GuestAddr,
+        const std::function<bool(GuestAddr,std::size_t)>& ready={}) {(void)ready;return false;}
+    virtual bool DispatchIndirect(const Liverpool::RegFile&,GuestAddr,
+        const std::function<bool(GuestAddr,std::size_t)>& ready={}) {(void)ready;return false;}
+    // Frontend-owned deferred CPU stores also protect descriptor/payload reads
+    // during ordinary producer recording. Invoke only under admission locking;
+    // the frontend clears this callback after joining its recording threads.
+    virtual void SetCpuReadGuard(std::function<bool(GuestAddr,std::size_t)>) {}
+
+    // CP-side writes must not pass an earlier GPU indirect read of the same
+    // bytes. Backends serialize admission and the write together; this also
+    // keeps CE/WRITE_DATA descriptor snapshot bookkeeping in the same lock.
+    virtual void CpuWrite(GuestAddr address,const void* source,std::size_t bytes,bool constants) {
+        std::memcpy(reinterpret_cast<void*>(address),source,bytes);
+        if(constants) NoteConstDump(address,static_cast<std::uint32_t>(bytes));
+    }
 
     // End of one guest submission: hand recorded work to the host GPU.
     virtual void OnSubmit() = 0;

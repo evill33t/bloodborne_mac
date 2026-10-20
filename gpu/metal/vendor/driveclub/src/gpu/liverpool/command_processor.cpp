@@ -20,11 +20,25 @@
 #include "gpu/renderer.h"
 #include "gpu/metal/command_validation.h"
 #include "gpu/metal/guest_label.h"
+#include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/bbhost/fog_draw_capture.h"
 
 namespace Gpu::Liverpool {
 
 namespace {
+
+// Standalone CP spans also cover waits outside the renderer's frame lock.
+class CpTiming {
+    const char* stage;
+    u64 ring, detail;
+    double start;
+public:
+    CpTiming(const char* stage,u64 ring,u64 detail=0):stage(stage),ring(ring),detail(detail),
+        start(Metal::FrameWork::Enabled()?Metal::StutterTrace::Now():0) {}
+    ~CpTiming() {
+        if(start)Metal::FrameWork::Span(0,stage,start,Metal::StutterTrace::Now(),ring,detail);
+    }
+};
 
 // EVENT_WRITE_EOP / RELEASE_MEM data and interrupt selects.
 enum DataSel : u32 { kDataNone = 0, kData32 = 1, kData64 = 2, kGpuClock = 3, kPerfCounter = 4 };
@@ -299,11 +313,19 @@ CommandProcessor::~CommandProcessor() {
         }
     }
     for (auto& r:rings) if(r && r->thread.joinable()) r->thread.join();
+    if(renderer) renderer->SetCpuReadGuard({});
     std::lock_guard guard(callback_gate->lock);callback_gate->alive=false;
 }
 
 void CommandProcessor::SetRenderer(Gpu::Renderer* r) {
-    renderer=r;if(r) execution=r->Execution();
+    if(renderer && renderer!=r) renderer->SetCpuReadGuard({});
+    renderer=r;
+    if(r) {
+        execution=r->Execution();
+        r->SetCpuReadGuard([this](GuestAddr address,std::size_t bytes) {
+            return !PendingFenceOverlaps(address,bytes);
+        });
+    }
 }
 void CommandProcessor::Fail(const std::string& reason) {
     if(execution->Fail(reason)) DC_ERROR("gpu: %s",reason.c_str());
@@ -311,6 +333,7 @@ void CommandProcessor::Fail(const std::string& reason) {
 }
 bool CommandProcessor::WaitLabel(u64 address,u64 reference,u32 bytes,u32 compare,u64 mask,
     std::chrono::steady_clock::time_point deadline,bool fatal_timeout) {
+    CpTiming timing("cp_wait_label",t_ring?t_ring->index:0,address);
     Metal::GuestLabel label;
     if(!label.Capture(address,bytes)) {Fail("GPU wait refers to an invalid label at "+std::to_string(address));return false;}
     const auto matches=[&](u64 v) {
@@ -465,7 +488,12 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
         Job job;
         {
             std::unique_lock lk(ring.lock);
+            const auto idle=Metal::FrameWork::Enabled()?Metal::StutterTrace::Now():0;
             ring.cv.wait(lk, [&] { return !ring.jobs.empty() || stop.stop_requested(); });
+            if(idle) {
+                const auto end=Metal::StutterTrace::Now();
+                if(end-idle>.0001)Metal::FrameWork::Span(0,"cp_ring_idle",idle,end,ring.index);
+            }
             if (stop.stop_requested()) {
                 return;
             }
@@ -473,6 +501,7 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
             ring.jobs.pop_front();
             ring.busy = true;
         }
+        const auto job_start=Metal::FrameWork::Enabled()?Metal::StutterTrace::Now():0;
         t_audit_job=job.audit.get();t_audit_buffer=0;
         for (const auto& buf : job.buffers) {
             if(job.audit) AuditConsume(*job.audit,buf,t_audit_buffer);
@@ -495,23 +524,14 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
         }
         if (!execution->Failed() && (flip_label.addr || flip_label.interrupt)) {
             const FlipLabel label = flip_label;
-            Metal::GuestLabel destination;
-            const bool valid=!label.addr || destination.Capture(label.addr,4);
-            if(!valid) Fail("Invalid GPU flip-label destination");
-            AfterGpu([label, destination, this] {
-                if (label.addr) {
-                    if(!destination.Store(label.value)) {Fail("GPU flip-label mapping expired");return;}
-                    execution->Notify();
-                }
-                if (label.interrupt) {
-                    Interrupt(kIrqGfxEop);
-                }
-            });
+            FenceWrite(label.addr ? kData32 : kDataNone,label.addr,label.value,0,
+                label.interrupt ? kIrqGfxEop : 0);
             flip_label = {};
         }
         if (renderer) {
             renderer->OnSubmit(); // hand everything, signals included, to the host GPU
         }
+        if(job_start)Metal::FrameWork::Span(0,"cp_job",job_start,Metal::StutterTrace::Now(),ring.index);
         t_audit_job=nullptr;
         if(job.audit) AuditFinish(*job.audit);
         {
@@ -551,13 +571,14 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
     const u32 bytes=data_sel==kData32 ? 4 : data_sel==kDataNone ? 0 : 8;
     if(bytes && !destination.Capture(addr,bytes)) {Fail("Invalid GPU fence destination at "+std::to_string(addr));return;}
     u64 ticket=0;
-    if (data_sel == kData32 || data_sel == kData64) {
+    if (bytes) {
         std::scoped_lock lk(fence_lock);
         ticket=++next_fence_ticket;
         const u32 ring=t_ring ? t_ring->index : 0;
-        pending_fences[addr] = {lo,ticket,ring};
-        if (data_sel == kData64) {
-            pending_fences[addr + 4] = {hi,ticket,ring};
+        const bool known=data_sel==kData32 || data_sel==kData64;
+        pending_fences[addr] = {lo,ticket,ring,known};
+        if (bytes==8) {
+            pending_fences[addr + 4] = {hi,ticket,ring,known};
         }
     }
     AfterGpu([=, this] {
@@ -565,14 +586,14 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
         if(data_sel==kGpuClock) value=GpuClock();
         if(data_sel==kPerfCounter) value=__rdtsc();
         if(bytes && !destination.Store(value)) {Fail("GPU fence destination was unmapped or reused at "+std::to_string(addr));return;}
-        if (data_sel == kData32 || data_sel == kData64) {
+        if (bytes) {
             std::scoped_lock lk(fence_lock);
             // A later write to the same label may still be on its way.
             auto it = pending_fences.find(addr);
             if (it != pending_fences.end() && it->second.ticket == ticket) {
                 pending_fences.erase(it);
             }
-            if (data_sel == kData64) {
+            if (bytes==8) {
                 it = pending_fences.find(addr + 4);
                 if (it != pending_fences.end() && it->second.ticket == ticket) {
                     pending_fences.erase(it);
@@ -589,14 +610,39 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
 bool CommandProcessor::PendingFence(u64 addr, u32* value) {
     std::scoped_lock lk(fence_lock);
     auto it = pending_fences.find(addr);
-    if (it == pending_fences.end() || it->second.ring!=(t_ring ? t_ring->index : 0)) {
+    if (it == pending_fences.end() || !it->second.known || it->second.ring!=(t_ring ? t_ring->index : 0)) {
         return false;
     }
     *value = it->second.value;
     return true;
 }
 
-bool CommandProcessor::SyncRenderer() {
+bool CommandProcessor::PendingFenceOverlaps(u64 address,u64 bytes) {
+    std::scoped_lock lock(fence_lock);
+    if(!bytes) return false;
+    if(address>UINT64_MAX-bytes) return true;
+    if(pending_fences.empty()) return false;
+    const auto mappings=Core::Memory::DirectMappings();
+    const auto physical_address=[&](u64 at,u64 count,u64& physical) {
+        for(const auto& mapping:mappings) if(at>=mapping.start && at-mapping.start<mapping.size &&
+            count<=mapping.size-(at-mapping.start)) {
+            if(mapping.phys>UINT64_MAX-(at-mapping.start)) return false;
+            physical=mapping.phys+(at-mapping.start);return physical<=UINT64_MAX-count;
+        }
+        return false;
+    };
+    u64 physical=0;
+    if(!physical_address(address,bytes,physical)) return true;
+    for(const auto& [destination,write]:pending_fences) {
+        (void)write;
+        u64 at=0;if(!physical_address(destination,4,at)) return true;
+        if(at<physical+bytes && physical<at+4) return true;
+    }
+    return false;
+}
+
+bool CommandProcessor::SyncRenderer(u32 reason) {
+    CpTiming timing("cp_sync_renderer",t_ring?t_ring->index:0,reason);
     if (renderer) {
         std::string error;
         if(!renderer->WaitIdleUntil(std::chrono::steady_clock::now()+std::chrono::seconds(10),error)) {
@@ -658,10 +704,8 @@ void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
             if (!dst || off + count > ce.ram.size() || !Mapped(dst,u64(count)*4)) {
                 break;
             }
-            std::memcpy(dst, ce.ram.data() + off, count * 4);
-            if (renderer) {
-                renderer->NoteConstDump(reinterpret_cast<u64>(dst), count * 4);
-            }
+            if(renderer) renderer->CpuWrite(reinterpret_cast<u64>(dst),ce.ram.data()+off,count*4,true);
+            else std::memcpy(dst,ce.ram.data()+off,count*4);
             break;
         }
         case Op::IncrementCeCounter:
@@ -688,16 +732,16 @@ void CommandProcessor::RunConstantEngine(const std::function<bool()>& done) {
     }
 }
 
-void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances) {
+void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances,bool indirect) {
     AuditDraw(indexed,count,index_offset,first_vertex,instances);
     ++stats.draws;
-    if (!renderer || count == 0) {
+    if (!renderer || count == 0 || (indirect && instances==0)) {
         return;
     }
     DrawCall dc;
     dc.indexed = indexed;
     dc.count = count;
-    dc.instances = instances ? instances : num_instances;
+    dc.instances = indirect ? instances : instances ? instances : num_instances;
     dc.index_base = index_base;
     dc.index_offset = index_offset;
     dc.index_size = index_size;
@@ -708,6 +752,7 @@ void CommandProcessor::Draw(bool indexed, u32 count, u32 index_offset, u32 first
 // Indirect draw/dispatch arguments live at the SET_BASE address + offset.
 const u32* CommandProcessor::IndirectArgs(u32 offset, u32 dwords) {
     const Ring* ring = t_ring;
+    CpTiming timing("cp_indirect_args",ring?ring->index:0,dwords);
     const u64 addr = (ring ? ring->indirect_base : 0) + offset;
     if (!addr || addr<offset || !dwords || dwords>5 || addr>UINT64_MAX-u64(dwords)*4) {
         Fail("Invalid indirect argument address");return nullptr;
@@ -718,7 +763,7 @@ const u32* CommandProcessor::IndirectArgs(u32 offset, u32 dwords) {
     }
     // Commit GPU producers before CPU reads. Retain the captured identities
     // across that wait so an unmap/reuse cannot silently change the arguments.
-    if(!SyncRenderer()) return nullptr;
+    if(!SyncRenderer(1)) return nullptr;
     static thread_local std::array<u32,5> snapshot;
     for(u32 k=0;k<dwords;++k) {
         u64 value=0;
@@ -866,12 +911,10 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
                 }
                 u32* dst = Ptr<u32>(body[1], body[2]);
                 if (!Mapped(dst,u64(body_n-3)*4)) { ++stats.malformed_packets; break; }
-                std::memcpy(dst, body + 3, (body_n - 3) * 4);
                 // Like a CE dump: draws recorded before this one must still read the
                 // old data when the host GPU runs them, later ones the new data.
-                if (renderer && body_n - 3 > 2) {
-                    renderer->NoteConstDump(reinterpret_cast<u64>(dst), (body_n - 3) * 4);
-                }
+                if(renderer) renderer->CpuWrite(reinterpret_cast<u64>(dst),body+3,(body_n-3)*4,body_n-3>2);
+                else std::memcpy(dst,body+3,(body_n-3)*4);
             }
             break;
         }
@@ -905,7 +948,7 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
                 }
                 break;
             }
-            if(!SyncRenderer()) return; // the GPU may still be producing what we copy
+            if(!SyncRenderer(2)) return; // the GPU may still be producing what we copy
             if (src_sel == 2) {
                 for (u32 k = 0; k + 4 <= bytes; k += 4) {
                     std::memcpy(dst + k, &body[1], 4);
@@ -979,6 +1022,7 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
         case Op::SetBase:
             if (t_ring) {
                 t_ring->indirect_base = u64(body[1] & ~7u) | (u64(body[2] & 0xFFFF) << 32);
+                t_ring->indirect_selector = body[0];
             }
             break;
         case Op::DrawIndirect:
@@ -986,12 +1030,27 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
             // DrawIndirect args: vertex count, instances, first vertex, first instance.
             // DrawIndexIndirect: index count, instances, first index, base vertex, first instance.
             const bool indexed = op == Op::DrawIndexIndirect;
+            const u32 base_vtx_loc = body[1] & 0xFFFF;
+            const u32 start_inst_loc = body[2] & 0xFFFF;
+            // The generic path cannot defer PM4 writes to arbitrary SH
+            // registers. Only the no-destination graphics packet is native.
+            // Indexed arguments require a separately proven index extent.
+            if(!compute && !indexed && renderer && t_ring && t_ring->indirect_selector==1 &&
+                body_n==4 && body[3]==2 && !body[1] && !body[2] &&
+                t_ring->indirect_base<=UINT64_MAX-body[0]) {
+                DrawCall dc;dc.index_base=index_base;dc.index_size=index_size;
+                const u64 address=t_ring->indirect_base+body[0];
+                if(renderer->DrawIndirect(regs,dc,address,[&](GuestAddr read_address,std::size_t read_bytes) {
+                    return !PendingFenceOverlaps(read_address,read_bytes);
+                })) {
+                    ++stats.draws;++stats.native_indirect_draws;break;
+                }
+            }
+            ++stats.indirect_fallbacks;
             const u32* a = IndirectArgs(body[0], indexed ? 5 : 4);
             if (!a) {
                 break;
             }
-            const u32 base_vtx_loc = body[1] & 0xFFFF;
-            const u32 start_inst_loc = body[2] & 0xFFFF;
             if (base_vtx_loc && kShRegBase+base_vtx_loc<RegFile::kSize) {
                 regs[kShRegBase + base_vtx_loc] = indexed ? a[3] : a[2];
             }
@@ -999,9 +1058,9 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
                 regs[kShRegBase + start_inst_loc] = indexed ? a[4] : a[3];
             }
             if (indexed) {
-                Draw(true, a[0], a[2], 0, a[1]);
+                Draw(true, a[0], a[2], 0, a[1],true);
             } else {
-                Draw(false, a[0], 0, a[2], a[1]);
+                Draw(false, a[0], 0, a[2], a[1],true);
             }
             break;
         }
@@ -1014,6 +1073,17 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
             break;
         case Op::DispatchIndirect: {
             ++stats.dispatches;
+            // MEC's three-word absolute-address packet has a different ABI.
+            // Only the observed graphics SET_BASE(1), offset, initiator=1
+            // form enters this optimization; unknown forms keep old decoding.
+            if(!compute && renderer && t_ring && t_ring->indirect_selector==1 &&
+                body_n==2 && body[1]==1 && t_ring->indirect_base<=UINT64_MAX-body[0] &&
+                renderer->DispatchIndirect(regs,t_ring->indirect_base+body[0],[&](GuestAddr read_address,std::size_t read_bytes) {
+                    return !PendingFenceOverlaps(read_address,read_bytes);
+                })) {
+                ++stats.native_indirect_dispatches;break;
+            }
+            ++stats.indirect_fallbacks;
             const u32* a = IndirectArgs(body[0], 3);
             if (renderer && a) {
                 renderer->Dispatch(regs, a[0], a[1], a[2]);

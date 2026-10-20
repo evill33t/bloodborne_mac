@@ -21,6 +21,18 @@ public:
     void Draw(const Liverpool::RegFile& regs, const DrawCall& draw) override;
     void Dispatch(const Liverpool::RegFile& regs, std::uint32_t x, std::uint32_t y,
                   std::uint32_t z) override;
+    bool DrawIndirect(const Liverpool::RegFile&,const DrawCall&,GuestAddr,
+        const std::function<bool(GuestAddr,std::size_t)>& ready={}) override;
+    bool DispatchIndirect(const Liverpool::RegFile&,GuestAddr,
+        const std::function<bool(GuestAddr,std::size_t)>& ready={}) override;
+    void SetCpuReadGuard(std::function<bool(GuestAddr,std::size_t)>) override;
+    void CpuWrite(GuestAddr,const void*,std::size_t,bool constants) override;
+    // Runtime mapping mutations hold this guard from BEFORE the memory write
+    // lock until AFTER it unlocks. Failure leaves the renderer unlocked and
+    // requires the runtime to leave the mapping unchanged. Same-thread nested
+    // snapshot-arena allocation is allowed; End must run on the Begin thread.
+    bool BeginGuestMemoryMutation();
+    void EndGuestMemoryMutation();
     void OnSubmit() override;
     void WaitIdle() override;
     bool WaitIdleUntil(std::chrono::steady_clock::time_point,std::string& error) override;
@@ -62,6 +74,9 @@ public:
     std::uint64_t DepthBoundsCopyCount() const;
     // Diagnostic counter: new transient upload buffers, excluding safe reuse.
     std::uint64_t UploadBufferAllocationCount() const;
+    std::uint64_t NativeIndirectDrawCount() const;
+    std::uint64_t NativeIndirectDispatchCount() const;
+    std::uint64_t IndirectCpuWriteWaitCount() const;
     // Called on the GPU recording thread after committing a flip. The host
     // queues its presentation before returning, preserving shared-queue order.
     void SetFrameReadyCallback(std::function<void(void*)> callback);

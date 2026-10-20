@@ -36,7 +36,7 @@ Shader::Program Synthetic(u64 hash) {
     Shader::Program p;p.hash=hash;p.stage=Shader::Stage::Vertex;p.num_user_sgprs=16;p.vgpr_comp_cnt=3;
     p.fetch_ud=0;p.fetch_bytes=layout->fetch_bytes;
     Inst prefix{};prefix.enc=Enc::SOP1;prefix.op=u16(Sop1::S_MOV_B32);prefix.dst=Operand::VccHi;
-    prefix.src[0]=Operand::Literal;prefix.literal=layout->attributes==5 ? 0x4e : 0x57;prefix.size=2;
+    prefix.src[0]=Operand::Literal;prefix.literal=layout->prefix_literal;prefix.size=2;
     p.code.push_back(prefix);
     for(u32 k=0;k<layout->attributes;++k) {
         Inst i{};i.pc=Shader::kFetchPcBase+4*k;i.enc=Enc::SMRD;i.op=u16(Smrd::S_LOAD_DWORDX4);
@@ -80,7 +80,7 @@ void Proof(const Shader::Program& original) {
     }
     Require(after.find(before.substr(first,end-first))!=std::string::npos &&
         after.find(before.substr(end))!=std::string::npos,"Original fallback or subsequent transform math changed");
-    for(u32 kind=0;kind<30;++kind) {
+    for(u32 kind=0;kind<32;++kind) {
         auto changed=original;auto& descriptor=changed.code[1];
         auto& fetch=changed.code[2+Native::Layout(original.hash)->attributes];
         switch(kind) {
@@ -98,6 +98,10 @@ void Proof(const Shader::Program& original) {
         case 26:fetch.lds=true;break;case 27:fetch.op=u16(Mubuf::BUFFER_STORE_FORMAT_XYZ);break;
         case 28:changed.code[0].dst=2;break;case 29:changed.code.back().enc=Enc::SOP1;
             changed.code.back().op=u16(Sop1::S_SETPC_B64);break;
+        case 30:changed.code[0].literal^=1;break;
+        case 31:changed.code[0].literal=Native::Layout(original.hash)->attributes==5 ?
+            (original.code[0].literal==0x4e ? 0x52 : 0x4e) :
+            (original.code[0].literal==0x57 ? 0x5b : 0x57);break;
         }
         Require(!Shader::VertexNativeFetchEligible(changed,&reason) && !reason.empty(),"Mutated fetch proof accepted or lacked diagnostic");
         if(kind!=9) {
@@ -420,17 +424,25 @@ void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic
 int main(int argc,char** argv) {
     @autoreleasepool {
         try {
-            Proof(Synthetic(Native::Hash32));Proof(Synthetic(Native::Hash36));
+            for(const auto hash:Native::Hashes) {
+                Require(Native::IsExtended(hash)==(hash!=Native::Hash32 && hash!=Native::Hash36),
+                    "Extended vertex admission classification changed");
+                Proof(Synthetic(hash));
+            }
+            Require(!Native::IsExtended(0) && !Native::Layout(0),"Unknown vertex identity admitted");
             if(argc==1) {
                 auto device=MTLCreateSystemDefaultDevice();if(!device) return 77;
-                GpuCases(device,Synthetic(Native::Hash32),true);GpuCases(device,Synthetic(Native::Hash36),true);return 0;
+                for(const auto hash:Native::Hashes)GpuCases(device,Synthetic(hash),true);
+                return 0;
             }
             Require(argc==3 && (std::string(argv[1])=="--cpu-captures" || std::string(argv[1])=="--gpu-captures"),
                 "Use --cpu-captures DIR or --gpu-captures DIR");
-            auto a=Capture(argv[2],Native::Hash32),b=Capture(argv[2],Native::Hash36);Proof(*a);Proof(*b);
+            std::vector<std::unique_ptr<Shader::Program>> programs;
+            for(const auto hash:Native::Hashes) {programs.push_back(Capture(argv[2],hash));Proof(*programs.back());}
             if(std::string(argv[1])=="--cpu-captures") return 0;
             auto device=MTLCreateSystemDefaultDevice();if(!device) return 77;
-            GpuCases(device,*a,false);GpuCases(device,*b,false);return 0;
+            for(const auto& p:programs)GpuCases(device,*p,false);
+            return 0;
         } catch(const std::exception& error) {std::fprintf(stderr,"native vertex fixture: %s\n",error.what());return 1;}
     }
 }

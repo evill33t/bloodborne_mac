@@ -506,7 +506,7 @@ bool ProveNativeVertexFetch(const Program& p,std::string* failure=nullptr) {
     const auto& prefix=p.code[0];
     if(prefix.pc || prefix.enc!=Enc::SOP1 || prefix.op!=u16(Sop1::S_MOV_B32) ||
        prefix.dst!=Operand::VccHi || prefix.src[0]!=Operand::Literal || prefix.size!=2 ||
-       prefix.literal!=(n==5 ? 0x4eu : 0x57u)) return reject("Fetch prefix can change vertex inputs");
+       prefix.literal!=layout->prefix_literal) return reject("Fetch prefix can change vertex inputs");
     for(u32 k=0;k<n;++k) {
         const auto& i=p.code[1+k];
         if(i.pc!=kFetchPcBase+4*k || i.enc!=Enc::SMRD || i.op!=u16(Smrd::S_LOAD_DWORDX4) ||
@@ -610,6 +610,15 @@ private:
     }
     std::string U(const Inst& i, int k) { return Src(i.src[k], i.literal); }
     std::string I(const Inst& i, int k) { return "int(" + U(i, k) + ")"; }
+    std::string ModifiedFloatBits(const Inst& i, int k) {
+        // V_CNDMASK_B32's VOP3 data operands accept float source modifiers.
+        // Apply them to the sign bit so selects preserve NaN payloads,
+        // denormals and signed zero without passing through float arithmetic.
+        std::string e = U(i, k);
+        if (i.abs & (1 << k)) e = "(" + e + " & 0x7fffffffu)";
+        if (i.neg & (1 << k)) e = "(" + e + " ^ 0x80000000u)";
+        return e;
+    }
     std::string F(const Inst& i, int k) {
         std::string e = "as_type<float>(" + U(i, k) + ")";
         if (i.abs & (1 << k)) e = "abs(" + e + ")";
@@ -1142,7 +1151,9 @@ void Emitter::EmitVop(const Inst& i) {
     const std::string cin = " + (" + Mask(i.src[2]) + " ? 1ul : 0ul)";
     switch (static_cast<Vop>(i.op)) {
     // ---- VOP2 ----
-    case Vop::V_CNDMASK_B32: SetV(i.dst, "(" + Mask(i.src[2]) + " ? " + u(1) + " : " + u(0) + ")"); break;
+    case Vop::V_CNDMASK_B32:
+        SetV(i.dst, "(" + Mask(i.src[2]) + " ? " + ModifiedFloatBits(i, 1) + " : " + ModifiedFloatBits(i, 0) + ")");
+        break;
     case Vop::V_READLANE_B32: SetS(i.dst, u(0)); break;
     case Vop::V_WRITELANE_B32: SetV(i.dst, u(0)); break;
     case Vop::V_ADD_F32: SetVF(i, f(0) + " + " + f(1)); break;

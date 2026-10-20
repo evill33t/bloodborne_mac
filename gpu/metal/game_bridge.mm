@@ -50,6 +50,14 @@ std::unordered_map<std::string,void*> symbols;
 std::unordered_map<std::string,void*> feature_symbols;
 std::unique_ptr<Gpu::Metal::Device> device;
 std::unique_ptr<Gpu::Metal::MetalRenderer> renderer;
+struct GuestMappingHooks {
+    bool active=false;
+    void Remove() {
+        if(active) runtime_gpu_memory_set_mutation_hooks(nullptr,nullptr,nullptr);
+        active=false;
+    }
+    ~GuestMappingHooks() {Remove();}
+} guest_mapping_hooks; // removed before the renderer's static destruction
 std::atomic<bool> ready{false};
 #include "gpu/metal/game_checkpoint.inc"
 std::atomic<float> display_refresh{60};
@@ -279,11 +287,19 @@ extern "C" int bbgpu_init(const BbGpuConfig*) {
             });
         });
         Gpu::Liverpool::Instance().SetRenderer(renderer.get());
+        if(const auto* native=std::getenv("BB_METAL_NATIVE_INDIRECT");native && !std::strcmp(native,"1")) {
+            if(!runtime_gpu_memory_set_mutation_hooks(renderer.get(),
+                [](void* context)->int {return static_cast<Gpu::Metal::MetalRenderer*>(context)->BeginGuestMemoryMutation();},
+                [](void* context) {static_cast<Gpu::Metal::MetalRenderer*>(context)->EndGuestMemoryMutation();}))
+                throw std::runtime_error("Could not protect native indirect argument mappings.");
+            guest_mapping_hooks.active=true;
+        }
         ready.store(true,std::memory_order_release);
         if(bb_checkpoint_runtime_enabled() && !bb_checkpoint_runtime_graphics_hooks(&graphics_hooks))
             throw std::runtime_error("Could not register the Metal checkpoint provider.");
         return 0;
     } catch (const std::exception& error) {
+        guest_mapping_hooks.Remove();
         fprintf(stderr,"Metal initialization failed: %s\n",error.what());
         return -1;
     }

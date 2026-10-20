@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <iterator>
+#include <cstring>
 
 namespace {
 constexpr const char* kAreaCompute="#include <metal_stdlib>\nusing namespace metal; kernel void main0(uint i [[thread_position_in_grid]]) { }";
@@ -74,14 +75,34 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
     id<MTLDevice> underlying;
 }
 @property(nonatomic) unsigned archiveCalls;
+@property(nonatomic) BOOL captureDescriptors;
+@property(nonatomic,strong) NSMutableArray<MTLRenderPipelineDescriptor*>* renderDescriptors;
+@property(nonatomic,strong) NSMutableArray<MTLComputePipelineDescriptor*>* computeDescriptors;
 + (instancetype)wrapping:(id<MTLDevice>)device;
 @end
 @implementation BBArchiveSpyDevice
 + (instancetype)wrapping:(id<MTLDevice>)device {
-    auto proxy=[BBArchiveSpyDevice alloc]; proxy->underlying=device; return proxy;
+    auto proxy=[BBArchiveSpyDevice alloc]; proxy->underlying=device;
+    proxy.renderDescriptors=[NSMutableArray new];proxy.computeDescriptors=[NSMutableArray new];
+    return proxy;
 }
 - (NSMethodSignature*)methodSignatureForSelector:(SEL)selector { return [(NSObject*)underlying methodSignatureForSelector:selector]; }
-- (void)forwardInvocation:(NSInvocation*)invocation { [invocation invokeWithTarget:underlying]; }
+- (void)forwardInvocation:(NSInvocation*)invocation {
+    if(_captureDescriptors) {
+        // Capture the actual descriptors decoded by production prewarming at
+        // the driver boundary, instead of duplicating its recipe decoder.
+        if(invocation.selector==@selector(newRenderPipelineStateWithDescriptor:error:)) {
+            __unsafe_unretained MTLRenderPipelineDescriptor* descriptor=nil;
+            [invocation getArgument:&descriptor atIndex:2];
+            [_renderDescriptors addObject:[descriptor copy]];
+        } else if(invocation.selector==@selector(newComputePipelineStateWithDescriptor:options:reflection:error:)) {
+            __unsafe_unretained MTLComputePipelineDescriptor* descriptor=nil;
+            [invocation getArgument:&descriptor atIndex:2];
+            [_computeDescriptors addObject:[descriptor copy]];
+        }
+    }
+    [invocation invokeWithTarget:underlying];
+}
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor*)descriptor error:(NSError**)error {
     (void)descriptor;
     ++_archiveCalls;
@@ -90,9 +111,60 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
 }
 @end
 
-int main() {
+static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* paths) {
+    char directory[]="/tmp/bb-metal-real-recipes-XXXXXX";assert(mkdtemp(directory));
+    const auto root=RecipeRoot(directory,device);std::filesystem::create_directories(root);
+    std::vector<std::pair<std::filesystem::path,std::string>> originals;
+    for(int i=0;i<count;++i) {
+        const std::filesystem::path source(paths[i]);
+        const auto destination=root/source.filename();
+        std::filesystem::copy_file(source,destination);
+        originals.emplace_back(destination,FileContents(destination));
+    }
+    setenv("BB_DATA_DIR",directory,1);unsetenv("BB_GAME_DIR");unsetenv("BB_SOURCE_GAME");
+    unsetenv("BB_METAL_SHADER_PREWARM");
+    using Compiler=Gpu::Metal::ShaderCompiler;
+    {
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.captureDescriptors=YES;
+        Compiler compiler((id<MTLDevice>)spy,2);compiler.EnablePrewarming();
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(60);
+        while(compiler.GetWarmupStats().ready<static_cast<unsigned>(count) &&
+              std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        auto stats=compiler.GetWarmupStats();
+        assert(stats.loaded==static_cast<unsigned>(count) && stats.ready==static_cast<unsigned>(count));
+        NSArray<MTLRenderPipelineDescriptor*>* renders=[spy.renderDescriptors copy];
+        NSArray<MTLComputePipelineDescriptor*>* computes=[spy.computeDescriptors copy];
+        assert(renders.count+computes.count==static_cast<unsigned>(count));
+        const auto start=std::chrono::steady_clock::now();
+        for(unsigned repeat=0;repeat<2;++repeat) {
+            for(MTLRenderPipelineDescriptor* descriptor in renders) {
+                NSError* error=nil;assert(compiler.RenderPipeline(descriptor,&error) && !error);
+            }
+            for(MTLComputePipelineDescriptor* descriptor in computes) {
+                NSError* error=nil;assert(compiler.ComputePipeline(descriptor,&error) && !error);
+            }
+        }
+        stats=compiler.GetWarmupStats();
+        assert(stats.hits==static_cast<unsigned>(count)*2 && stats.pending==0);
+        assert(spy.renderDescriptors.count==renders.count && spy.computeDescriptors.count==computes.count);
+        assert(spy.archiveCalls==0);
+        printf("Captured prewarm: %d real recipes (%lu render, %lu compute), %llu foreground cache hits, "
+               "zero additional Metal pipeline creation calls; demand total %.3f ms\n",count,
+               static_cast<unsigned long>(renders.count),static_cast<unsigned long>(computes.count),
+               static_cast<unsigned long long>(stats.hits),
+               std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+    }
+    for(const auto& [path,contents]:originals)assert(FileContents(path)==contents);
+    std::filesystem::remove_all(directory);
+    return 0;
+}
+
+int main(int argc,const char** argv) {
     @autoreleasepool {
         auto device=MTLCreateSystemDefaultDevice(); if (!device) return 77;
+        if(argc>=3 && !std::strcmp(argv[1],"--recipes"))return CapturedRecipes(device,argc-2,argv+2);
+        if(argc!=1)return 2;
         char directory[]="/tmp/bb-metal-cache-XXXXXX"; assert(mkdtemp(directory));
         setenv("BB_METAL_CACHE_DIR",directory,1); unsetenv("BB_METAL_PIPELINE_CACHE");
         using Compiler=Gpu::Metal::ShaderCompiler;

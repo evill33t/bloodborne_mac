@@ -151,9 +151,9 @@ struct PlaneSource {
 }
 
 struct MetalRenderer::CheckpointCapture::State {
-  std::unique_lock<std::mutex> lock;
+  std::unique_lock<std::recursive_mutex> lock;
   std::vector<CheckpointChunk> chunks;
-  explicit State(std::mutex& mutex):lock(mutex,std::defer_lock) {}
+  explicit State(std::recursive_mutex& mutex):lock(mutex,std::defer_lock) {}
 };
 MetalRenderer::CheckpointCapture::CheckpointCapture(std::unique_ptr<State> s):state(std::move(s)) {}
 MetalRenderer::CheckpointCapture::~CheckpointCapture()=default;

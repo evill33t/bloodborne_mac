@@ -2,6 +2,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace Gpu::Metal::NativeVertexFetch {
@@ -9,12 +10,26 @@ inline constexpr std::uint64_t Hash32=0xcabdbcf01724aad6ull;
 inline constexpr std::uint64_t Hash36=0x3f3f6839e54e0136ull;
 inline constexpr std::uint64_t CacheTag=0x5645525446583031ull;
 struct Description {
-    std::uint32_t stride,attributes,first_pc,last_pc,fetch_bytes;
+    std::uint32_t stride,attributes,first_pc,last_pc,fetch_bytes,prefix_literal;
 };
-inline constexpr Description Layout32{32,5,0x100018,0x100038,72};
-inline constexpr Description Layout36{36,6,0x10001c,0x100044,84};
+inline constexpr Description Layout32{32,5,0x100018,0x100038,72,0x4e};
+inline constexpr Description Layout36{36,6,0x10001c,0x100044,84,0x57};
+inline constexpr std::array<std::uint64_t,6> Hashes{
+    Hash32,Hash36,0x24dbf327f8c6d151ull,0x529745c8c9ccb660ull,
+    0x85043c7598c4ad8cull,0x9cd63b2566180f01ull};
+// Each additional whole-program identity has the exact original fetch blob
+// and input metadata; retain its own VCC_HI prefix instead of normalizing it.
+inline constexpr std::array<Description,6> Layouts{
+    Layout32,Layout36,Description{32,5,0x100018,0x100038,72,0x52},
+    Description{32,5,0x100018,0x100038,72,0x51},
+    Description{32,5,0x100018,0x100038,72,0x5f},
+    Description{36,6,0x10001c,0x100044,84,0x5b}};
 inline constexpr const Description* Layout(std::uint64_t hash) {
-    return hash==Hash32 ? &Layout32 : hash==Hash36 ? &Layout36 : nullptr;
+    for(std::size_t k=0;k<Hashes.size();++k)if(Hashes[k]==hash)return &Layouts[k];
+    return nullptr;
+}
+inline constexpr bool IsExtended(std::uint64_t hash) {
+    return hash!=Hash32 && hash!=Hash36 && Layout(hash)!=nullptr;
 }
 // Captured descriptor metadata only; no original executable/shader bytes.
 inline constexpr std::array<std::uint32_t,6> Formats{

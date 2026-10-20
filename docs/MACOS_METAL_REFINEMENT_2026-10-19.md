@@ -6,17 +6,34 @@ images. No patch is written into the original dump or master save directory.
 
 ## Current acceptance status
 
+The latest 20 October changes correct lost source sign modifiers in the
+Hunter's Dream foliage wind shader and extend/batch Metal texture uploads.
+The matched 963-upload CPU frame falls from 190.803 to 153.311 ms; other
+visible stalls remain. The final full suite has 69 passes and two expected
+private-input skips (71 registered), with no failures. The sections at the
+end distinguish the upload stability replay from the later shader fix and
+its live Dream verification.
+The final native-1080p observation is 52.816 displayed FPS with three dropped
+drawables; it is not a new all-frames-presented FPS A/B. The 60 FPS goal remains
+open.
+
 The fog allocation fix, fast detiler, immutable GPU uploader and guarded
 vertex-fetch fusion are enabled by default. Clean matched native-1080p
 benchmarks improved from 48.754 to 52.977 FPS (+8.66%), with all submitted
 frames presented. Sustained 60 FPS and elimination of first-use shader
 stutters are **not** achieved.
 
-The final 330-second default-settings route completed four requested
-transitions with no GPU failure or fence timeout. It exposed five previously
-unseen pipelines, including a 593.968 ms compilation wait and a 1,349.997 ms
-displayed-frame gap. They are now retained for startup prewarming. Their
-warmed replay remains pending; this report does not claim them fixed.
+The initial 330-second default-settings route exposed five previously unseen
+pipelines, including a 593.968 ms compilation wait and a 1,349.997 ms visible
+gap. The awake replay on 20 October completed four transitions across three
+areas with **no recorded pipeline wait >=10 ms**, GPU failure or fence timeout.
+It did not exercise those exact five recipes. A separate fixture using their
+real source/descriptor recipes verified **10 foreground cache hits with zero
+additional Metal pipeline creation calls**, taking 3.204 ms in total.
+
+This proves cache reuse for the known pipelines, not elimination of first-ever
+compilation or all gameplay stutter. The awake route still had 20 dropped
+drawables and a maximum 179.162 ms visible gap. Sustained 60 FPS remains open.
 
 The Mac entered clamshell sleep at 22:09:30 local time, after the last gameplay
 metrics were saved at 22:07:05. The clean optimized/reference benchmarks were
@@ -27,16 +44,19 @@ The final 69-test run initially had 65 passes, two expected private-input
 skips and two timeouts spanning sleep (609/923 seconds despite 60-second
 limits). Both timed-out detiler runs printed 758 byte-exact CPU cases. A
 retry passed the CPU fixture in 43.91 seconds; the GPU fixture again timed
-out across sleep. Across the run and retry, **66 tests passed, two skipped
-and one GPU fixture remains incomplete**. Earlier completed GPU differential
-and uploader checks are recorded below. No test timeout was enlarged to
+out across sleep. The awake follow-up on 20 October reran
+`darwin-metal-detile`: it passed in 17.87 seconds (`awake-gpu-detile.log`).
+Across the full run and focused retries, **67 tests passed and two expected
+tests skipped**. Earlier completed GPU differential and uploader checks are
+recorded below. No test timeout was enlarged to
 conceal the interruption. The power log confirms Clamshell Sleep followed by
 Maintenance Sleep/DarkWake cycles. No power setting was changed.
 
 Final integrity verification passed: all 28,779 original-file sizes and
 modification times match the baseline; original eboot and prepared-original
 ELF SHA-256 hashes match; all 16 master-save file hashes match. See
-`out/metal-refinement-2026-10-19/final-original-integrity.log`.
+`out/metal-refinement-2026-10-19/awake-original-integrity.log`, repeated after
+the awake gameplay replay.
 
 ## Implemented upload improvements
 
@@ -305,11 +325,11 @@ original 288.009/123.934 ms recipes retained identical content but unchanged
 modification times. Their usage is unproven in this cadence, so absence of
 their renderer keys is not proof those exact stalls were fixed. Detailed
 checks are in `final-prewarm-replay-comparison.json` and its Markdown report.
-The existing replay helper accepts `--run`, `--before`, `--targets`, `--cache`
-and `--output`, but currently handles render recipes. A baseline for the five
-new recipes and compute-recipe coverage must still be added before the awake
-warmed replay can prove their foreground use. Neither the 594 ms wait nor the
-1.35-second gap is claimed resolved.
+The replay helper now handles both render and compute recipes and filters
+waits to the measured gameplay window. The five-recipe baseline is
+`new-five-prewarm-targets.json`; the pre-run 517-recipe inventory is
+`awake-replay-cache-inventory.json`. Recipe use and direct fixture results
+from the awake follow-up are distinguished below.
 
 ## Validation boundaries
 
@@ -336,27 +356,197 @@ file-I/O workaround was added, and this is not claimed fixed.
 Sustained 60 FPS at native 1080p and removal of every area-transition stall
 remain separate acceptance criteria. The fog fix is proven in the saved view;
 extended movement and retirement bounds passed in the observed windows,
-while cold compilation and the pending warmed replay remain explicit limits. Earlier warm
-native-1080p performance and Hunter's Dream cubemap verification are recorded
+while first-ever compilation and residual visible gaps remain explicit limits.
+Earlier warm native-1080p performance and Hunter's Dream cubemap verification are recorded
 in `MACOS_METAL_GAMEPLAY_2026-10-19.md`.
 
-## Resume after the Mac is awake
+## Awake validation — 2026-10-20
 
-1. Rerun only `darwin-metal-detile` with
-   `ctest --test-dir out/macos-runtime -R '^darwin-metal-detile$' --output-on-failure`.
-2. Extend the ignored replay helper for compute recipes, save fingerprints and
-   modification times for the five `added_names` in
-   `final-prewarm-replay-comparison.json`, and snapshot the current cache inventory.
-3. Run a new 330-second `movement` replay with final defaults, the same copied
-   fog save and `BB_TEST_TRAVEL_INTERVAL=60`; keep the game visible. Do not
-   enable quality/video/presentation timing diagnostics. Confirm all 517 recipes
-   load and become ready before measurement.
-4. Check actual foreground use of each new recipe, all pipeline waits >=10 ms,
-   complete nonzero presentation-time gaps, GPU errors/timeouts, memory and
-   transition success. A zero wait count without recipe-use evidence is
-   insufficient to claim the exact cold stalls resolved.
+`awake-warm-movement/` completed 330.713 seconds at native 1920×1080 with TAA
+and native motion vectors enabled, using the final default renderer settings
+and a fresh clone of the same save. All 517 recipes became ready before
+measurement. Four requested transitions completed successfully:
+Central Yharnam → Hunter's Dream → Central Yharnam → Cathedral Ward →
+Central Yharnam. Movement occurred in all three areas. An additional
+same-area reload also occurred, as in the prior run.
 
-The final verified executable is
+No pipeline wait >=10 ms was recorded. There were zero GPU failures, fence
+timeouts and unavailable-drawable skips. Four completion-driven CPU fence
+waits totalled 17.0 ms. Resident memory rose from 3.647 to 4.166 GiB. The
+cache remained exactly 517 recipes / 35,173,553 bytes, with no additions or
+evictions and 317 existing modification times advanced. All five target
+recipes retained their exact content but unchanged modification times.
+Their gameplay usage is therefore unproven; this replay alone cannot prove
+the exact five original stalls fixed.
+
+Actual presentation data recorded 18,284 displayed frames of 18,304
+submissions, 20 dropped drawables, p99 33.333 ms and maximum 179.162 ms.
+The aggregate 55.287 FPS includes loading and different visible geometry;
+it is **not** a new matched FPS benchmark or evidence of a cache-caused
+FPS gain. The largest gaps occurred near area-entry positions. The largest
+had no dropped drawable between its endpoints and nearby CPU scopes below
+11 ms; its cause is not established by the available trace. First-use
+compilation and residual loading/presentation gaps remain distinct limits.
+Details: `awake-warm-movement/analysis.json`, `visible-gap-context.json` and
+`awake-warm-replay-comparison.json`.
+
+The pipeline-cache fixture now accepts `--recipes FILE.json ...`. It copies
+those private recipes into a temporary cache, prewarms through the production
+compiler and captures the actual descriptors at the Metal device boundary.
+It then demands those same descriptors twice and asserts every request is a
+warm hit, no additional Metal render/compute pipeline API is called, no
+recipe rewrite is queued, no archive API is called, and copied JSON content
+remains unchanged. It does not issue game draws or substitute for visual
+gameplay proof. No original game or live cache file is written.
+
+For the five stalled real recipes (four render, one compute), all five were
+ready and all ten foreground requests hit the warm cache, taking 3.204 ms
+total with zero new driver pipeline creation calls (`awake-five-real-recipes.log`).
+The existing 513-recipe/cache-safety regression also passed after adding
+this fixture mode (`awake-pipeline-regression.log`, 3.27 seconds). Only test
+code changed in this follow-up; the game executable remains SHA-256
 `1fb9cddedfa445fff8489cd22ca4f274facded58c5e62b9c849e17f69514cde1`.
-Original game data and master saves must remain untouched; continue using
-`run-profile.py` save clones and the existing read-only source paths.
+
+The next profiling target is the residual 179 ms gap and its area-entry
+resource/queue behavior. Neither complete stutter removal nor sustained
+60 FPS is claimed. Original-file integrity verification passed again.
+
+## Area-entry upload batching — 2026-10-20
+
+The residual 179.162 ms gap was producer-side: the interval between renderer
+submissions was 175.010 ms, while the change in presentation queue latency
+accounted for 4.152 ms. No dropped drawable lay between its endpoints. The
+thresholded scopes captured only 71.729 ms of the producer interval, which
+was insufficient to identify the rest. No presenter-latency change follows
+from that evidence.
+
+`BB_METAL_FRAME_WORK_CSV` now enables optional bounded, asynchronous CPU
+accounting. It records every scope, including calls below the ordinary
+stutter threshold, and reports both inclusive sums and coverage that excludes
+recursive calls within the same stage. Renderer-owned counters cover both CP
+rings under the existing renderer lock. Separate CP job, idle, label-wait,
+GPU-drain and vblank spans cover work outside that lock. These are wall-time
+measurements; nested stages must not be added together. Logging adds no GPU
+cuts, readbacks or waits. Diagnostic runs are excluded from FPS benchmarks.
+
+The 235-second diagnostic replay reproduced a 191.667 ms visible gap on
+returning to Central Yharnam. Its corresponding CPU frame contained 963
+texture uploads and 8,782 mip/slice detiles and `replaceRegion` calls:
+75.925 ms detiling, 44.776 ms copying into Metal textures and 6.888 ms initial
+hashing. Individual calls were short enough that the old trace concealed
+most of this aggregate cost. An independent 103.752 ms frame contained
+about 92 ms outside draw/dispatch/submit/DMA scopes; subsequent explicit
+spans identified full GPU drains for indirect argument reads. These delays
+are separate from texture detiling and first-use pipeline compilation.
+
+The raw-word Metal uploader now supports all 14 BC1–BC7 format variants and
+the 1D mip tail used by ordinary full mip chains. It preserves compressed
+blocks rather than decompressing/recompressing them. Eight-byte blocks use
+the original sixteen-bank layout; sixteen-byte blocks use the CPU oracle's
+eight-bank/64×64-element macro layout and Display16 micro order. Dispatch
+extents are block counts; blit extents remain pixel counts, including the
+clamped final partial block. These follow Apple's documented
+[compressed buffer-to-texture copy rules](https://developer.apple.com/documentation/metal/mtlblitcommandencoder/copy%28from%3Asourceoffset%3Asourcebytesperrow%3Asourcebytesperimage%3Asourcesize%3Ato%3Adestinationslice%3Adestinationlevel%3Adestinationorigin%3Aoptions%3A%29?language=objc).
+Existing physical mip offsets and padded cube/array strides remain intact.
+`BB_METAL_GPU_COMPRESSED_UPLOAD=0` retains the former format/layout support
+for comparisons; unsupported destinations still fall back before encoding.
+
+The first implementation still allocated two buffers per texture. It lowered
+the 963-upload frame from 190.803 to 161.520 ms, but its 117.586 ms compressed
+upload cost showed that allocation/snapshot overhead consumed much of the
+gain. Staging now appends each immutable source and scratch range to 4 MiB
+pages within its command buffer, with larger dedicated pages when needed.
+Ranges are never recycled. Validated retained-reference command buffers own
+encoded pages across rollover and later commands; weak command identity
+avoids retaining the whole command or mistaking a reused object address for
+the old one. The uploader retains only its current final source/scratch page
+pair. Bounds remain per upload, not an aggregate command-buffer memory cap.
+No command submission, GPU wait or guest-memory lifetime rule was removed.
+
+The real Metal fixture with API validation passed 706 raw-bit cases,
+including all BC variants, macro/micro layouts, odd dimensions, complete
+1×1 mip tails, six visible/eight physical cube faces, immutable-source hashes,
+page rollover and reversed submission of two commands whose source data was
+already changed. The existing 758-case CPU differential and production
+texture-coherence/queued-version fixture also passed. Logs:
+`staging-page-fixture.log` and `staging-page-coherence.log`.
+
+The final upload replay (`staging-page-profile/`) ran 330.663 seconds at native
+1080p with TAA/native motion, movement and four successful transitions across
+Central Yharnam, Hunter's Dream and Cathedral Ward. It reported zero GPU
+failures, zero fence timeouts and zero unavailable-drawable skips. Two label
+waits totalled 2.1 ms. RSS was 3.313 GiB initially, peaked at 3.729 GiB and
+finished at 3.660 GiB; the observed late decrease demonstrates reclamation,
+not a whole-game memory bound. All six focused CPU contract tests passed
+(`staging-cpu-contracts.log`), and the full runtime build passed.
+
+The same 963-upload return-to-Central burst now has 153.311 ms CPU frame
+wall time, versus 190.803 ms in the baseline (19.65% lower). Texture upload
+time is 121.121 versus 142.044 ms; no CPU detile or `replaceRegion` calls
+remain in that burst. Source copying (36.831 ms) and snapshot hashing
+(34.703 ms) remain material costs. These are matched bursts in diagnostic
+routes, not a clean FPS A/B or proof that every area-entry gap improved.
+
+There were two dropped presentation timestamps. The largest visible gap was
+175.000 ms at Cathedral entry; the Central burst's displayed gap was
+158.339 ms, versus 191.667 ms in the baseline capture. The aggregate 44.985
+FPS includes loading, changing geometry and detailed diagnostics and is not
+a comparable scene benchmark. Indirect argument drains remained, including
+56.526 ms in one slow frame. The new spans distinguish three-word dispatch
+arguments from four-word nonindexed draw arguments. Bypassing those waits
+requires preserving persistent SGPR writes, the existing first-vertex and
+zero-instance behavior, and ordering against later CPU writes. Merely
+passing the raw arguments to Metal would change behavior.
+
+## Hunter's Dream flower and grass motion — 2026-10-20
+
+The reported rapid/glitchy sway exposed a concrete translation defect in the
+captured wind vertex shader, original hash `e4abfca709b00ef3`. At PC `0x158`,
+the GCN selects between `v5` and `-v5`; the old Metal source selected `v5`
+for both arms. Sixteen such modified selections recur through its procedural
+phase calculations. The historical Dream capture associates this shader with
+large indexed foliage draws. This is a shader error; the audit did not find a
+missing redirect among the four known native grass-step loads.
+
+`V_CNDMASK_B32` now applies ABS and NEG to each data operand before selection,
+by clearing and toggling the float sign bit on its raw uint representation.
+This preserves NaN payloads, denormals and signed zero. Unmodified selects
+remain unchanged. The source modifiers are supported despite the opcode's
+`B32` name; see the [LLVM assembler/disassembler change and hardware-team confirmation](https://reviews.llvm.org/D59191).
+Native animation clocks and authored wind rates were left unchanged. No game
+binary or asset was edited.
+
+The new public fixture decodes all sixteen ABS/NEG combinations and runs the
+production generated instruction body on Metal. All 12,800 output words match
+an independent bit-level expected result, covering both predicates, positive
+and negative finite inputs, infinities, NaNs, denormals and signed zeros.
+Its optional private-input mode verifies the original Dream VS/fetch hash,
+all sixteen affected selections and PC `0x158`'s corrected sign operation.
+Evidence and exact commands are under `foliage-audit/`.
+
+`dream-foliage-current/` and `dream-foliage-fixed/` retain eight-second
+window-only recordings from the same stationary lamp view. Both use TAA and
+native motion vectors and report zero GPU failures. The fixed replay also
+records actual large draws with VS `0x80d44d2c00` and captures its generated
+MSL with the corrected `v5 ^ 0x80000000u` arm. This proves the live game uses
+the fix; it is not a calibrated comparison with original PS4 wind speed.
+The fixed runtime SHA-256 is
+`af4a3f9bcb8ba768672509c77abd5df7343465a4ddeb713bc3e20eadf587be06`.
+
+After the shader fix, the full runtime build and all runnable CTests passed:
+69 passes, two expected skips for private tessellation/motion inputs, zero
+failures, 104.35 seconds (`foliage-full-build.log`, `foliage-final-ctest.log`).
+Integrity verification again confirms the baseline metadata of 28,779 source
+files, the original eboot/prepared-ELF hashes and all sixteen master-save
+hashes (`staging-foliage-original-integrity.log`).
+
+`foliage-staging-final-benchmark/` then ran the final shader/upload binary for
+90.200 seconds at native 1920×1080 with TAA and native motion vectors, detailed
+frame/presentation diagnostics disabled and no screen recording. It displayed
+4,764 of 4,767 submissions: 52.816 actual displayed FPS, p99 25.001 ms,
+maximum 41.667 ms, zero GPU failures and no CPU scope >=10 ms. The three zero
+presentation timestamps are retained as dropped drawables. They cause the
+harness's strict `timing_usable_for_benchmark` flag to be false, so this is an
+observational gameplay result, not a matched/all-frames-presented FPS gain.
+No sustained 60 FPS claim follows. Final post-run original-file/save checks
+are in `final-foliage-original-integrity.log`.

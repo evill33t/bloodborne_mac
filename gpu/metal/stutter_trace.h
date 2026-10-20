@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <mach/mach_time.h>
+#include "gpu/metal/frame_work_trace.h"
 
 namespace Gpu::Metal::StutterTrace {
 inline double Now() {
@@ -50,12 +51,15 @@ inline void Record(const char* stage,double start,double end,std::uint64_t frame
 class Scope {
 public:
     Scope(const char* stage,std::uint64_t frame=0,std::uint64_t a=0,std::uint64_t b=0,double minimum_ms=10)
-        :stage(stage),frame(frame),a(a),b(b),minimum_ms(minimum_ms),start(Output()?Now():0) {}
+        :stage(stage),frame(frame),a(a),b(b),minimum_ms(minimum_ms),slot(FrameWork::Slot(stage)),
+         start((Output() || slot>=0)?Now():0) {if(start)FrameWork::Enter(slot,frame,start);}
     ~Scope() { End(); }
-    void End() {if (start) {Record(stage,start,Now(),frame,a,b,minimum_ms);start=0;}}
+    void End() {if (start) {const auto end=Now();FrameWork::Add(slot,frame,a,b,start,end);Record(stage,start,end,frame,a,b,minimum_ms);start=0;}}
 private:
     const char* stage;
     std::uint64_t frame,a,b;
-    double minimum_ms,start;
+    double minimum_ms;
+    int slot;
+    double start;
 };
 }

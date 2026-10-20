@@ -43,6 +43,7 @@ public:
         std::atomic<u64> submits{0};
         std::atomic<u64> validated_register_packets{0}, register_mismatches{0}, malformed_packets{0};
         std::atomic<u64> label_waits{0},label_parked_us{0},label_timeouts{0};
+        std::atomic<u64> native_indirect_draws{0},native_indirect_dispatches{0},indirect_fallbacks{0};
     };
 
     CommandProcessor();
@@ -138,6 +139,7 @@ private:
         bool busy = false;
         RegFile regs;           // compute rings: their own SH state
         u64 indirect_base = 0;  // SET_BASE
+        u32 indirect_selector = 0; // optimization admission only; unknown after restore
         std::jthread thread;
     };
 
@@ -147,13 +149,13 @@ private:
     void Execute(std::span<const u32> cmds, bool compute, int depth);
     void Interrupt(u32 irq);
     void SetRegs(u32 index, const u32* values, u32 count);
-    void Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances);
+    void Draw(bool indexed, u32 count, u32 index_offset, u32 first_vertex, u32 instances,bool indirect=false);
     RegFile& CurRegs();
     // Ring and registers of the ring the calling thread executes.
     static thread_local Ring* t_ring;
     static thread_local Liverpool::RegFile* t_regs;
     const u32* IndirectArgs(u32 offset, u32 dwords);
-    bool SyncRenderer();
+    bool SyncRenderer(u32 reason=0);
     // Runs `fn` once the renderer has executed everything recorded so far.
     void AfterGpu(std::function<void()> fn);
     // AfterGpu for a fence/label write (`data_sel` as in EVENT_WRITE_EOP),
@@ -161,6 +163,7 @@ private:
     void FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 irq);
     // Value a recorded but not yet executed fence write will put at `addr`.
     bool PendingFence(u64 addr, u32* value);
+    bool PendingFenceOverlaps(u64 addr,u64 bytes);
     void Fail(const std::string& reason);
     void ClearState();
     // Runs the CE until `done()` holds, it blocks on the DE, or its CCB ends.
@@ -193,7 +196,7 @@ private:
     // waits for a value one of these writes will produce only waits for work
     // that is already ahead of it: the wait is satisfied without a round trip.
     std::mutex fence_lock;
-    struct PendingWrite {u32 value;u64 ticket;u32 ring;};
+    struct PendingWrite {u32 value;u64 ticket;u32 ring;bool known=true;};
     std::unordered_map<u64, PendingWrite> pending_fences;
     u64 next_fence_ticket=0;
 

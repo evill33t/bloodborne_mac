@@ -89,6 +89,53 @@ static void write_unlock(void) {
 }
 static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock); }
 static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
+typedef struct {
+    void *context; BbGpuMemoryMutationBegin begin; BbGpuMemoryMutationEnd end;
+} MutationHooks;
+static MutationHooks mutation_hooks;
+static pthread_mutex_t mutation_hooks_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t mutation_hooks_changed=PTHREAD_COND_INITIALIZER;
+static unsigned mutation_users,changing_mutation_hooks;
+static __thread unsigned mutation_depth;
+static __thread MutationHooks active_mutation_hooks;
+int runtime_gpu_memory_set_mutation_hooks(void *context,
+    BbGpuMemoryMutationBegin begin,BbGpuMemoryMutationEnd end) {
+    if (mutation_depth || !!begin!=!!end) return 0;
+    pthread_mutex_lock(&mutation_hooks_lock);
+    while (changing_mutation_hooks) pthread_cond_wait(&mutation_hooks_changed,&mutation_hooks_lock);
+    changing_mutation_hooks=1;
+    while (mutation_users) pthread_cond_wait(&mutation_hooks_changed,&mutation_hooks_lock);
+    mutation_hooks=(MutationHooks){context,begin,end};
+    changing_mutation_hooks=0;
+    pthread_cond_broadcast(&mutation_hooks_changed);
+    pthread_mutex_unlock(&mutation_hooks_lock);return 1;
+}
+static void release_mutation_user(void) {
+    pthread_mutex_lock(&mutation_hooks_lock);
+    if (!--mutation_users) pthread_cond_broadcast(&mutation_hooks_changed);
+    pthread_mutex_unlock(&mutation_hooks_lock);
+}
+static int begin_memory_mutation(void) {
+    if (mutation_depth) { ++mutation_depth;return 1; }
+    pthread_mutex_lock(&mutation_hooks_lock);
+    while (changing_mutation_hooks) pthread_cond_wait(&mutation_hooks_changed,&mutation_hooks_lock);
+    active_mutation_hooks=mutation_hooks;++mutation_users;
+    pthread_mutex_unlock(&mutation_hooks_lock);
+    /* Never hold the registration mutex while acquiring a renderer lock.
+     * Lazy renderer arena allocation can itself enter a mapping operation. */
+    mutation_depth=1;
+    if (active_mutation_hooks.begin && !active_mutation_hooks.begin(active_mutation_hooks.context)) {
+        mutation_depth=0;active_mutation_hooks=(MutationHooks){0};release_mutation_user();return 0;
+    }
+    return 1;
+}
+static void end_memory_mutation(void) {
+    if (mutation_depth>1) { --mutation_depth;return; }
+    /* Keep depth nonzero through end, so a callback's nested mapping operation
+     * cannot wait for its own registration lease. */
+    if (active_mutation_hooks.end) active_mutation_hooks.end(active_mutation_hooks.context);
+    mutation_depth=0;active_mutation_hooks=(MutationHooks){0};release_mutation_user();
+}
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
 #ifndef _WIN32
@@ -553,10 +600,12 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
     return result;
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
+    if (!begin_memory_mutation()) return ACCESS;
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     write_unlock();
     flush_hooks();
+    end_memory_mutation();
     if (!result) printf("Runtime: mapped direct memory %p, size=%" PRIu64 ", prot=0x%x\n", *out, size, prot);
     return result;
 }
@@ -580,6 +629,7 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     return 0;
 }
 static ABI int32_t direct_unmap(void *address, uint64_t size) {
+    if (!begin_memory_mutation()) return ACCESS;
     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
     if (hook_unmap && !((uintptr_t)address%PAGE) && size) hook_unmap((uintptr_t)address,align_up(size,PAGE));
     write_lock();
@@ -587,13 +637,15 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     int32_t result=unmap_locked((uintptr_t)address,size);
     pending_count=before; /* already notified above */
     write_unlock();
+    end_memory_mutation();
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     if (start % PAGE || size % PAGE) return INVALID;
     if (!size) return 0;
+    if (!begin_memory_mutation()) return ACCESS;
     write_lock();
-    if (!direct_range_allocated(start,size)) { write_unlock(); return INVALID; }
+    if (!direct_range_allocated(start,size)) { write_unlock();end_memory_mutation();return INVALID; }
     /* Mappings of released physical pages disappear with them. */
     for (size_t i=0; i<vma_count;) {
         Vma v=vmas[i];
@@ -620,6 +672,7 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     host_discard(start,size); /* zero on reuse */
     write_unlock();
     flush_hooks();
+    end_memory_mutation();
     return 0;
 }
 static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags) {
@@ -632,10 +685,12 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
     return result;
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
+    if (!begin_memory_mutation()) return ACCESS;
     write_lock();
     int32_t result=map_flexible_locked(inout,size,prot,flags);
     write_unlock();
     flush_hooks();
+    end_memory_mutation();
     if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", *inout, size, prot);
     else fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
                  size, (unsigned)result, flexible_bytes);
@@ -691,12 +746,14 @@ static ABI int32_t posix_munmap(void *address, uint64_t size) {
 static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_t alignment) {
     if (!alignment) alignment=PAGE;
     if (!inout || !size || size%PAGE || !valid_alignment(alignment)) return INVALID;
+    if (!begin_memory_mutation()) return ACCESS;
     write_lock();
     if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
-        write_unlock(); return NO_MEMORY;
+        write_unlock();end_memory_mutation();return NO_MEMORY;
     }
     int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
     write_unlock();
+    end_memory_mutation();
     if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
     return result;
 }
@@ -713,10 +770,12 @@ static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type
     return 0;
 }
 static ABI int32_t kernel_mprotect(const void *address, uint64_t size, int prot) {
+    if (!begin_memory_mutation()) return ACCESS;
     write_lock();
     int32_t result=protect_locked((uintptr_t)address,size,prot,-1);
     write_unlock();
     flush_hooks();
+    end_memory_mutation();
     return result;
 }
 static ABI int32_t query_protection(void *address, void **start, void **end, uint32_t *prot) {
@@ -766,6 +825,7 @@ static ABI int32_t direct_memory_type(uint64_t phys, int *type, void **start, vo
 static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, int flags) {
     if (!entries || count<0) return INVALID;
     int32_t result=0; int done=0;
+    if (!begin_memory_mutation()) {if (processed) *processed=0;return ACCESS;}
     write_lock();
     for (; done<count; ++done) {
         BatchEntry *e=&entries[done];
@@ -781,6 +841,7 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
     }
     write_unlock();
     flush_hooks();
+    end_memory_mutation();
     if (processed) *processed=done;
     return result;
 }
@@ -847,6 +908,42 @@ static int gpu_label_access(const BbGpuLabel *label,uint64_t *value,int store) {
 }
 int runtime_gpu_label_load(const BbGpuLabel *label,uint64_t *value) {return gpu_label_access(label,value,0);}
 int runtime_gpu_label_store(const BbGpuLabel *label,uint64_t value) {return gpu_label_access(label,&value,1);}
+int runtime_gpu_memory_snapshot(uintptr_t address,void *destination,size_t bytes) {
+    const uintptr_t dst=(uintptr_t)destination;
+    if (!address || !destination || !bytes || address>UINTPTR_MAX-bytes || dst>UINTPTR_MAX-bytes) return 0;
+    const uintptr_t end=address+bytes,dst_end=dst+bytes;
+    read_lock();
+    int ok=backing_base!=NULL;
+    /* The destination is uploader-owned host storage. Reject runtime aliases
+     * so copying a segment cannot overwrite a later segment's source. */
+    const uintptr_t backing=(uintptr_t)backing_base;
+    if (ok && dst<backing+POOL_SIZE+FLEX_SPAN && dst_end>backing) ok=0;
+    const size_t destination_vma=vma_index(dst);
+    if (ok && destination_vma<vma_count && vmas[destination_vma].start<dst_end) ok=0;
+    const size_t first=vma_index(address);
+    uintptr_t at=address;
+    for (size_t i=first;ok && at<end;++i) {
+        if (i>=vma_count || vmas[i].start>at ||
+            (vmas[i].kind!=KIND_DIRECT && vmas[i].kind!=KIND_FLEXIBLE) ||
+            !(host_prot(vmas[i].prot)&PROT_READ)) {ok=0;break;}
+        const uintptr_t part_end=vmas[i].end<end ? vmas[i].end : end;
+        const uint64_t extent=vmas[i].kind==KIND_DIRECT ? POOL_SIZE : POOL_SIZE+FLEX_SPAN;
+        if (vmas[i].phys>extent || at-vmas[i].start>extent-vmas[i].phys) {ok=0;break;}
+        const uint64_t physical=vmas[i].phys+(at-vmas[i].start);
+        if (physical>extent || part_end-at>extent-physical) {ok=0;break;}
+        at=part_end;
+    }
+    if (ok) {
+        at=address;
+        for (size_t i=first;at<end;++i) {
+            const uintptr_t part_end=vmas[i].end<end ? vmas[i].end : end;
+            memcpy((unsigned char*)destination+(at-address),
+                backing_base+vmas[i].phys+(at-vmas[i].start),part_end-at);
+            at=part_end;
+        }
+    }
+    read_unlock();return ok;
+}
 size_t runtime_gpu_memory_mappings(BbDirectMapping *out,size_t capacity) {
     read_lock();
     size_t count=0;
