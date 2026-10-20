@@ -48,6 +48,7 @@
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
 #include "gpu/metal/native_indirect.h"
+#include "gpu/metal/native_writer_proof.h"
 #include "gpu/metal/world_frame_queue.h"
 
 namespace Gpu::Metal {
@@ -672,6 +673,7 @@ struct MetalRenderer::Impl {
   bool indirect_writer_trace=std::getenv("BB_METAL_INDIRECT_WRITER_TRACE") &&
       std::strcmp(std::getenv("BB_METAL_INDIRECT_WRITER_TRACE"),"1")==0;
   std::unordered_map<const Program*,u32> writer_trace_seen;
+  std::unordered_map<const Program*,NativeWriter::Proof> native_writer_proofs;
   u32 writer_trace_lines=0;
   std::unordered_map<const Program*,bool> static_smrd_programs;
   std::unordered_map<u64,bool> simd_smrd_programs;
@@ -1001,6 +1003,9 @@ struct MetalRenderer::Impl {
         u64(ud[source.ud])|(u64(ud[source.ud+1]&0xfff)<<32);
     if(base>UINT64_MAX-source.offset) return false;
     const u64 address=base+source.offset;
+    // SMRD aligns its GPU word address down. Do not infer an extent from a
+    // different unaligned CPU memcpy value or protect the wrong four bytes.
+    if(producer && (address&3)) return false;
     if(!CpuResourceRead(address,4,predicate)) return false;
     if(reads) {
       id<MTLBuffer> buffer=nil;u64 offset=0;
@@ -1066,24 +1071,40 @@ struct MetalRenderer::Impl {
     if(unknown) {
       TraceProgramWriter(program,1,"unsupported-program");TrackGuestWriter({},true);return;
     }
+    // Linear reflection is not a reaching-definition proof, including for
+    // some scalar clobbers. Cache the bounded code-only proof for every writer.
+    auto [proof,inserted]=native_writer_proofs.try_emplace(&program);
+    if(inserted)proof->second=NativeWriter::Prove(program);
+    if(!proof->second) {
+      TraceProgramWriter(program,1024,proof->second.reason,0,
+          program.buffer_writes.empty() ? nullptr : &program.buffer_writes.front());
+      TrackGuestWriter({},true);return;
+    }
     std::vector<NativeIndirect::Range> written;
     std::vector<DescriptorRead> read;
     std::size_t descriptor_index=0;
     for(const auto& instruction:program.code) {
       using namespace Shader::Gcn;
-      const bool typed=instruction.enc==Enc::MTBUF;
-      if(!typed && instruction.enc!=Enc::MUBUF) continue;
-      const auto op=instruction.op;
-      const bool store=(op>=4 && op<=7) || (!typed &&
-          (op==u16(Mubuf::BUFFER_STORE_BYTE) || op==u16(Mubuf::BUFFER_STORE_SHORT) ||
-           (op>=u16(Mubuf::BUFFER_STORE_DWORD) && op<=u16(Mubuf::BUFFER_STORE_DWORDX3)) ||
-           (op>=u16(Mubuf::BUFFER_ATOMIC_SWAP) && op<=u16(Mubuf::BUFFER_ATOMIC_DEC))));
-      if(!store) continue;
+      if(!NativeWriter::IsBufferWriter(instruction))continue;
       if(descriptor_index>=program.buffer_writes.size()) {
         TraceProgramWriter(program,2,"store-reflection-mismatch",instruction.pc);unknown=true;break;
       }
       const auto& source=program.buffer_writes[descriptor_index++];
       std::array<u32,4> descriptor{};
+      // The CFG proof accepts one exact S_LOAD_DWORDX4 per pointer V#.
+      // Its GPU load returns all zeros unless its WHOLE footprint translates
+      // to one contiguous buffer, so prove that before individual word copies.
+      if(source[0].kind==Shader::SgprSource::PointerLoad) {
+        const auto& root=source[0];const auto& predicate=ready ? ready : cp_cpu_read_ready;
+        const u64 table=(u64(ud[root.ud])|(u64(ud[root.ud+1])<<32))&0xffffffffffffull;
+        id<MTLBuffer> buffer=nil;u64 offset=0;
+        if(!predicate || table>UINT64_MAX-root.offset ||
+            !CpuResourceRead(table+root.offset,16,predicate) ||
+            !LocateIndirect(table+root.offset,16,&buffer,&offset)) {
+          TraceProgramWriter(program,8,"descriptor-footprint-unready",instruction.pc,&source);
+          unknown=true;continue;
+        }
+      }
       // Current MSL does not bound arbitrary vector/scalar byte offsets by
       // V#.NUM_RECORDS. count*stride alone would underestimate these writes.
       if(instruction.addr64) {
@@ -2961,7 +2982,7 @@ struct MetalRenderer::Impl {
     const Shader::GpuTessConsts params{r[Reg::VGT_INDX_OFFSET],dc.count,
         dc.indexed ? dc.index_size : 0u,0,dc.indexed ? index_base : 0};
     auto compute=[cmd computeCommandEncoder];
-    if(native_indirect_enabled) TrackGuestWriter({},true);
+    if(!compute) return false;
     for (u32 k=0;k<2;++k) {
       u32 ud[16];
       std::memcpy(ud,user[k],sizeof(ud));
@@ -2976,7 +2997,15 @@ struct MetalRenderer::Impl {
       [compute setBytes:&params length:sizeof(params) atIndex:Shader::Binding::TessParams];
       for (u32 t=0;t<resources[k].tex.size();++t) [compute setTexture:resources[k].tex[t] atIndex:t];
       for (u32 s=0;s<resources[k].smp.size();++s) [compute setSamplerState:resources[k].smp[s] atIndex:s];
+      // The generated prep kernels write LDS/factors only to the distinct
+      // Upload buffers bound above. Their guest stores still use ordinary
+      // reflected buffer/image instructions and the already patched stage UD.
+      TrackProgramWriter(*programs[k],ud);
       [compute dispatchThreads:MTLSizeMake(dc.count,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+    }
+    if(native_indirect_enabled && !programs[0]->buffer_writes.empty() && !programs[1]->buffer_writes.empty()) {
+      TraceProgramWriter(*programs[0],512,"two-writing-stages");
+      TraceProgramWriter(*programs[1],512,"two-writing-stages");TrackGuestWriter({},true);
     }
     [compute endEncoding];
     out.lds=lds;out.factors=factors;out.lds_offset=lds_offset;out.factor_offset=factor_offset;

@@ -441,6 +441,7 @@ static void GpuCases(u64 address,u64 alias) {
     uncertain[Reg::COMPUTE_PGM_RSRC2]=(2u<<1)|(1u<<7);
     uncertain[Reg::COMPUTE_USER_DATA_0]=u32(address+49152);
     uncertain[Reg::COMPUTE_USER_DATA_0+1]=u32((address+49152)>>32);
+    const auto unknown_compute=uncertain;
     const auto uncertain_program=Gpu::Shader::BuildProgram({Gpu::Shader::Stage::Compute,
         uintptr_t(shader+576),uncertain.UserData(Reg::COMPUTE_USER_DATA_0),2,0,unknown_writer,
         uncertain[Reg::COMPUTE_PGM_RSRC2]});
@@ -458,8 +459,7 @@ static void GpuCases(u64 address,u64 alias) {
     renderer.Dispatch(compute,1,1,1);Drain(renderer); // explicit drained fallback
     assert(reinterpret_cast<const u32*>(base+64000)[0]==23);
     assert(reinterpret_cast<const u32*>(base+64512)[0]==23);
-    // Even known PointerLoad provenance does not freeze the producer's V#
-    // table against a later host overwrite. Its queued extent stays unknown.
+    // Without a CP read-ready predicate a pointer table remains unknown.
     const u32 pointer_writer[]{unknown_writer[0],vmov(0,2),vmov(1,Operand::Zero+23),
         0xe0002000u|(u32(Mubuf::BUFFER_STORE_DWORD)<<18),0x80010100,0xbf810000};
     std::memcpy(shader+640,pointer_writer,sizeof(pointer_writer));
@@ -472,6 +472,113 @@ static void GpuCases(u64 address,u64 alias) {
     guarded([&] {
         renderer.Dispatch(uncertain,1,1,1);
         assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+    });
+    // These direct renderer fixtures have no asynchronous CP fence stores.
+    // Install the same ready contract that a live CommandProcessor supplies.
+    renderer.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+    const u64 centre=address+32768+4*64+4*4;
+    const u32 centre_descriptor[]{u32(centre),u32(centre>>32)|(4u<<16),1,0x24004};
+    renderer.CpuWrite(address+49152,centre_descriptor,sizeof(centre_descriptor),false);
+    guarded([&] {
+        renderer.Dispatch(uncertain,1,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32)); // proved affected texel extent
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32)); // independent blue payload
+    });
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[0]==255 && pixel[1]==0);
+
+    // A later CP write to the table must not redirect an already queued
+    // producer. Exercise the same VA, a physical alias, and zero records:
+    // zero-record descriptors also need a read ticket before CPU activation.
+    for(unsigned variant=0;variant<3;++variant) {
+        const u64 first=address+70400,second=address+70656;
+        const u32 before[]{u32(first),u32(first>>32)|(4u<<16),variant==2 ? 0u : 1u,0x24004};
+        const u32 after[]{u32(second),u32(second>>32)|(4u<<16),1,0x24004};
+        const u32 zero=0;
+        renderer.CpuWrite(first,&zero,4,false);renderer.CpuWrite(second,&zero,4,false);
+        renderer.CpuWrite(address+49152,before,sizeof(before),false);
+        auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+        [blocker encodeWaitForEvent:event value:1];[blocker commit];
+        renderer.Dispatch(uncertain,1,1,1);
+        const auto waits=renderer.IndirectCpuWriteWaitCount();
+        std::thread release([event] {std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;});
+        renderer.CpuWrite((variant==1 ? texture_alias : address)+49152,after,sizeof(after),false);
+        release.join();Drain(renderer);
+        assert(renderer.IndirectCpuWriteWaitCount()==waits+1);
+        assert(reinterpret_cast<const u32*>(base+70400)[0]==(variant==2 ? 0u : 23u));
+        assert(reinterpret_cast<const u32*>(base+70656)[0]==0);
+        renderer.Dispatch(uncertain,1,1,1);Drain(renderer);
+        assert(reinterpret_cast<const u32*>(base+70656)[0]==23);
+    }
+
+    // The paired runtime mutation guard likewise drains a producer before
+    // unmapping its descriptor alias, while its other mapping remains live.
+    const u64 first=address+70912;
+    const u32 mapped_descriptor[]{u32(first),u32(first>>32)|(4u<<16),1,0x24004};
+    renderer.CpuWrite(address+49152,mapped_descriptor,sizeof(mapped_descriptor),false);
+    auto alias_producer=uncertain;
+    alias_producer[Reg::COMPUTE_USER_DATA_0]=u32(texture_alias+49152);
+    alias_producer[Reg::COMPUTE_USER_DATA_0+1]=u32((texture_alias+49152)>>32);
+    auto descriptor_gate=[metal newSharedEvent];auto descriptor_blocker=[queue commandBuffer];
+    [descriptor_blocker encodeWaitForEvent:descriptor_gate value:1];[descriptor_blocker commit];
+    renderer.Dispatch(alias_producer,1,1,1);
+    const auto mutation_waits=renderer.IndirectCpuWriteWaitCount();
+    std::thread descriptor_release([descriptor_gate] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));descriptor_gate.signaledValue=1;
+    });
+    assert(!unmap(reinterpret_cast<void*>(texture_alias),131072));descriptor_release.join();Drain(renderer);
+    assert(renderer.IndirectCpuWriteWaitCount()==mutation_waits+1);
+    assert(reinterpret_cast<const u32*>(base+70912)[0]==23);
+
+    // A producer that overwrites its own table cannot have a stable extent.
+    const u32 self_descriptor[]{u32(address+49152),u32((address+49152)>>32)|(4u<<16),1,0x24004};
+    renderer.CpuWrite(address+49152,self_descriptor,sizeof(self_descriptor),false);
+    guarded([&] {
+        renderer.Dispatch(uncertain,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    renderer.CpuWrite(address+49152,mapped_descriptor,sizeof(mapped_descriptor),false);
+    for(unsigned lowbits=1;lowbits<4;++lowbits) {
+        auto unaligned=uncertain;
+        unaligned[Reg::COMPUTE_USER_DATA_0]=u32(address+49152+lowbits);
+        guarded([&] {
+            renderer.Dispatch(unaligned,1,1,1);
+            assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+        });
+    }
+    // Linear reflection sees descriptor B, but a branch skips its definition
+    // and the GPU actually stores through A. Such writers stay unknown.
+    const auto smov64=[](u32 destination,u32 source) {
+        return 0xbe800000u|(destination<<16)|(u32(Sop1::S_MOV_B64)<<8)|source;
+    };
+    const u32 branch_writer[]{smov64(8,0),smov64(10,2),
+        0xbf800000u|(u32(Sopp::S_BRANCH)<<16)|2u,smov64(8,4),smov64(10,6),
+        vmov(0,Operand::Zero),vmov(1,Operand::Zero+23),
+        0xe0002000u|(u32(Mubuf::BUFFER_STORE_DWORD)<<18),0x80020100,0xbf810000};
+    std::memcpy(shader+768,branch_writer,sizeof(branch_writer));
+    auto branch_compute=compute;branch_compute[Reg::COMPUTE_PGM_LO]=u32(uintptr_t(shader+768)>>8);
+    branch_compute[Reg::COMPUTE_PGM_RSRC2]=8u<<1;
+    const u64 branch_first=centre,branch_second=address+71168;
+    const u32 branch_descriptors[]{u32(branch_first),u32(branch_first>>32)|(4u<<16),1,0x24004,
+        u32(branch_second),u32(branch_second>>32)|(4u<<16),1,0x24004};
+    for(unsigned k=0;k<8;++k)branch_compute[Reg::COMPUTE_USER_DATA_0+k]=branch_descriptors[k];
+    const auto branch_program=Gpu::Shader::BuildProgram({Gpu::Shader::Stage::Compute,
+        uintptr_t(shader+768),branch_compute.UserData(Reg::COMPUTE_USER_DATA_0),8,0,branch_writer});
+    assert(branch_program && branch_program->has_branches && branch_program->buffer_writes.size()==1 &&
+        branch_program->buffer_writes[0][0].kind==Gpu::Shader::SgprSource::UserData &&
+        branch_program->buffer_writes[0][0].ud==4);
+    const u32 cleared=0;
+    renderer.CpuWrite(branch_first,&cleared,4,false);renderer.CpuWrite(branch_second,&cleared,4,false);
+    guarded([&] {
+        renderer.Dispatch(branch_compute,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(branch_first)==23 && *reinterpret_cast<const u32*>(branch_second)==0);
+
+    // Descriptor read protection remains bounded. An exhausted registry must
+    // become unknown, rather than publish a writer extent without its lease.
+    guarded([&] {
+        for(unsigned k=0;k<513;++k)renderer.Dispatch(uncertain,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
     });
 
     // Cached shader bytes are CPU inputs too. A queued DMA mutation must
@@ -521,7 +628,7 @@ static void GpuCases(u64 address,u64 alias) {
     renderer.Dispatch(low_compute,1,1,1);Drain(renderer);
     renderer.CpuWrite(address+60928,&once[0],4,false);
     guarded([&] {
-        renderer.Dispatch(uncertain,1,1,1);
+        renderer.Dispatch(unknown_compute,1,1,1);
         assert(renderer.DispatchIndirect(low_compute,address));
     });
     assert(reinterpret_cast<const u32*>(base+60928)[0]==23);

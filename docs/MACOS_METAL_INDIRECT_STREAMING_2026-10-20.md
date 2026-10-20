@@ -245,3 +245,83 @@ separately proves admission for independent anonymous code. The revised
 indirect CPU/GPU tests pass; other focused memory/streaming/queue tests pass.
 Evidence: `native-proof-full-build.log`, `native-proof-focused-tests.log`
 and `native-proof-indirect-tests-2.log`.
+
+## Descriptor lifetime checkpoint
+
+The descriptor-lifetime candidate executable is
+`f99b45acfbf69767d162fbc5c0aae9180533b881c734ea0f01e02dd5046b0bbc`.
+Pointer-loaded producer descriptors can establish a precise write range only
+after their complete words are stable against earlier GPU/fence writes and
+their future CPU-read lifetime is protected. Coalesced guest/physical spans
+share a completion ticket on the actual producer command. Later CP writes
+through the same address or a physical alias, and runtime mapping mutations,
+wait for those reads. The registry allows at most 64 spans per producer and
+512 outstanding spans; overflow retains unknown-writer fallback. Zero-record
+tables also retain protection so a later CPU write cannot activate them early.
+
+Unaligned descriptor roots, self-modified tables, uncertain extents and
+two-stage writers remain conservative. Linear scalar-register provenance
+cannot establish definitions across branches, so branched buffer-writing
+programs also remain unknown at this checkpoint. The fixture includes a branch that selects
+runtime descriptor A while linear analysis predicts B, and proves the guard
+does not incorrectly admit the affected resource.
+
+Actual translated LS/HS programs now use their reflected writes and patched
+user data rather than a blanket unknown ticket. Their separate LDS/factor
+outputs do not alias guest memory. Empty-store stages no longer block native
+setup. The capture audit attributes 7.534 of 8.796 unknown tickets per frame
+to the former blanket. The actual compute shader `aaf9b6ea6e525713` contains
+220 branches and 22 pointer-loaded stores, so this checkpoint leaves it unproved.
+Tiny branched direct-UD kernels may support a future register-preservation
+proof; this checkpoint does not assume one.
+
+Ten focused tests pass in 8.71 seconds, including producer-table same-address
+and alias overwrites, alias unmapping, zero-record activation, unaligned roots,
+self-modification and capacity exhaustion. Independent source review found no
+remaining blocker in these guards. Evidence: `descriptor-proof-build.log`,
+`descriptor-proof-focused-tests.log`, `unknown-producer-analysis.md`.
+
+Its unprofiled AC measurements are 29.778 FPS off (one missing presentation),
+22.618 FPS on, and 27.835 FPS on with limit two (both zero missing).
+No GPU failures occur. No native Dream draw is admitted in this version.
+These are negative results, not evidence to enable the path.
+
+## Bounded control-flow proof
+
+The next executable is
+`63f5b5a289fe4e17d4380f1ecdc4ff02d9a8fda0637d63edd322b90932148e52`.
+`native_writer_proof.h` independently proves reaching definitions for each
+store's descriptor words. Reverse walks cover both branch arms, entry paths,
+alternate definitions and loop backedges. Pointer descriptors require one
+exact X4 load, with original entry root words at that load. Direct descriptors
+require unchanged original user-data words. Indirect control flow, inlined
+fetches, incomplete graphs, wider/mixed loads and uncertain scalar writes fail
+closed. This check applies to every buffer-writing program, including straight
+line code where the old linear provenance can miss a scalar clobber.
+
+The check caches per program and caps instructions at 8,192, stores at 256,
+queries at 1,024 and visited nodes at 1,048,576. Runtime source-footprint,
+producer, CPU-write lifetime, self-alias and write-extent guards still apply.
+No game code or shader instruction is patched for this proof.
+
+Public adversarial CPU fixtures pass. The production C++ helper also accepts
+the captured retail inputs with hash verification: `aaf9b6ea6e525713` has
+22 stores, 92 queries and 20,728 visits; the two small kernels each have one
+store and 52/68 visits. Retail bytes remain in ignored `out/` captures, outside
+source fixtures. All 11 focused CPU/GPU tests pass in 6.57 seconds.
+Evidence: `flow-proof-private-*.log`, `flow-proof-focused-tests.log` and
+`flow-proof-full-build.log`.
+
+`dream-flow-quality` confirms native indirect compute in live Dream gameplay;
+completed immutable arguments include 45–52 groups in X and one in Y/Z in its
+late window. Native draw remains on fallback: shader `26ec0808a6cd92dc` has an
+unproved dynamic indexed byte-offset write, so it still creates an unknown
+writer ticket. That safety restriction must not be silently dropped to obtain
+a faster number. One captured image is a correctness spot check, not proof of
+flicker-free animation. The run records zero GPU failures.
+
+This quality run is on battery at 98–96% and includes a raw capture; its FPS
+is not comparable to the earlier AC measurements. Two later AC comparison
+startups refuse to run because the unrestricted power check reports battery.
+The sandboxed `pmset` query misleadingly labels that condition AC; future
+power validation uses the same unrestricted environment as the game.
