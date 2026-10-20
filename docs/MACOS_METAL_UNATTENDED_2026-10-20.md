@@ -16,7 +16,7 @@ Frozen baseline executable:
 | --- | --- |
 | Why did required pipelines stall for 285/184 ms? | Retained recipe/source comparison identifies new typed fragment variants; all 536 older recipes were already ready. Existing exact-source function caching shares duplicate stage sources. |
 | Does persistence remove those two waits on replay? | The frozen baseline's second 330-second replay loads all 539 recipes and records no `pipeline_wait` at the 10 ms logging threshold. Other display stalls remain. |
-| Can the remaining compute writer have a bounded footprint? | The 26ec shader now passes the bounded vector/EXEC proof, public GPU admission fixtures and the live Dream capture with zero unknown writer tickets. A separate worklist copy shader still conservatively covers about 2 GB; its actual job extents are under investigation. |
+| Can the remaining compute writers have bounded footprints? | The 26ec shader passes the bounded vector/EXEC proof. The exact 7cf worklist subset now covers captured 1,112-job batches. The final Dream diagnostic reports 75,175 refined worklists, zero refinement fallbacks and zero unknown writer tickets. This removes an overbroad writer footprint, but does not establish a throughput improvement. |
 | Are guest-pool inputs overdeclared writable? | Metal reflection reports read/write for a translated read-only kernel's mutable `gm0/gm1`, but read-only for a const input. This metadata does not establish scheduling cost or FPS gain. |
 | Is inherited validation changing performance? | Explicit 1/0 probes both return `AGXG16CDevice`; wrapper activation is not established. Matched AC runs measure 29.836/28.664 FPS respectively, so disabling the environment flag has no demonstrated benefit. |
 | Do original-file checks still pass after the new runs? | Final checks are pending; the baseline inventory/hash evidence is retained. |
@@ -143,7 +143,11 @@ complete-output differentials for all six retained original vertex shaders,
 including queued record, descriptor-base and descriptor-format producers and
 actual read/write versus read-only Metal argument reflection. Rectangles,
 points, tessellation, probes and other experimental SMRD contexts remain
-outside this experiment. Live admission and throughput still need measuring.
+outside this experiment. The live diagnostic qualifies both vertex and pixel
+bindings. A clean matched 90-second AC comparison measures 29.861 FPS for the
+control and 29.864 FPS for the complete VS/PS experiment, both with zero missing
+presentation timestamps and zero GPU failures. This is effectively unchanged;
+the option remains off by default.
 
 Apple documents automatic synchronization of tracked read/write resource
 conflicts. Reflection by itself does not prove false serialization or a gain
@@ -180,6 +184,66 @@ from the independently reviewed and privately tested `7a7c1655` checkpoint.
 
 Final matched native-1080p runs, extended movement/transition testing,
 original-file integrity and default-policy decisions are still in progress.
+
+## GPU-written texture snapshots
+
+The new `BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT=1` experiment snapshots a known
+pending GPU texture source into private immutable Metal staging on the same
+command queue, then detiles and uploads it without CPU payload reads or
+hashing. The option defaults off and requires native indirect rendering and
+its texture write journal. Admission requires exact contiguous direct-memory
+backing, a supported 2D format/layout, an existing matching texture entry,
+known overlapping GPU writers, a ready CP predicate, an idle CPU callback
+worker and capacity for a physical source-read lease. Capture modes retain
+the CPU path. Unknown writers, remapping and uncertain callback history
+retain conservative fallback.
+
+GPU-created versions deliberately have no CPU hash baseline. On a later frame,
+once CPU visibility is safe, an ordinary immutable CPU upload rebuilds that
+baseline; this also detects guest CPU writes outside the journal. Alias CPU
+writes and unmapping wait for the actual source-copy command. Failures after
+the first source copy stop execution rather than reading a still-pending
+payload on the CPU. Public native draw/dispatch entry points now consistently
+use the explicit readiness predicate, or the installed CP guard when omitted.
+
+The raw GPU fixture passes 240 byte-exact comparisons across 20 format/tile
+combinations, two queued versions and six mip/slice jobs. It includes private
+GPU sources, invalid CPU pointers, nonzero source/staging offsets, later
+overwrites, reversed jobs, compressed formats and staging rollover. Its
+isolated counters verify zero CPU snapshots. The production renderer fixture
+checks actual sampled pixels, two queued immutable versions, physical aliases,
+CPU overwrite/unmap leases, unknown producers, pending CP fences and a later
+unjournaled CPU mutation that must rebuild the hash baseline. These pass.
+
+The frozen executable is
+`5636eac64fc25d4d88b207ce2fa05dfd4190492e8fbcf0398d27e4555903497c`.
+The complete suite has 83 passes, three skips and zero failures in 121.84 s.
+Two skips require private inputs; the third, presentation-latency2, lacks
+reliable onscreen timestamps and is not counted as a pass. The two changed
+GPU texture fixtures pass independently against the completed build.
+
+The first three 60-second AC runs with this executable have 8, 16 and 24
+missing presentation timestamps respectively. Their reported FPS values are
+excluded from clean comparisons. More importantly, the enabled live run
+records **zero GPU-time texture versions**: the new route is exercised by GPU
+fixtures but has no demonstrated gameplay admission or performance benefit.
+Its combined CPU rejection counter cannot distinguish a pending CP fence from
+the conservative callback-worker guard.
+
+The callback guard must not simply be removed. Flip completion updates labels
+visible to the guest and triggers event queues. Source review finds those
+particular labels in a separate private low mapping, outside the direct Metal
+guest pools; a future narrower classification would need to express that
+specific distinction and keep generic/CP write callbacks blocking. Splitting
+the rejection reasons and tracking pending callbacks by physical destination
+are follow-up work. This iteration keeps the existing guard intact.
+
+One earlier native-enabled launch failed to reach its first Flip within the
+harness timeout while its process remained alive. No stack was captured for
+that occurrence. A later 20-second replay starts normally, but does not prove
+the original failure fixed. The harness now captures a bounded sample of its
+owned game process on startup timeout before stopping it. Power-log evidence
+does not establish sleep as the cause.
 
 ### First guarded checkpoint comparison
 

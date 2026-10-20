@@ -639,7 +639,7 @@ struct MetalRenderer::Impl {
   bool gpu_written_texture_snapshot=std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT") &&
       !std::strcmp(std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT"),"1");
   u64 texture_gpu_snapshots=0;
-  std::array<u64,6> texture_gpu_snapshot_rejects{};
+  std::array<u64,9> texture_gpu_snapshot_rejects{};
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
@@ -1342,20 +1342,22 @@ struct MetalRenderer::Impl {
     if(!texture_uploader || !texture_uploader->Ready() || !bytes || bytes>(128ull<<20) ||
         (bytes&3))return reject(0);
     const auto& predicate=ready ? ready : cp_cpu_read_ready;
-    if(!predicate || !predicate(address,bytes))return reject(1);
-    if(!IndirectReadAvailable())return reject(2);
-    if(!LocateIndirect(address,bytes,source,offset))return reject(3);
+    if(!predicate)return reject(1);
+    if(!predicate(address,bytes))return reject(2);
+    if(!IndirectReadAvailable())return reject(5);
+    if(!LocateIndirect(address,bytes,source,offset))return reject(6);
     {
       std::scoped_lock lk(signals->lock);
-      if(!signals->queue.empty() || signals->active)return reject(1);
+      if(!signals->queue.empty())return reject(3);
+      if(signals->active)return reject(4);
     }
     const NativeIndirect::Range physical{*offset+(*source==mem[0] ? 0 : mem_split),bytes};
     PruneGuestWriters();bool overlap=false;
     for(const auto& writer:guest_writers) {
-      if(writer.unknown)return reject(4);
+      if(writer.unknown)return reject(7);
       for(const auto& range:writer.physical)overlap|=NativeIndirect::Overlap(range,physical);
     }
-    return overlap || reject(5);
+    return overlap || reject(8);
   }
   bool TextureCpuRead(const u32* t,const CpuReadReady& ready) {
     const u64 address=((u64(t[0])|(u64(t[1]&0xff)<<32))<<8)&kGpuAddrMask;
@@ -5497,9 +5499,10 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_indirect_draws,native_indirect_dispatches,indirect_cpu_write_waits,indirect_reads.size());
       if(native_indirect_enabled) DC_INFO("gpu indirect resources: %llu rejected admissions, %llu unknown writer tickets, %zu pending writers (cumulative)",
           indirect_resource_rejects,unknown_guest_writers,guest_writers.size());
-      if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions; source probes rejected [context=%llu cpu=%llu lease=%llu mapping=%llu unknown=%llu no-overlap=%llu] (cumulative)",
+      if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions; source probes rejected [context=%llu missing-guard=%llu cp-overlap=%llu callback-queued=%llu callback-active=%llu lease=%llu mapping=%llu unknown=%llu no-overlap=%llu] (cumulative)",
           texture_gpu_snapshots,texture_gpu_snapshot_rejects[0],texture_gpu_snapshot_rejects[1],
-          texture_gpu_snapshot_rejects[2],texture_gpu_snapshot_rejects[3],texture_gpu_snapshot_rejects[4],texture_gpu_snapshot_rejects[5]);
+          texture_gpu_snapshot_rejects[2],texture_gpu_snapshot_rejects[3],texture_gpu_snapshot_rejects[4],
+          texture_gpu_snapshot_rejects[5],texture_gpu_snapshot_rejects[6],texture_gpu_snapshot_rejects[7],texture_gpu_snapshot_rejects[8]);
       if(native_texture_coherence) DC_INFO("gpu texture coherence: %llu checks, %llu full refresh checks, %llu source waits, %zu retained ranges (cumulative)",
           texture_coherence_checks,texture_coherence_refreshes,texture_coherence_waits,texture_write_journal.Size());
       if(native_worklist_extent) DC_INFO("gpu worklist extents: %llu refined, %llu conservative fallbacks "

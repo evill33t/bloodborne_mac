@@ -963,6 +963,17 @@ static void GpuCases(u64 address,u64 alias) {
             assert(snapshot.TextureGpuSnapshotCount()==unknown_snapshots);
         });
         assert(*reinterpret_cast<const u32*>(unknown_output)==23);
+        // Completion retires the unknown writer ticket, but its journal
+        // event deliberately survives. A real ordinary fallback must verify
+        // the source and advance this texture's baseline before later native
+        // admissions; clearing history here would hide the required contract.
+        const auto unknown_refreshes=snapshot.TextureCoherenceRefreshCount();
+        const auto unknown_versions=snapshot.TextureGpuSnapshotCount();
+        snapshot.Draw(sampled,DrawCall{.count=3});
+        assert(snapshot.TextureCoherenceRefreshCount()==unknown_refreshes+1);
+        assert(snapshot.TextureGpuSnapshotCount()==unknown_versions);
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
 
         // A physical-alias host edit cannot race the queued GPU source copy.
         // The old draw observes23; later CPU upload observes the new47.
@@ -999,6 +1010,15 @@ static void GpuCases(u64 address,u64 alias) {
         assert(!unmap(reinterpret_cast<void*>(snapshot_alias),131072));mapping_release.join();Drain(snapshot);
         assert(snapshot.IndirectCpuWriteWaitCount()==snapshot_mapping_waits+1);
         pixel=Pixel(device,snapshot,address+16384);assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+        // Unmapping the alias changed the global mapping generation. Refresh
+        // the original source's ordinary CPU baseline before the next test,
+        // so native refusal cannot pass merely because its entry is stale.
+        const auto remap_versions=snapshot.TextureGpuSnapshotCount();
+        snapshot.Draw(sampled,DrawCall{.count=3});Drain(snapshot);
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        assert(snapshot.TextureGpuSnapshotCount()==remap_versions);
 
         // CPU fence callbacks cannot be frozen by a GPU copy. They must keep
         // the native rejection plus bounded normal-path callback drain.
