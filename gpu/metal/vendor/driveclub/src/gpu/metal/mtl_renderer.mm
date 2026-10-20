@@ -49,6 +49,9 @@
 #include "gpu/metal/native_vertex_fetch.h"
 #include "gpu/metal/native_indirect.h"
 #include "gpu/metal/native_writer_proof.h"
+#include "gpu/metal/native_writer_offsets.h"
+#include "gpu/metal/native_worklist_extent.h"
+#include "gpu/metal/texture_write_journal.h"
 #include "gpu/metal/world_frame_queue.h"
 
 namespace Gpu::Metal {
@@ -451,10 +454,14 @@ struct MetalRenderer::Impl {
     id<MTLTexture> tex = nil;
     id<MTLTexture> base_view = nil; // levels from the T# BASE_LEVEL
     std::vector<u64> chunks;
+    bool hash_baseline_valid=true;
     u32 next_chunk = 0;
     bool hot = false;
     u64 frame = 0;
     u64 mapping_generation = ~0ull;
+    u64 source_write_epoch=0,source_range_generation=~0ull;
+    std::vector<NativeIndirect::Range> source_physical;
+    bool source_physical_complete=false;
     u64 addr = 0;
     u64 size = 0;
     double last_used = 0;
@@ -629,6 +636,10 @@ struct MetalRenderer::Impl {
   bool opaque_exports = true;
   std::unique_ptr<GpuTextureUploader> texture_uploader;
   u64 gpu_texture_uploads=0,gpu_texture_upload_bytes=0;
+  bool gpu_written_texture_snapshot=std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT") &&
+      !std::strcmp(std::getenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT"),"1");
+  u64 texture_gpu_snapshots=0;
+  std::array<u64,6> texture_gpu_snapshot_rejects{};
   bool static_smrd_enabled=std::getenv("BB_METAL_STATIC_SMRD") && std::strcmp(std::getenv("BB_METAL_STATIC_SMRD"),"1")==0;
   bool direct_smrd_enabled=std::getenv("BB_METAL_DIRECT_SMRD") && std::strcmp(std::getenv("BB_METAL_DIRECT_SMRD"),"1")==0;
   bool simd_smrd_enabled=std::getenv("BB_METAL_SIMD_SMRD") && std::strcmp(std::getenv("BB_METAL_SIMD_SMRD"),"1")==0;
@@ -641,8 +652,20 @@ struct MetalRenderer::Impl {
   std::unordered_map<u64,bool> native_vertex_fetch_programs;
   u64 native_vertex_fetch_draws=0;
   u64 native_vertex_fetch_extended_draws=0;
+  bool readonly_guest_memory_enabled=std::getenv("BB_METAL_READONLY_GUEST_MEMORY") &&
+      std::strcmp(std::getenv("BB_METAL_READONLY_GUEST_MEMORY"),"1")==0;
+  std::unordered_map<const Program*,bool> readonly_guest_programs;
+  u64 readonly_guest_vs_bindings=0,readonly_guest_ps_bindings=0;
   bool native_indirect_enabled=std::getenv("BB_METAL_NATIVE_INDIRECT") &&
       std::strcmp(std::getenv("BB_METAL_NATIVE_INDIRECT"),"1")==0;
+  bool native_texture_coherence=TextureWriteJournal::Enabled(native_indirect_enabled,
+      std::getenv("BB_METAL_NATIVE_TEXTURE_COHERENCE"));
+  bool native_worklist_extent=TextureWriteJournal::Enabled(native_indirect_enabled,
+      std::getenv("BB_METAL_NATIVE_WORKLIST_EXTENT"));
+  u64 native_worklist_refined=0,native_worklist_fallbacks=0;
+  std::array<u64,7> native_worklist_fallback_reason{};
+  TextureWriteJournal texture_write_journal;
+  u64 texture_coherence_checks=0,texture_coherence_refreshes=0,texture_coherence_waits=0;
   WorldFrameQueue world_frames;
   const unsigned world_frame_limit=WorldFrameQueue::ConfiguredLimit();
   id<MTLComputePipelineState> indirect_draw_adapter=nil;
@@ -670,10 +693,14 @@ struct MetalRenderer::Impl {
   std::vector<GuestWriter> guest_writers;
   static constexpr std::size_t kGuestWriterLimit=512;
   u64 indirect_resource_rejects=0,unknown_guest_writers=0;
+  bool indirect_read_trace=std::getenv("BB_METAL_INDIRECT_READ_TRACE") &&
+      std::strcmp(std::getenv("BB_METAL_INDIRECT_READ_TRACE"),"1")==0;
+  std::unordered_set<u64> indirect_read_failures;
   bool indirect_writer_trace=std::getenv("BB_METAL_INDIRECT_WRITER_TRACE") &&
       std::strcmp(std::getenv("BB_METAL_INDIRECT_WRITER_TRACE"),"1")==0;
   std::unordered_map<const Program*,u32> writer_trace_seen;
   std::unordered_map<const Program*,NativeWriter::Proof> native_writer_proofs;
+  std::unordered_map<const Program*,std::unordered_map<u64,NativeWriter::OffsetProof>> native_writer_offset_proofs;
   u32 writer_trace_lines=0;
   std::unordered_map<const Program*,bool> static_smrd_programs;
   std::unordered_map<u64,bool> simd_smrd_programs;
@@ -964,8 +991,21 @@ struct MetalRenderer::Impl {
     });
   }
   bool CpuResourceRead(u64 address,u64 bytes,const CpuReadReady& ready={}) {
-    if(!bytes || address>UINT64_MAX-bytes || !Readable(address,bytes) ||
-        (ready && !ready(address,bytes))) return false;
+    const auto reject=[&](u32 reason,const char* label,NativeIndirect::Range writer={},
+        NativeIndirect::Range read={}) {
+      if(indirect_read_trace && indirect_read_failures.size()<128) {
+        const u64 key=Hash(reason,Hash(bytes,Hash(address)));
+        if(indirect_read_failures.insert(key).second)
+          DC_INFO("gpu indirect read: frame=%llu address=%#llx bytes=%llu reason=%s "
+              "writer=%#llx+%llu physical_read=%#llx+%llu vs=%#llx ps=%#llx cs=%#llx",
+              frame_count,address,bytes,label,writer.address,writer.bytes,read.address,read.bytes,
+              last_vs,last_ps,last_cs);
+      }
+      return false;
+    };
+    if(!bytes || address>UINT64_MAX-bytes || !Readable(address,bytes))
+      return reject(1,"unreadable-or-invalid");
+    if(ready && !ready(address,bytes))return reject(2,"pending-cpu-fence");
     PruneGuestWriters();
     if(guest_writers.empty()) return true;
     std::vector<NativeIndirect::Range> physical;
@@ -975,15 +1015,16 @@ struct MetalRenderer::Impl {
       // guest mapping of that pool appears in DirectMappings. Exclude the
       // separate host backing view too, and never allow partial map/gap spans.
       for(const auto& mapping:mem_ranges)
-        if(NativeIndirect::Overlap({address,bytes},{mapping.start,mapping.size})) return false;
+        if(NativeIndirect::Overlap({address,bytes},{mapping.start,mapping.size}))
+          return reject(3,"partial-direct-mapping");
       for(id<MTLBuffer> buffer:mem) if(buffer && NativeIndirect::Overlap({address,bytes},
-          {reinterpret_cast<u64>(buffer.contents),buffer.length})) return false;
+          {reinterpret_cast<u64>(buffer.contents),buffer.length}))return reject(4,"host-backing-view");
       return true;
     }
     for(const auto& writer:guest_writers) {
-      if(writer.unknown) return false;
+      if(writer.unknown)return reject(5,"unknown-writer");
       for(const auto& a:writer.physical)for(const auto& b:physical)
-        if(NativeIndirect::Overlap(a,b)) return false;
+        if(NativeIndirect::Overlap(a,b))return reject(6,"physical-writer-overlap",a,b);
     }
     return true;
   }
@@ -1056,12 +1097,121 @@ struct MetalRenderer::Impl {
     // The current command is ordered after all older commands. Replacing a
     // full registry with one unknown ticket remains conservative and bounded.
     if(guest_writers.size()>=kGuestWriterLimit) {guest_writers.clear();unknown=true;physical.clear();}
+    if(native_texture_coherence)texture_write_journal.Publish(physical,unknown);
     if(unknown) ++unknown_guest_writers;
     auto completed=std::make_shared<std::atomic<bool>>(false);
     guest_writers.push_back({std::move(physical),unknown,completed});
     [cmd addCompletedHandler:^(id<MTLCommandBuffer>){completed->store(true,std::memory_order_release);}];
   }
-  void TrackProgramWriter(const Program& program,const u32* ud,const CpuReadReady& ready={}) {
+  void NoteTextureCpuWrite(u64 address,u64 bytes,bool deferred=false) {
+    if(!native_texture_coherence || !bytes)return;
+    std::vector<NativeIndirect::Range> physical;
+    const bool complete=PhysicalRanges(address,bytes,physical);
+    texture_write_journal.Publish(physical,!complete,deferred);
+  }
+  // This is called only at a CPU texture-content read boundary. In particular
+  // native preflight still returns false without recording/draining anything.
+  bool ReadyTextureSource(u64 address,u64 bytes,bool cpu_callbacks) {
+    const auto signals_idle=[&] {
+      std::scoped_lock lk(signals->lock);
+      return signals->queue.empty() && !signals->active;
+    };
+    if(CpuResourceRead(address,bytes) && (!cpu_callbacks || signals_idle()))return true;
+    ++texture_coherence_waits;
+    StutterTrace::Scope timing("texture_source_wait",frame_count,address,bytes,0);
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+    Commit(false);
+    const auto command=last_committed;
+    while(command && command.status!=MTLCommandBufferStatusCompleted) {
+      if(command.status==MTLCommandBufferStatusError || execution->Failed() ||
+          std::chrono::steady_clock::now()>=deadline) {
+        execution->Fail("GPU texture-source writer did not finish before the bounded CPU-read deadline.");return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if(cpu_callbacks) {
+      std::unique_lock lk(signals->lock);
+      if(!signals->changed.wait_until(lk,deadline,[&] {
+          return execution->Failed() || (signals->queue.empty() && !signals->active);
+      })) {
+        execution->Fail("CPU texture-source fence callbacks did not finish before the bounded deadline.");return false;
+      }
+    }
+    // Command status may become Completed before its completion handlers have
+    // published the writer tickets. Respect the same bounded deadline here.
+    while(!execution->Failed() && !CpuResourceRead(address,bytes)) {
+      if(std::chrono::steady_clock::now()>=deadline) {
+        execution->Fail("Texture-source write ownership remained unresolved after the GPU drain.");return false;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return !execution->Failed();
+  }
+  void TextureSourceRanges(TextureEntry& e,u64 address,u64 bytes,u64 generation) {
+    if(e.source_range_generation==generation && e.addr==address && e.size==bytes)return;
+    e.source_physical.clear();
+    e.source_physical_complete=PhysicalRanges(address,bytes,e.source_physical);
+    e.source_range_generation=generation;
+  }
+  void RememberTextureSource(TextureEntry& e,u64 address,u64 bytes,u64 generation) {
+    if(!native_texture_coherence)return;
+    TextureSourceRanges(e,address,bytes,generation);
+    e.source_write_epoch=texture_write_journal.Epoch();
+  }
+  bool RefineWorklistWriter(const Program& program,const u32* ud,const CpuReadReady& ready,
+      std::array<u32,3> threads,std::array<u32,3> groups,
+      std::vector<NativeIndirect::Range>& written,std::vector<DescriptorRead>& read) {
+    if(!native_worklist_extent || !NativeWorklist::Matches(program))return false;
+    const auto fallback=[&](const char* reason,u32 category) {
+      ++native_worklist_fallbacks;
+      ++native_worklist_fallback_reason[category];
+      TraceProgramWriter(program,4096,reason,64,&program.buffer_writes[0]);return false;
+    };
+    // Group counts are supplied ONLY for an ordinary direct dispatch. Native
+    // indirect arguments stay on the original full-descriptor footprint.
+    if(threads!=std::array<u32,3>{64,1,1} || !groups[0] || groups[0]>NativeWorklist::kJobs ||
+        groups[1]!=1 || groups[2]!=1)return fallback("worklist-dispatch-context",0);
+    if(!NativeWorklist::Layout(ud[9],ud[13]) || ud[11]!=0x6c1ac || ud[10]<groups[0] ||
+        ud[15]!=0x24004)
+      return fallback("worklist-resource-layout",1);
+    const u64 table=u64(ud[8])|(u64(ud[9]&0xfff)<<32);
+    const u64 destination=u64(ud[12])|(u64(ud[13]&0xfff)<<32);
+    const u64 bytes=u64(groups[0])*sizeof(NativeWorklist::Job);
+    const auto& predicate=ready ? ready : cp_cpu_read_ready;
+    id<MTLBuffer> buffer=nil;u64 offset=0;
+    if(!predicate || table>kGpuAddrMask || destination>kGpuAddrMask || (table&3) ||
+        !CpuResourceRead(table,bytes,predicate) || !LocateIndirect(table,bytes,&buffer,&offset))
+      return fallback("worklist-input-unready",2);
+    // Complete input XYZ loads must translate, not just the words later used
+    // for bounds. NUM_RECORDS>=groups excludes the OOB allzero load case,
+    // which would otherwise still admit lane0 and store destination index0.
+    std::vector<NativeWorklist::Job> jobs(groups[0]);
+    std::memcpy(jobs.data(),reinterpret_cast<const void*>(table),bytes);
+    const auto plan=NativeWorklist::Bound(jobs,ud[14]);
+    if(!plan)return fallback(plan.reason,3);
+    const NativeIndirect::Range source{offset+(buffer==mem[0] ? 0 : mem_split),bytes};
+    std::vector<NativeIndirect::Range> precise;
+    for(const auto& range:plan.indices) {
+      const u64 first=destination+u64(range.first)*4;
+      const u64 extent=(u64(range.last)-range.first+1)*4;
+      if(first>kGpuAddrMask || extent>kGpuAddrMask-first || !PhysicalRanges(first&~3ull,
+          first+extent-(first&~3ull),precise))return fallback("worklist-output-unmapped",4);
+    }
+    for(const auto& range:precise)if(NativeIndirect::Overlap(source,range))
+      return fallback("worklist-self-modification",5);
+    PruneIndirectReads();
+    if(read.size()>=64 || indirect_reads.size()>kIndirectReadLimit ||
+        read.size()+1>kIndirectReadLimit-indirect_reads.size())return fallback("worklist-read-capacity",6);
+    // Protect even an empty output set. Otherwise a later CPU table rewrite
+    // could activate stores after the metadata claimed this producer is empty.
+    read.push_back({{table,bytes},source});
+    written.insert(written.end(),precise.begin(),precise.end());
+    ++native_worklist_refined;
+    TraceProgramWriter(program,2048,"worklist-proven",64,&program.buffer_writes[0],precise.size(),jobs.size());
+    return true;
+  }
+  void TrackProgramWriter(const Program& program,const u32* ud,const CpuReadReady& ready={},
+      std::array<u32,3> compute_threads={},std::array<u32,3> compute_groups={}) {
     if(!native_indirect_enabled) return;
     // Storage images resolve to separately allocated Metal textures/views;
     // their image_store instructions cannot write guest mem0/mem1 backing.
@@ -1119,6 +1269,7 @@ struct MetalRenderer::Impl {
       }
       const u64 base=(u64(descriptor[0])|(u64(descriptor[1]&0xfff)<<32))&kGpuAddrMask;
       const u64 stride=(descriptor[1]>>16)&0x3fff;
+      if(RefineWorklistWriter(program,ud,ready,compute_threads,compute_groups,written,read))continue;
       u64 begin=0,end=0;
       if(!instruction.idxen && !stride) {
         // The production MSL bounds its complete uint byte offset by z for
@@ -1126,13 +1277,34 @@ struct MetalRenderer::Impl {
         if(!descriptor[2]) continue;
         end=u64(descriptor[2])+15;
       } else {
-        if(instruction.offen || instruction.soffset!=Operand::Zero) {
+        u32 maximum_offset=instruction.offset;
+        if(instruction.offen && instruction.soffset==Operand::Zero &&
+            program.stage==Shader::Stage::Compute && compute_threads[0] &&
+            compute_threads[1] && compute_threads[2] && compute_threads[0]<=65535 &&
+            compute_threads[1]<=65535 && compute_threads[2]<=65535) {
+          const u64 key=u64(compute_threads[0])|(u64(compute_threads[1])<<16)|(u64(compute_threads[2])<<32);
+          auto& cache=native_writer_offset_proofs[&program];
+          auto offsets=cache.find(key);
+          // A program with continually changing group dimensions cannot grow
+          // the diagnostic/admission cache without bound. New contexts fall
+          // back once the first eight exact configurations have been proved.
+          if(offsets==cache.end() && cache.size()<8)
+            offsets=cache.emplace(key,NativeWriter::ProveOffsets(program,compute_threads)).first;
+          maximum_offset=offsets!=cache.end() && offsets->second &&
+              descriptor_index<=offsets->second.maximum.size() ?
+              offsets->second.maximum[descriptor_index-1] : UINT32_MAX;
+        } else if(instruction.offen)maximum_offset=UINT32_MAX;
+        if(maximum_offset==UINT32_MAX || instruction.soffset!=Operand::Zero) {
           TraceProgramWriter(program,16,"dynamic-indexed-offset",instruction.pc,&source);
           unknown=true;continue;
         }
         const u64 records=instruction.idxen ? descriptor[2] : 1;
         if(!records) continue;
-        begin=instruction.offset;end=(records-1)*stride+instruction.offset+16;
+        // The vector proof bounds the COMPLETE uint byte offset. Indexed
+        // MSL only checks idx<records: offsets are never clamped to stride,
+        // resource byte size or the VMA containing the descriptor's base.
+        begin=instruction.offen ? 0 : instruction.offset;
+        end=(records-1)*stride+maximum_offset+16;
       }
       const u64 start=(base+begin)&~3ull;
       if(end>kGpuAddrMask-base || !PhysicalRanges(start,base+end-start,written)) {
@@ -1161,6 +1333,30 @@ struct MetalRenderer::Impl {
     if(!unknown)TraceProgramWriter(program,0x80000000u,"proven",0,nullptr,written.size(),read.size());
     TrackGuestWriter(std::move(written),unknown);
   }
+  // No CPU payload read: only exact direct backing and tracked same-queue
+  // writers. CP callbacks cannot be ordered by the source-copy GPU command.
+  bool GpuTextureSource(u64 address,u64 bytes,const CpuReadReady& ready,
+      id<MTLBuffer>* source,u64* offset) {
+    if(!gpu_written_texture_snapshot || !native_indirect_enabled || !native_texture_coherence)return false;
+    const auto reject=[&](u32 reason){++texture_gpu_snapshot_rejects[reason];return false;};
+    if(!texture_uploader || !texture_uploader->Ready() || !bytes || bytes>(128ull<<20) ||
+        (bytes&3))return reject(0);
+    const auto& predicate=ready ? ready : cp_cpu_read_ready;
+    if(!predicate || !predicate(address,bytes))return reject(1);
+    if(!IndirectReadAvailable())return reject(2);
+    if(!LocateIndirect(address,bytes,source,offset))return reject(3);
+    {
+      std::scoped_lock lk(signals->lock);
+      if(!signals->queue.empty() || signals->active)return reject(1);
+    }
+    const NativeIndirect::Range physical{*offset+(*source==mem[0] ? 0 : mem_split),bytes};
+    PruneGuestWriters();bool overlap=false;
+    for(const auto& writer:guest_writers) {
+      if(writer.unknown)return reject(4);
+      for(const auto& range:writer.physical)overlap|=NativeIndirect::Overlap(range,physical);
+    }
+    return overlap || reject(5);
+  }
   bool TextureCpuRead(const u32* t,const CpuReadReady& ready) {
     const u64 address=((u64(t[0])|(u64(t[1]&0xff)<<32))<<8)&kGpuAddrMask;
     const u32 format=(t[1]>>20)&63,number=(t[1]>>26)&15,type=t[3]>>28;
@@ -1186,7 +1382,25 @@ struct MetalRenderer::Impl {
     Tiling::MipLevel mips[16];
     const u64 bytes=Tiling::MipLayout(tiling,pitch,height,1,levels,fi.bytes_per_block,
         fi.compressed,(t[3]>>25)&1,mips);
-    return CpuResourceRead(address,bytes,ready);
+    if(CpuResourceRead(address,bytes,ready))return true;
+    if(!gpu_written_texture_snapshot || !texture_uploader || !texture_uploader->SupportsFormat(fi.format) ||
+        std::getenv("BB_METAL_CAPTURE_TEXTURE") || !capture_root.empty() || dump_texture==address)return false;
+    u64 key=Hash(address);for(u32 k=1;k<6;++k)key=Hash(t[k],key);
+    const auto cached=textures.find(key);
+    const u64 generation=Core::Memory::DirectMapGeneration();
+    // Match GetTexture's conservative remap/history/callback gates without
+    // creating or changing an entry during native admission.
+    if(cached==textures.end() || !cached->second.tex ||
+        cached->second.mapping_generation!=generation ||
+        cached->second.source_range_generation!=generation ||
+        !cached->second.source_physical_complete || cached->second.size!=bytes)return false;
+    const auto change=texture_write_journal.Inspect(cached->second.source_write_epoch,
+        cached->second.source_physical,true);
+    if(change.cpu_callbacks || change.relation==TextureWriteJournal::Relation::Unknown)return false;
+    for(u32 level=0;level<levels;++level)
+      if(!texture_uploader->SupportsGpuSourceTile(mips[level].tile_index))return false;
+    id<MTLBuffer> source=nil;u64 offset=0;
+    return GpuTextureSource(address,bytes,ready,&source,&offset);
   }
   bool NativeResources(const Program& program,const u32* ud,const CpuReadReady& ready) {
     for(const auto& image:program.images) {
@@ -1906,6 +2120,18 @@ struct MetalRenderer::Impl {
     return list.back().prog.get();
   }
 
+  bool ReadOnlyGuestMemory(const Program& program,const Shader::MslOptions& options) {
+    if(!readonly_guest_memory_enabled || options.tess_stage!=Shader::TessStage::None ||
+        options.native_tess_layout || options.rect_list ||
+        options.points || options.debug_capture || options.probe_pc!=~0u ||
+        options.static_smrd || options.direct_smrd || options.simd_smrd)return false;
+    // ShaderEntry retains every decoded version for the renderer lifetime.
+    // Cache by that stable object, including its stage/fetch/SGPR context.
+    auto [entry,inserted]=readonly_guest_programs.try_emplace(&program,false);
+    if(inserted)entry->second=Shader::GuestMemoryReadOnlyEligible(program);
+    return entry->second;
+  }
+
   // MSL for `p`; GPU thread only (reports and dumps).
   std::string MslSource(const Program &p, const Shader::MslOptions &o,
                         u64 key) {
@@ -2037,10 +2263,10 @@ struct MetalRenderer::Impl {
   }
 
   // True if the texture memory differs from what was uploaded.
-  bool TextureChanged(TextureEntry &e, u64 addr, u64 size) {
+  bool TextureChanged(TextureEntry &e, u64 addr, u64 size,bool complete=false) {
     StutterTrace::Scope timing("texture_change_check",frame_count,addr,size,1);
     const u32 n = static_cast<u32>(e.chunks.size());
-    if (e.hot) {
+    if (e.hot || complete) {
       for (u32 c = 0; c < n; ++c) {
         if (ChunkHash(addr, size, c) != e.chunks[c]) {
           return true;
@@ -2287,7 +2513,24 @@ struct MetalRenderer::Impl {
       return e.base_view;
     };
     const u64 generation = Core::Memory::DirectMapGeneration();
-    if (e.tex && e.frame == frame_count && e.mapping_generation == generation) {
+    const bool source_remapped=e.tex && e.mapping_generation!=generation;
+    bool force_content_check=false,source_callbacks=false;
+    if(native_texture_coherence && e.tex &&
+        (e.mapping_generation!=generation || !texture_write_journal.Current(e.source_write_epoch))) {
+      ++texture_coherence_checks;
+      TextureSourceRanges(e,addr,e.size,generation);
+      const auto change=texture_write_journal.Inspect(e.source_write_epoch,
+          e.source_physical,e.source_physical_complete);
+      force_content_check=e.mapping_generation!=generation || change.FullCheck();
+      // A remap can move this VA onto a still-deferred CPU fence destination
+      // whose old physical span was previously checked as disjoint. Its
+      // epoch may already have been observed: drain callbacks on remap too.
+      source_callbacks=change.cpu_callbacks || e.mapping_generation!=generation;
+      // Unrelated writes preserve the fast path without reading/hashing any
+      // texel. Completed overlapping writes remain in the bounded journal.
+      if(!force_content_check)e.source_write_epoch=texture_write_journal.Epoch();
+    }
+    if (e.tex && e.frame == frame_count && e.mapping_generation == generation && !force_content_check) {
       // Hundreds of draws share descriptors within a frame. Target lookup
       // above still runs first, so newly GPU-written surfaces take precedence.
       // Mapping changes must revalidate the backing range before this shortcut.
@@ -2322,12 +2565,30 @@ struct MetalRenderer::Impl {
       return Dummy(tt);
     }
     e.mapping_generation = generation;
-    if (e.tex && e.frame == frame_count) {
+    if (e.tex && e.frame == frame_count && !force_content_check) {
       return view();
     }
+    bool gpu_source=false;id<MTLBuffer> gpu_source_buffer=nil;u64 gpu_source_offset=0;
+    if(native_texture_coherence) {
+      if(!e.tex) {
+        TextureSourceRanges(e,addr,size,generation);
+        const auto change=texture_write_journal.Inspect(e.source_write_epoch,
+            e.source_physical,e.source_physical_complete);
+        source_callbacks|=change.cpu_callbacks;
+      }
+      bool supported=gpu_written_texture_snapshot && tt.dim==TexDim::Tex2D && !source_remapped && !source_callbacks &&
+          !std::getenv("BB_METAL_CAPTURE_TEXTURE") && capture_root.empty() && dump_texture!=addr && texture_uploader &&
+          texture_uploader->SupportsFormat(fi.format);
+      for(u32 level=0;supported && level<levels;++level)
+        supported=texture_uploader->SupportsGpuSourceTile(mips[level].tile_index);
+      gpu_source=supported && GpuTextureSource(addr,size,cp_cpu_read_ready,&gpu_source_buffer,&gpu_source_offset);
+      if(!gpu_source && !ReadyTextureSource(addr,size,source_callbacks))return Dummy(tt);
+      if(force_content_check)++texture_coherence_refreshes;
+    }
     if (e.tex) {
-      if (!TextureChanged(e, addr, size)) {
+      if (!gpu_source && e.hash_baseline_valid && !TextureChanged(e, addr, size,force_content_check)) {
         e.frame = frame_count;
+        RememberTextureSource(e,addr,size,generation);
         return view();
       }
       e.hot = true;
@@ -2400,18 +2661,49 @@ struct MetalRenderer::Impl {
         upload.levels.push_back({mips[lv].offset+mips[lv].slice_size*l,
             std::max(width>>lv,1u),std::max(height>>lv,1u),mips[lv].pitch_el,
             mips[lv].tile_index,tt.dim==TexDim::Tex2DArray ? l : 0,lv});
+      const bool gpu_snapshot_selected=gpu_source;
       EndPass();EnsureCommandBuffer();
       StutterTrace::Scope upload_timing("texture_gpu_upload_encode",frame_count,addr,size,1);
       std::optional<StutterTrace::Scope> compressed_timing;
       if(fi.compressed)compressed_timing.emplace("texture_gpu_compressed_upload",frame_count,addr,size,1);
-      const auto result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload,&snapshot_hashes);
+      if(gpu_source) {
+        // Recheck capacity/mapping after EndPass (profiling may submit it).
+        id<MTLBuffer> checked=nil;u64 checked_offset=0;
+        if(GpuTextureSource(addr,size,cp_cpu_read_ready,&checked,&checked_offset) &&
+            checked==gpu_source_buffer && checked_offset==gpu_source_offset) {
+          TrackIndirectRead(addr,size,checked,checked_offset);
+        } else gpu_source=false;
+      }
+      GpuTextureUploader::Result result;
+      if(gpu_source)result=texture_uploader->EncodeGpuSource((__bridge void*)cmd,(__bridge void*)e.tex,
+          upload,(__bridge void*)gpu_source_buffer,gpu_source_offset);
+      else {
+        if(gpu_snapshot_selected && !ReadyTextureSource(addr,size,source_callbacks))return Dummy(tt);
+        EnsureCommandBuffer();
+        result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload,&snapshot_hashes);
+      }
+      if(result==GpuTextureUploader::Result::Fallback && gpu_source) {
+        gpu_source=false;
+        if(!ReadyTextureSource(addr,size,source_callbacks))return Dummy(tt);
+        EnsureCommandBuffer();
+        result=texture_uploader->Encode((__bridge void*)cmd,(__bridge void*)e.tex,upload,&snapshot_hashes);
+      }
       stat_hashed+=snapshot_hashes.bytes_hashed;
       if(result==GpuTextureUploader::Result::Failed) {
         execution->Fail(texture_uploader->Error());
         return Dummy(tt);
       }
       gpu_uploaded=result==GpuTextureUploader::Result::Encoded;
-      if(gpu_uploaded) {++gpu_texture_uploads;gpu_texture_upload_bytes+=size;}
+      if(gpu_uploaded) {
+        ++gpu_texture_uploads;gpu_texture_upload_bytes+=size;
+        if(gpu_source)++texture_gpu_snapshots;
+      }
+    }
+    // A selected GPU source must never reach a CPU content path without
+    // first restoring CPU visibility, including future diagnostic branches.
+    if(gpu_source && !gpu_uploaded) {
+      gpu_source=false;
+      if(!ReadyTextureSource(addr,size,source_callbacks))return Dummy(tt);
     }
     std::vector<u8> linear;
     for (u32 lv = 0; !gpu_uploaded && lv < levels; ++lv) {
@@ -2463,7 +2755,10 @@ struct MetalRenderer::Impl {
     (void)thick;
     {
       StutterTrace::Scope timing("texture_hash_initial",frame_count,addr,size,1);
-      if(gpu_uploaded) {
+      e.hash_baseline_valid=!gpu_source;
+      if(gpu_uploaded && gpu_source) {
+        e.chunks.clear();e.next_chunk=0;
+      } else if(gpu_uploaded) {
         // Match the uploaded version even if the guest rewrites its source
         // after the immutable snapshot. This scan was counted inside Encode.
         e.chunks=std::move(snapshot_hashes.chunks);
@@ -2477,6 +2772,7 @@ struct MetalRenderer::Impl {
     e.frame = frame_count;
     e.addr = addr;
     e.size = size;
+    RememberTextureSource(e,addr,size,generation);
     return view();
   }
 
@@ -4085,7 +4381,10 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       if(NativeVertexFetch::IsExtended(vs->hash)) ++native_vertex_fetch_extended_draws;
     }
   }
+  vo.readonly_guest_memory=ReadOnlyGuestMemory(*vs,vo);
+  if(vo.readonly_guest_memory)++readonly_guest_vs_bindings;
   u64 vs_key = Hash(vs->hash);
+  if(vo.readonly_guest_memory)vs_key=Hash(0x524f475545535431ull,vs_key);
   if(vo.native_vertex_fetch) vs_key=Hash(NativeVertexFetch::CacheTag,vs_key);
   vs_key = Hash(vo.tess_stage, vs_key);
   vs_key = Hash(vo.native_tess_layout,vs_key);
@@ -4128,7 +4427,10 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       fo.probe_x = probe.x;
       fo.probe_y = probe.y;
     }
+    fo.readonly_guest_memory=ReadOnlyGuestMemory(*ps,fo);
+    if(fo.readonly_guest_memory)++readonly_guest_ps_bindings;
     ps_key = Hash(ps->hash);
+    if(fo.readonly_guest_memory)ps_key=Hash(0x524f475545535431ull,ps_key);
     ps_key = Hash(fo.probe_pc, ps_key);
     ps_key = Hash(fo.probe_x, ps_key);
     ps_key = Hash(fo.probe_y, ps_key);
@@ -4226,18 +4528,33 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       std::string vsrc = MslSource(*vs, vo, vs_key);
       std::string fsrc = ps ? MslSource(*ps, fo, ps_key) : std::string();
       const bool flat = debug_fs && ps && out_type[0] == OutType::Float;
+      const u64 compile_frame=frame_count;
+      const double queued=StutterTrace::Output() ? StutterTrace::Now() : 0;
       compiler->Submit([this, d, vsrc = std::move(vsrc), fsrc = std::move(fsrc),
-                        vs_key, ps_key, pkey, flat, vs_addr, ps_addr] {
+                        vs_key, ps_key, pkey, flat, vs_addr, ps_addr,compile_frame,queued] {
+        // Capture the requesting frame/key, rather than reading renderer state
+        // from a compiler worker. These opt-in phases separate a queue delay,
+        // an exact-source function miss and driver pipeline creation.
+        if(queued) StutterTrace::Record("pipeline_queue",queued,StutterTrace::Now(),compile_frame,pkey);
         id<MTLRenderPipelineState> pso = nil;
-        id<MTLFunction> vfn = compiler->Function(vs_key, vsrc, vs_addr);
-        id<MTLFunction> ffn =
-            fsrc.empty() ? nil : compiler->Function(ps_key, fsrc, ps_addr);
+        id<MTLFunction> vfn=nil,ffn=nil;
+        {
+          StutterTrace::Scope timing("pipeline_vertex_function",compile_frame,pkey,vs_addr);
+          vfn=compiler->Function(vs_key,vsrc,vs_addr);
+        }
+        if(!fsrc.empty()) {
+          StutterTrace::Scope timing("pipeline_fragment_function",compile_frame,pkey,ps_addr);
+          ffn=compiler->Function(ps_key,fsrc,ps_addr);
+        }
         if (vfn && (fsrc.empty() || ffn)) {
           d.vertexFunction = vfn;
           d.fragmentFunction = flat ? debug_fs : ffn;
           NSError *err = nil;
           const auto t0 = std::chrono::steady_clock::now();
-          pso = compiler->RenderPipeline(d,&err);
+          {
+            StutterTrace::Scope timing("pipeline_create",compile_frame,pkey,vs_addr);
+            pso=compiler->RenderPipeline(d,&err);
+          }
           ReportSlowCompile("pipeline", vs_addr, ps_addr, t0);
           if (!pso) {
             DC_ERROR("gpu: pipeline (vs %#llx ps %#llx): %s", vs_addr, ps_addr,
@@ -4952,17 +5269,29 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   if (it == compute_pipelines.end()) {
     if (!pending.count(pkey)) {
       pending.insert(pkey);
-      compiler->Submit([this, src = MslSource(*cs, o, key), key, pkey, group,
-                        addr] {
+      std::string src=MslSource(*cs,o,key);
+      const u64 compile_frame=frame_count;
+      const double queued=StutterTrace::Output() ? StutterTrace::Now() : 0;
+      compiler->Submit([this, src = std::move(src), key, pkey, group,
+                        addr,compile_frame,queued] {
+        if(queued) StutterTrace::Record("pipeline_queue",queued,StutterTrace::Now(),compile_frame,pkey);
         id<MTLComputePipelineState> pso = nil;
-        if (id<MTLFunction> fn = compiler->Function(key, src, addr)) {
+        id<MTLFunction> fn=nil;
+        {
+          StutterTrace::Scope timing("pipeline_compute_function",compile_frame,pkey,addr);
+          fn=compiler->Function(key,src,addr);
+        }
+        if(fn) {
           MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
           d.computeFunction = fn;
           d.maxTotalThreadsPerThreadgroup =
               group; // the guest's group size must fit as is
           NSError *err = nil;
           const auto t0 = std::chrono::steady_clock::now();
-          pso = compiler->ComputePipeline(d,&err);
+          {
+            StutterTrace::Scope timing("pipeline_create",compile_frame,pkey,addr);
+            pso=compiler->ComputePipeline(d,&err);
+          }
           ReportSlowCompile("compute pipeline", addr, 0, t0);
           if (!pso) {
             DC_ERROR("gpu: compute pipeline %#llx: %s", addr,
@@ -5025,12 +5354,12 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   const u32 lds = std::max<u32>(16, Bits(rsrc2, 15, 9) * 512);
   [e setThreadgroupMemoryLength:std::min<u32>(lds, 32768) atIndex:0];
   if(indirect) {
-    TrackProgramWriter(*cs,cud);
+    TrackProgramWriter(*cs,cud,{}, {tx,ty,tz});
     if(indirect_address) TrackIndirectRead(indirect_address,12,indirect,indirect_offset);
     [e dispatchThreadgroupsWithIndirectBuffer:indirect indirectBufferOffset:indirect_offset
         threadsPerThreadgroup:MTLSizeMake(tx,ty,tz)];
   } else {
-    TrackProgramWriter(*cs,cud);
+    TrackProgramWriter(*cs,cud,{}, {tx,ty,tz}, {gx,gy,gz});
     [e dispatchThreadgroups:MTLSizeMake(gx, gy, gz)
         threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
   }
@@ -5162,10 +5491,22 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_vertex_fetch_draws);
       if(native_vertex_fetch_extended_enabled) DC_INFO("gpu extended vertex fetch: %llu guarded candidate draws (cumulative)",
           native_vertex_fetch_extended_draws);
+      if(readonly_guest_memory_enabled) DC_INFO("gpu readonly guest: %llu qualified vertex bindings, %llu qualified fragment bindings (cumulative)",
+          readonly_guest_vs_bindings,readonly_guest_ps_bindings);
       if(native_indirect_enabled) DC_INFO("gpu indirect: %llu native draws, %llu native dispatches, %llu CP write waits, %zu pending reads (cumulative)",
           native_indirect_draws,native_indirect_dispatches,indirect_cpu_write_waits,indirect_reads.size());
       if(native_indirect_enabled) DC_INFO("gpu indirect resources: %llu rejected admissions, %llu unknown writer tickets, %zu pending writers (cumulative)",
           indirect_resource_rejects,unknown_guest_writers,guest_writers.size());
+      if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions; source probes rejected [context=%llu cpu=%llu lease=%llu mapping=%llu unknown=%llu no-overlap=%llu] (cumulative)",
+          texture_gpu_snapshots,texture_gpu_snapshot_rejects[0],texture_gpu_snapshot_rejects[1],
+          texture_gpu_snapshot_rejects[2],texture_gpu_snapshot_rejects[3],texture_gpu_snapshot_rejects[4],texture_gpu_snapshot_rejects[5]);
+      if(native_texture_coherence) DC_INFO("gpu texture coherence: %llu checks, %llu full refresh checks, %llu source waits, %zu retained ranges (cumulative)",
+          texture_coherence_checks,texture_coherence_refreshes,texture_coherence_waits,texture_write_journal.Size());
+      if(native_worklist_extent) DC_INFO("gpu worklist extents: %llu refined, %llu conservative fallbacks "
+          "[context=%llu layout=%llu input=%llu overflow=%llu output=%llu self=%llu capacity=%llu] (cumulative)",
+          native_worklist_refined,native_worklist_fallbacks,native_worklist_fallback_reason[0],
+          native_worklist_fallback_reason[1],native_worklist_fallback_reason[2],native_worklist_fallback_reason[3],
+          native_worklist_fallback_reason[4],native_worklist_fallback_reason[5],native_worklist_fallback_reason[6]);
       if(direct_smrd_enabled) DC_INFO("gpu direct SMRD: %llu draws, %llu translated roots, %llu fallback roots (cumulative)",
           direct_smrd_draws,direct_smrd_roots,direct_smrd_fallbacks);
       if(binding_cache.enabled) DC_INFO("gpu binding cache: buffers %llu/%llu, textures %llu/%llu, samplers %llu/%llu APIs skipped/intended (cumulative)",
@@ -5347,27 +5688,30 @@ bool MetalRenderer::DrawIndirect(const RegFile& regs,const DrawCall& draw,GuestA
     const std::function<bool(GuestAddr,std::size_t)>& ready) {
   std::scoped_lock lk(impl->lock);
   FrameWork::Bind frame_work(impl->frame_work);
-  if(Execution()->Failed() || (ready && !ready(address,16))) return false;
+  const auto& predicate=ready ? ready : impl->cp_cpu_read_ready;
+  if(Execution()->Failed() || (predicate && !predicate(address,16))) return false;
   impl->last_vs=regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_VS);
   impl->last_ps=regs.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS);
   StutterTrace::Scope timing("draw_indirect_record",impl->frame_count,address,impl->last_vs);
-  @autoreleasepool {return impl->DrawIndirect(regs,draw,address,ready);}
+  @autoreleasepool {return impl->DrawIndirect(regs,draw,address,predicate);}
 }
 
 bool MetalRenderer::DispatchIndirect(const RegFile& regs,GuestAddr address,
     const std::function<bool(GuestAddr,std::size_t)>& ready) {
   std::scoped_lock lk(impl->lock);
   FrameWork::Bind frame_work(impl->frame_work);
-  if(Execution()->Failed() || (ready && !ready(address,12))) return false;
+  const auto& predicate=ready ? ready : impl->cp_cpu_read_ready;
+  if(Execution()->Failed() || (predicate && !predicate(address,12))) return false;
   impl->last_cs=regs.ProgramAddr(Reg::COMPUTE_PGM_LO);
   StutterTrace::Scope timing("dispatch_indirect_record",impl->frame_count,address,impl->last_cs);
-  @autoreleasepool {return impl->DispatchIndirect(regs,address,ready);}
+  @autoreleasepool {return impl->DispatchIndirect(regs,address,predicate);}
 }
 
 void MetalRenderer::CpuWrite(GuestAddr address,const void* source,std::size_t bytes,bool constants) {
   std::scoped_lock lk(impl->lock);
   if(Execution()->Failed() || !impl->ProtectIndirectWrite(address,bytes)) return;
   std::memcpy(reinterpret_cast<void*>(address),source,bytes);
+  impl->NoteTextureCpuWrite(address,bytes);
   if(constants) impl->NoteConstDump(address,static_cast<u32>(bytes));
 }
 void MetalRenderer::SetCpuReadGuard(std::function<bool(GuestAddr,std::size_t)> ready) {
@@ -5394,6 +5738,15 @@ std::uint64_t MetalRenderer::NativeIndirectDispatchCount() const {
 std::uint64_t MetalRenderer::IndirectCpuWriteWaitCount() const {
   std::scoped_lock lk(impl->lock);return impl->indirect_cpu_write_waits;
 }
+std::uint64_t MetalRenderer::TextureGpuSnapshotCount() const {
+  std::scoped_lock lk(impl->lock);return impl->texture_gpu_snapshots;
+}
+std::uint64_t MetalRenderer::TextureCoherenceWaitCount() const {
+  std::scoped_lock lk(impl->lock);return impl->texture_coherence_waits;
+}
+std::uint64_t MetalRenderer::TextureCoherenceRefreshCount() const {
+  std::scoped_lock lk(impl->lock);return impl->texture_coherence_refreshes;
+}
 
 void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
   const auto lock_start=FrameWork::Enabled()?StutterTrace::Now():0;
@@ -5404,8 +5757,12 @@ void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
   impl->last_vs=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_VS);
   impl->last_ps=regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_PS);
   StutterTrace::Scope timing("draw_record",impl->frame_count,impl->last_vs,impl->last_ps);
+  double pool_retire_start=0;
   @autoreleasepool {
-    impl->Draw(regs, draw);
+    {
+      StutterTrace::Scope work("draw_work",impl->frame_count,impl->last_vs,impl->last_ps);
+      impl->Draw(regs, draw);
+    }
     if (impl->Profiling() && !impl->profile_passes) {
       char what[64];
       std::snprintf(what, sizeof(what), "vs %#llx ps %#llx",
@@ -5413,7 +5770,10 @@ void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {
                     regs.ProgramAddr(Liverpool::Reg::SPI_SHADER_PGM_LO_PS));
       impl->ProfileCut(what);
     }
+    if(StutterTrace::Output()) pool_retire_start=StutterTrace::Now();
   }
+  if(pool_retire_start) StutterTrace::Record("draw_autorelease",pool_retire_start,
+      StutterTrace::Now(),impl->frame_count,impl->last_vs,impl->last_ps,1);
 }
 
 void MetalRenderer::Dispatch(const RegFile &regs, std::uint32_t x,
@@ -5495,6 +5855,20 @@ void MetalRenderer::Signal(std::function<void()> done) {
   FrameWork::Bind frame_work(impl->frame_work);
   if(Execution()->Failed()) return;
   @autoreleasepool {
+    impl->Signal(std::move(done));
+  }
+}
+void MetalRenderer::NotePendingCpuWrite(GuestAddr address,std::size_t bytes) {
+  std::scoped_lock lk(impl->lock);
+  impl->NoteTextureCpuWrite(address,bytes,true);
+}
+void MetalRenderer::SignalCpuWrite(GuestAddr address,std::size_t bytes,std::function<void()> done) {
+  std::scoped_lock lk(impl->lock);
+  if(Execution()->Failed())return;
+  @autoreleasepool {
+    // One critical section: no other recording ring can observe a journal
+    // marker whose callback has not yet been enqueued on the signal worker.
+    impl->NoteTextureCpuWrite(address,bytes,true);
     impl->Signal(std::move(done));
   }
 }

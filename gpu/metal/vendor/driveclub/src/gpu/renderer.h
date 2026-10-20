@@ -16,6 +16,7 @@
 #include <string>
 #include <memory>
 #include <cstring>
+#include <utility>
 #include "gpu/metal/gpu_execution.h"
 
 namespace Gpu {
@@ -70,6 +71,10 @@ public:
     // during ordinary producer recording. Invoke only under admission locking;
     // the frontend clears this callback after joining its recording threads.
     virtual void SetCpuReadGuard(std::function<bool(GuestAddr,std::size_t)>) {}
+    // A deferred host fence-store is announced before its callback can run.
+    // Backends with CPU texture caches pair that marker and Signal atomically.
+    virtual void NotePendingCpuWrite(GuestAddr,std::size_t) {}
+    virtual void SignalCpuWrite(GuestAddr,std::size_t,std::function<void()> done) {Signal(std::move(done));}
 
     // CP-side writes must not pass an earlier GPU indirect read of the same
     // bytes. Backends serialize admission and the write together; this also

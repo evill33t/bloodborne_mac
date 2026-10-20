@@ -442,6 +442,104 @@ static bool GpuUploadBitsTests() {
     return true;
 }
 
+static bool GpuSourceBitsTests() {
+    auto device=MTLCreateSystemDefaultDevice();auto queue=[device newCommandQueue];
+    Gpu::Metal::GpuTextureUploader uploader((__bridge void*)device);
+    if(!uploader.Ready())return false;
+    unsigned cases=0;
+    for(unsigned tile:{8u,31u,13u,14u})
+    for(MTLPixelFormat format:{MTLPixelFormatR32Float,MTLPixelFormatRGBA8Unorm_sRGB,
+            MTLPixelFormatRGBA16Float,MTLPixelFormatBC1_RGBA,MTLPixelFormatBC7_RGBAUnorm}) {
+        const unsigned bpe=Gpu::Metal::GpuTextureUploader::BytesPerElement(format);
+        const unsigned block=Gpu::Metal::GpuTextureUploader::BlockExtent(format);
+        // The last case exceeds the 4MiB source page so both still-queued
+        // versions survive private snapshot arena rollover.
+        const bool rollover=tile==14 && format==MTLPixelFormatBC7_RGBAUnorm;
+        const unsigned width=rollover ? 4101 : 37,height=rollover ? 1029 : 19;
+        constexpr unsigned levels=3,slices=2;
+        // MipLayout takes a texel pitch and converts BC texels to blocks.
+        // Level.pitch below is its resulting element/block pitch.
+        const unsigned pitch=width+13*block;
+        Tiling::MipLevel mips[16];
+        const auto bytes=Tiling::MipLayout(tile,pitch,height,slices,levels,bpe,block==4,false,mips);
+        std::array<std::vector<uint32_t>,2> patterns;
+        for(unsigned version=0;version<2;++version) {
+            patterns[version].resize(bytes/4);uint32_t random=0x918372aau^(version*0x6b1732a9u);
+            for(auto& word:patterns[version]) {random^=random<<13;random^=random>>17;random^=random<<5;word=random;}
+            const uint32_t special[]{0x80000000u,1u,0x7fc12345u,0xffa54321u,0x7e017c01u,0xfc007bffu};
+            std::copy(std::begin(special),std::end(special),patterns[version].begin());
+        }
+        auto source=[device newBufferWithLength:bytes+512 options:MTLResourceStorageModePrivate];
+        auto descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+        descriptor.textureType=MTLTextureType2DArray;descriptor.arrayLength=slices;
+        descriptor.mipmapLevelCount=levels;descriptor.storageMode=MTLStorageModePrivate;
+        std::array<id<MTLTexture>,2> textures;
+        auto command=[queue commandBuffer];
+        Gpu::Metal::GpuTextureUploader::Upload upload{reinterpret_cast<const void*>(1),bytes,{}};
+        for(unsigned level=0;level<levels;++level)for(unsigned slice=0;slice<slices;++slice)
+            upload.levels.push_back({mips[level].offset+mips[level].slice_size*slice,
+                std::max(width>>level,1u),std::max(height>>level,1u),mips[level].pitch_el,
+                mips[level].tile_index,slice,level});
+        // Deliberately reverse the jobs: source/scratch offsets must follow
+        // each job rather than the submission index or natural mip order.
+        std::reverse(upload.levels.begin(),upload.levels.end());
+        for(unsigned version=0;version<2;++version) {
+            textures[version]=[device newTextureWithDescriptor:descriptor];
+            auto producer=[device newBufferWithBytes:patterns[version].data() length:bytes options:MTLResourceStorageModeShared];
+            auto blit=[command blitCommandEncoder];
+            [blit copyFromBuffer:producer sourceOffset:0 toBuffer:source destinationOffset:256 size:bytes];
+            [blit endEncoding];
+            using Result=Gpu::Metal::GpuTextureUploader::Result;
+            assert(uploader.EncodeGpuSource((__bridge void*)command,(__bridge void*)textures[version],upload,
+                (__bridge void*)source,source.length-4)==Result::Fallback);
+            auto invalid=upload;invalid.levels[0].src_offset=bytes;
+            assert(uploader.EncodeGpuSource((__bridge void*)command,(__bridge void*)textures[version],invalid,
+                (__bridge void*)source,256)==Result::Fallback);
+            const auto result=uploader.EncodeGpuSource((__bridge void*)command,(__bridge void*)textures[version],upload,
+                (__bridge void*)source,256);
+            if(result!=Result::Encoded) {
+                fprintf(stderr,"GPU source encode rejected result=%u tile=%u format=%lu block=%u version=%u texels=%ux%u pitch_texels=%u bytes=%llu source_offset=256 source_length=%lu: %s\n",
+                    unsigned(result),tile,(unsigned long)format,block,version,width,height,pitch,
+                    (unsigned long long)bytes,(unsigned long)source.length,uploader.Error().c_str());
+                for(const auto& level:upload.levels)
+                    fprintf(stderr,"  slice=%u level=%u tile=%u visible=%ux%u pitch_el=%u offset=%llu\n",
+                        level.slice,level.level,level.tile,level.width,level.height,level.pitch,
+                        (unsigned long long)level.src_offset);
+                return false;
+            }
+            // No valid CPU pointer was supplied. A second queued GPU writer
+            // must not alter the already encoded immutable snapshot version.
+            blit=[command blitCommandEncoder];
+            [blit fillBuffer:source range:NSMakeRange(256,bytes) value:0x5a];[blit endEncoding];
+        }
+        [command commit];[command waitUntilCompleted];
+        if(command.error){fprintf(stderr,"%s\n",command.error.localizedDescription.UTF8String);return false;}
+        for(unsigned version=0;version<2;++version)for(const auto& level:upload.levels) {
+            const unsigned w=(level.width+block-1)/block,h=(level.height+block-1)/block;
+            const auto row=(w*bpe+255)&~255u;
+            std::vector<unsigned char> reference(w*h*bpe);
+            Tiling::DetileSliceReference(level.tile,reinterpret_cast<const unsigned char*>(patterns[version].data())+level.src_offset,
+                reference.data(),w,h,level.pitch,bpe);
+            auto readback=[device newBufferWithLength:row*h options:MTLResourceStorageModeShared];
+            auto read=[queue commandBuffer];auto blit=[read blitCommandEncoder];
+            [blit copyFromTexture:textures[version] sourceSlice:level.slice sourceLevel:level.level
+                sourceOrigin:MTLOriginMake(0,0,0) sourceSize:MTLSizeMake(level.width,level.height,1)
+                toBuffer:readback destinationOffset:0 destinationBytesPerRow:row destinationBytesPerImage:row*h];
+            [blit endEncoding];[read commit];[read waitUntilCompleted];assert(!read.error);
+            for(unsigned y=0;y<h;++y)if(std::memcmp(static_cast<const unsigned char*>(readback.contents)+row*y,
+                    reference.data()+w*bpe*y,w*bpe)) {
+                fprintf(stderr,"GPU source snapshot mismatch tile=%u format=%lu version=%u level=%u slice=%u row=%u\n",
+                    tile,(unsigned long)format,version,level.level,level.slice,y);return false;
+            }
+            ++cases;
+        }
+    }
+    const auto stats=uploader.GetStats();
+    assert(stats.uploads==40 && stats.jobs==240 && !stats.mach_snapshots && !stats.mapped_snapshots);
+    puts("GPU source snapshots: 240 bit-exact raw mip/slice versions, GPU producers/overwrites, invalid CPU pointer, linear/thin/macro, NaNs, nonzero source/arena offsets, private arena rollover and range fallback passed");
+    return cases==240;
+}
+
 static int GpuTests() {
     if(!MTLCreateSystemDefaultDevice()) return 77;
     constexpr unsigned width=129,height=65,out_width=136,out_height=72;
@@ -565,13 +663,13 @@ int main(int argc,char** argv) {
     if(argc>1 && !std::strcmp(argv[1],"--gpu-upload-only")) {
         @autoreleasepool {
             if(!MTLCreateSystemDefaultDevice())return 77;
-            return GpuUploadBitsTests() ? 0 : 1;
+            return GpuUploadBitsTests() && GpuSourceBitsTests() ? 0 : 1;
         }
     }
     CpuTests();
     if(argc>1 && !std::strcmp(argv[1],"--cpu-only"))return 0;
     @autoreleasepool {
-        if(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD") && !std::strcmp(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"),"1") && !GpuUploadBitsTests())return 1;
+        if(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD") && !std::strcmp(std::getenv("BB_METAL_GPU_TEXTURE_UPLOAD"),"1") && (!GpuUploadBitsTests() || !GpuSourceBitsTests()))return 1;
         return GpuTests();
     }
 }

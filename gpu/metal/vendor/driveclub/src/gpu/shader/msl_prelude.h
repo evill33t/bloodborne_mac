@@ -1,10 +1,23 @@
 #pragma once
 
-// MSL helpers shared by every translated shader.
+// MSL fragments shared by writable and read-only guest-memory shaders.
+// Concatenation preserves every byte of the original writable prelude.
+#include <array>
+#include <cstddef>
 
 namespace Gpu::Shader {
+template<std::size_t... N>
+constexpr auto MslPreludeConcat(const char (&...pieces)[N]) {
+    std::array<char,(N+...)-sizeof...(N)+1> result{};
+    std::size_t at=0;
+    auto append=[&]<std::size_t K>(const char (&part)[K]) {
+        for(std::size_t k=0;k+1<K;++k) result[at++]=part[k];
+    };
+    (append(pieces),...);
+    return result;
+}
 
-inline constexpr const char* kMslPrelude = R"MSL(#include <metal_stdlib>
+inline constexpr char kMslPreludeTypes[] = R"MSL(#include <metal_stdlib>
 using namespace metal;
 
 // Guest VA -> physical page table: a header followed by one entry per page,
@@ -14,7 +27,9 @@ struct DcDraw { float4 vp_scale; float4 vp_offset; float2 rt_scale; uint vte; ui
 struct DcMem { device uint* lo; device uint* hi; device const DcMap* map; };
 struct DcTess { uint base_vertex; uint patch_count; uint index_size; uint reserved; ulong index_base; };
 
-// ---- guest memory ----
+)MSL";
+
+inline constexpr char kMslPreludeMemoryRead[] = R"MSL(// ---- guest memory ----
 static inline device uint* dc_ptr(thread const DcMem& m, ulong va) {
     ulong i = (va - m.map->base) >> m.map->shift;
     if (i >= m.map->pages) return nullptr;
@@ -41,7 +56,9 @@ static inline uint dc_ld(thread const DcMem& m, ulong va) {
     uint hi = q ? *q : 0u;
     return (lo >> sh) | (hi << (32u - sh));
 }
-static inline void dc_st(thread const DcMem& m, ulong va, uint v) {
+)MSL";
+
+inline constexpr char kMslPreludeMemoryWrite[] = R"MSL(static inline void dc_st(thread const DcMem& m, ulong va, uint v) {
     device uint* p = dc_ptr(m, va & ~3ul);
     if (p) *p = v;
 }
@@ -57,7 +74,9 @@ static inline void dc_st_part(thread const DcMem& m, ulong va, uint v, uint byte
     atomic_fetch_and_explicit(a, ~mask, memory_order_relaxed);
     atomic_fetch_or_explicit(a, (v << sh) & mask, memory_order_relaxed);
 }
-static inline ulong dc_vbase(uint a, uint b) { return ulong(a) | (ulong(b & 0xfffu) << 32); }
+)MSL";
+
+inline constexpr char kMslPreludeFormatUtils[] = R"MSL(static inline ulong dc_vbase(uint a, uint b) { return ulong(a) | (ulong(b & 0xfffu) << 32); }
 static inline uint dc_vstride(uint b) { return (b >> 16) & 0x3fffu; }
 
 // ---- typed buffer fetch (BUF_DATA_FORMAT / BUF_NUM_FORMAT) ----
@@ -96,11 +115,15 @@ static inline uint4 dc_fmt_convert(uint4 r, uint4 bits, uint nfmt, uint n) {
     }
     return o;
 }
-static inline uint4 dc_load_fmt(thread const DcMem& m, ulong a, uint dfmt, uint nfmt) {
+)MSL";
+
+inline constexpr char kMslPreludeFormatLoadPrefix[] = R"MSL(static inline uint4 dc_load_fmt(thread const DcMem& m, ulong a, uint dfmt, uint nfmt) {
     uint words = dfmt == 14u ? 4u : dfmt == 13u ? 3u : (dfmt == 11u || dfmt == 12u) ? 2u : 1u;
     uint4 w = uint4(0u);
     if ((a & 3ul) == 0ul) {
-        device uint* p = dc_ptr_n(m, a, words * 4u);
+        device )MSL";
+
+inline constexpr char kMslPreludeFormatLoadSuffix[] = R"MSL(* p = dc_ptr_n(m, a, words * 4u);
         if (p) for (uint k = 0u; k < words; ++k) w[k] = p[k];
     } else {
         for (uint k = 0u; k < words; ++k) w[k] = dc_ld(m, a + ulong(k) * 4ul);
@@ -128,7 +151,9 @@ static inline uint4 dc_load_fmt(thread const DcMem& m, ulong a, uint dfmt, uint 
     }
     return dc_fmt_convert(r, bits, nfmt, n);
 }
-// Typed buffer store: packs v (float bits or integers) into dfmt/nfmt.
+)MSL";
+
+inline constexpr char kMslPreludeFormatWrite[] = R"MSL(// Typed buffer store: packs v (float bits or integers) into dfmt/nfmt.
 static inline uint dc_pack(uint v, uint bits, uint nfmt) {
     uint maxu = bits >= 32u ? 0xffffffffu : ((1u << bits) - 1u);
     float f = as_type<float>(v);
@@ -163,7 +188,9 @@ static inline void dc_store_fmt(thread const DcMem& m, ulong a, uint4 v, uint df
     default: break;
     }
 }
-static inline uint dc_sel(uint4 v, uint sel, bool is_int) {
+)MSL";
+
+inline constexpr char kMslPreludeCommon[] = R"MSL(static inline uint dc_sel(uint4 v, uint sel, bool is_int) {
     switch (sel & 7u) {
     case 1u: return is_int ? 1u : 0x3f800000u;
     case 4u: return v.x;
@@ -291,5 +318,11 @@ static inline float4 dc_viewport(float4 p, constant DcDraw& d) {
     return float4(xy + d.vp_offset.xy * p.w, z + d.vp_offset.z * p.w, p.w);
 }
 )MSL";
+
+inline constexpr auto kMslPreludeStorage=MslPreludeConcat(
+    kMslPreludeTypes,kMslPreludeMemoryRead,kMslPreludeMemoryWrite,
+    kMslPreludeFormatUtils,kMslPreludeFormatLoadPrefix,"uint",kMslPreludeFormatLoadSuffix,
+    kMslPreludeFormatWrite,kMslPreludeCommon);
+inline constexpr const char* kMslPrelude=kMslPreludeStorage.data();
 
 } // namespace Gpu::Shader

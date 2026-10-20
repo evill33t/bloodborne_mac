@@ -34,7 +34,7 @@ size_t Count(const std::string& source,const char* word) {
 Shader::Program Synthetic(u64 hash) {
     const auto* layout=Native::Layout(hash);Require(layout,"Unknown synthetic vertex hash");
     Shader::Program p;p.hash=hash;p.stage=Shader::Stage::Vertex;p.num_user_sgprs=16;p.vgpr_comp_cnt=3;
-    p.fetch_ud=0;p.fetch_bytes=layout->fetch_bytes;
+    p.fetch_address=0x1000;p.fetch_ud=0;p.fetch_bytes=layout->fetch_bytes;
     Inst prefix{};prefix.enc=Enc::SOP1;prefix.op=u16(Sop1::S_MOV_B32);prefix.dst=Operand::VccHi;
     prefix.src[0]=Operand::Literal;prefix.literal=layout->prefix_literal;prefix.size=2;
     p.code.push_back(prefix);
@@ -80,6 +80,13 @@ void Proof(const Shader::Program& original) {
     }
     Require(after.find(before.substr(first,end-first))!=std::string::npos &&
         after.find(before.substr(end))!=std::string::npos,"Original fallback or subsequent transform math changed");
+    auto readonly_options=after_options;readonly_options.readonly_guest_memory=true;
+    Require(Shader::GuestMemoryReadOnlyEligible(original,&reason),"Native program readonly proof failed: "+reason);
+    const auto readonly_source=Shader::GenerateMsl(original,readonly_options,&unsupported);
+    Require(unsupported.empty() && readonly_source.find("device const uint* dc_vertex_record")!=std::string::npos &&
+        readonly_source.find("device const uint* p=dc_vertex_record")!=std::string::npos &&
+        readonly_source.find("device uint*")==std::string::npos && Count(readonly_source,"if (dc_native_vertex_fetch(")==1,
+        "Native readonly helper retained writable inputs or lost its proven fusion");
     for(u32 kind=0;kind<32;++kind) {
         auto changed=original;auto& descriptor=changed.code[1];
         auto& fetch=changed.code[2+Native::Layout(original.hash)->attributes];
@@ -151,12 +158,14 @@ id<MTLComputePipelineState> Pipeline(id<MTLDevice> device,id<MTLLibrary> library
     NSError* error=nil;auto result=[device newComputePipelineStateWithFunction:[library newFunctionWithName:name] error:&error];
     Require(result!=nil,std::string("Native vertex pipeline: ")+(error ? error.localizedDescription.UTF8String : "unknown"));return result;
 }
-std::string VertexCompute(const Shader::Program& p,bool native) {
-    Shader::MslOptions options;options.native_vertex_fetch=native;std::vector<std::string> unsupported;
+std::string VertexCompute(const Shader::Program& p,bool native,bool readonly=false) {
+    Shader::MslOptions options;options.native_vertex_fetch=native;options.readonly_guest_memory=readonly;
+    std::vector<std::string> unsupported;
     auto source=Shader::GenerateMsl(p,options,&unsupported);Require(unsupported.empty(),"Captured VS unsupported");
     const auto entry=source.find("\nvertex VsOut main0(");Require(entry!=std::string::npos,"Captured VS entry missing");
     source.resize(entry);
-    source+="\nkernel void main0(constant uint* ud [[buffer(0)]],device uint* gm0 [[buffer(1)]],device uint* gm1 [[buffer(2)]],"
+    const std::string pointer=readonly ? "device const uint*" : "device uint*";
+    source+="\nkernel void main0(constant uint* ud [[buffer(0)]],"+pointer+" gm0 [[buffer(1)]],"+pointer+" gm1 [[buffer(2)]],"
         "device const DcMap& map [[buffer(3)]],constant uint2* ids [[buffer(4)]],device uint4* result [[buffer(5)]],"
         "uint tid [[thread_position_in_grid]]) { DcMem mem={gm0,gm1,&map}; VsOut o=dc_run(ids[tid].x,ids[tid].y,ud,mem);";
     const u32 vectors=1+std::popcount(p.param_mask);
@@ -284,11 +293,24 @@ public:
     std::array<id<MTLComputePipelineState>,2> vertex{};
     const Shader::Program& program;
     u32 vectors;
-    Harness(id<MTLDevice> d,const Shader::Program& p):device(d),program(p),vectors(1+std::popcount(p.param_mask)) {
+    Harness(id<MTLDevice> d,const Shader::Program& p,bool readonly=false,bool readonly_native=false):device(d),program(p),vectors(1+std::popcount(p.param_mask)) {
         queue=[device newCommandQueue];auto library=Compile(device,RawSource());
         raw=Pipeline(device,library,@"raw");writer=Pipeline(device,library,@"writer");
-        for(u32 enabled=0;enabled<2;++enabled)
-            vertex[enabled]=Pipeline(device,Compile(device,VertexCompute(p,enabled)),@"main0");
+        if(readonly) Require(Shader::GuestMemoryReadOnlyEligible(p),"Full vertex readonly proof failed");
+        for(u32 enabled=0;enabled<2;++enabled) {
+            auto compiled=Compile(device,VertexCompute(p,readonly ? readonly_native : enabled,readonly && enabled));
+            if(!readonly) {vertex[enabled]=Pipeline(device,compiled,@"main0");continue;}
+            auto descriptor=[MTLComputePipelineDescriptor new];descriptor.computeFunction=[compiled newFunctionWithName:@"main0"];
+            NSError* error=nil;MTLComputePipelineReflection* reflection=nil;
+            vertex[enabled]=[device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&reflection error:&error];
+            Require(vertex[enabled]!=nil,"Readonly full vertex pipeline failed");
+            unsigned inputs=0;
+            for(id<MTLBinding> binding in reflection.bindings) if(binding.type==MTLBindingTypeBuffer && (binding.index==1 || binding.index==2)) {
+                Require(binding.access==(enabled ? MTLBindingAccessReadOnly : MTLBindingAccessReadWrite),
+                    "Actual full VS input reflection did not change RW to RO");++inputs;
+            }
+            Require(inputs==2,"Actual full VS did not reflect both guest inputs");
+        }
     }
     void Bind(id<MTLComputeCommandEncoder> encoder,const Guest& guest) {
         [encoder setBuffer:guest.memory offset:0 atIndex:1];
@@ -337,8 +359,8 @@ public:
         return result;
     }
 };
-void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic) {
-    const auto* layout=Native::Layout(program.hash);Harness harness(device,program);Guest guest(device);
+void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic,bool readonly=false,bool readonly_native=false) {
+    const auto* layout=Native::Layout(program.hash);Harness harness(device,program,readonly,readonly_native);Guest guest(device);
     u32 cases=0,fast=0,fallback=0;bool record_writer=false,table_writer=false,format_writer=false;
     const auto check=[&](const RawInput& input,bool expected,const Mutation* mutation=nullptr) {
         const auto result=harness.Run(guest,input,expected,mutation,synthetic);
@@ -418,6 +440,9 @@ void GpuCases(id<MTLDevice> device,const Shader::Program& program,bool synthetic
     Require(fast>=20 && fallback>=30,"Native vertex fixtures did not exercise both guarded paths");
     std::printf("Vertex %016llx %s GPU differential passed (%u cases, %u fast, %u fallback; ordered writers observed).\n",
         (unsigned long long)program.hash,synthetic ? "synthetic write-mask/raw" : "original full-output/raw",cases,fast,fallback);
+    if(readonly)std::puts(readonly_native ?
+        "Readonly native-fetch/full-VS raw outputs, queued record/descriptor/format writers and actual RW/RO reflection passed." :
+        "Readonly original inline-fetch/full-VS raw outputs, queued record/descriptor/format writers and actual RW/RO reflection passed.");
 }
 } // namespace
 
@@ -430,18 +455,27 @@ int main(int argc,char** argv) {
                 Proof(Synthetic(hash));
             }
             Require(!Native::IsExtended(0) && !Native::Layout(0),"Unknown vertex identity admitted");
+            if(argc==2 && (std::string(argv[1])=="--gpu-readonly" || std::string(argv[1])=="--gpu-readonly-native")) {
+                auto device=MTLCreateSystemDefaultDevice();if(!device)return 77;
+                for(const auto hash:{Native::Hash32,Native::Hash36})GpuCases(device,Synthetic(hash),true,true,std::string(argv[1])=="--gpu-readonly-native");
+                return 0;
+            }
             if(argc==1) {
                 auto device=MTLCreateSystemDefaultDevice();if(!device) return 77;
                 for(const auto hash:Native::Hashes)GpuCases(device,Synthetic(hash),true);
                 return 0;
             }
-            Require(argc==3 && (std::string(argv[1])=="--cpu-captures" || std::string(argv[1])=="--gpu-captures"),
-                "Use --cpu-captures DIR or --gpu-captures DIR");
+            Require(argc==3 && (std::string(argv[1])=="--cpu-captures" || std::string(argv[1])=="--gpu-captures" ||
+                    std::string(argv[1])=="--cpu-readonly-captures" || std::string(argv[1])=="--gpu-readonly-captures" ||
+                    std::string(argv[1])=="--gpu-readonly-native-captures"),
+                "Use --cpu-captures/--gpu-captures/--cpu-readonly-captures/--gpu-readonly-captures DIR or --gpu-readonly/--gpu-readonly-native");
             std::vector<std::unique_ptr<Shader::Program>> programs;
             for(const auto hash:Native::Hashes) {programs.push_back(Capture(argv[2],hash));Proof(*programs.back());}
-            if(std::string(argv[1])=="--cpu-captures") return 0;
+            const bool readonly=std::string(argv[1]).find("readonly")!=std::string::npos;
+            if(readonly)for(const auto& p:programs)Require(Shader::GuestMemoryReadOnlyEligible(*p),"Original full VS readonly proof failed");
+            if(std::string(argv[1])=="--cpu-captures" || std::string(argv[1])=="--cpu-readonly-captures") return 0;
             auto device=MTLCreateSystemDefaultDevice();if(!device) return 77;
-            for(const auto& p:programs)GpuCases(device,*p,false);
+            for(const auto& p:programs)GpuCases(device,*p,false,readonly,std::string(argv[1])=="--gpu-readonly-native-captures");
             return 0;
         } catch(const std::exception& error) {std::fprintf(stderr,"native vertex fixture: %s\n",error.what());return 1;}
     }

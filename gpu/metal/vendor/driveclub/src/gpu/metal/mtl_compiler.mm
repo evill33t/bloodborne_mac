@@ -11,6 +11,7 @@
 #include <filesystem>
 
 #include "common/log.h"
+#include "gpu/metal/stutter_trace.h"
 
 namespace Gpu::Metal {
 
@@ -153,9 +154,14 @@ id<MTLFunction> ShaderCompiler::Function(u64 key, const std::string& src, u64 ad
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(src.data(),static_cast<CC_LONG>(src.size()),digest);
     std::string identity;for(unsigned char b:digest) {identity+="0123456789abcdef"[b>>4];identity+="0123456789abcdef"[b&15];}
+    u64 source_identity=0;
+    for(unsigned k=0;k<8;++k) source_identity=(source_identity<<8)|digest[k];
     {
         std::unique_lock lk(fn_lock);
-        fn_changed.wait(lk,[&]{return !compiling[identity];});
+        {
+            StutterTrace::Scope timing("shader_cache_wait",0,address,source_identity);
+            fn_changed.wait(lk,[&]{return !compiling[identity];});
+        }
         if (auto it = functions.find(identity); it != functions.end()) {
             if(it->second && warm_root) function_sources[reinterpret_cast<std::uintptr_t>((__bridge void*)it->second)]=src;
             return it->second;
@@ -169,8 +175,16 @@ id<MTLFunction> ShaderCompiler::Function(u64 key, const std::string& src, u64 ad
     opts.preserveInvariance = YES;
     opts.languageVersion = MTLLanguageVersion3_0;
     NSError* err = nil;
-    id<MTLLibrary> lib = [device newLibraryWithSource:@(src.c_str()) options:opts error:&err];
-    id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    id<MTLLibrary> lib=nil;
+    {
+        StutterTrace::Scope timing("shader_library",0,address,source_identity);
+        lib=[device newLibraryWithSource:@(src.c_str()) options:opts error:&err];
+    }
+    id<MTLFunction> fn=nil;
+    if(lib) {
+        StutterTrace::Scope timing("shader_function",0,address,source_identity);
+        fn=[lib newFunctionWithName:@"main0"];
+    }
     if (!fn) {
         DC_ERROR("gpu: MSL compile failed for shader %#llx: %s", address,
                  err ? err.localizedDescription.UTF8String : "?");

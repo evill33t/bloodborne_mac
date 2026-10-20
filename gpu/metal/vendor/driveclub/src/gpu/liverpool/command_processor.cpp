@@ -553,13 +553,14 @@ void CommandProcessor::SetRegs(u32 index, const u32* values, u32 count) {
     std::memcpy(CurRegs().Data() + index, values, count * 4);
 }
 
-void CommandProcessor::AfterGpu(std::function<void()> fn) {
+void CommandProcessor::AfterGpu(std::function<void()> fn,u64 write_address,std::size_t write_bytes) {
     auto guarded=[gate=callback_gate,state=execution,fn=std::move(fn)] {
         std::lock_guard guard(gate->lock);
         if(gate->alive && !state->Failed()) fn();
     };
     if (renderer) {
-        renderer->Signal(std::move(guarded));
+        if(write_bytes)renderer->SignalCpuWrite(write_address,write_bytes,std::move(guarded));
+        else renderer->Signal(std::move(guarded));
     } else {
         guarded();
     }
@@ -604,7 +605,7 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
         if (irq) {
             Interrupt(irq);
         }
-    });
+    },addr,bytes);
 }
 
 bool CommandProcessor::PendingFence(u64 addr, u32* value) {
@@ -949,7 +950,21 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
                 break;
             }
             if(!SyncRenderer(2)) return; // the GPU may still be producing what we copy
-            if (src_sel == 2) {
+            if(renderer && dst_sel!=1) {
+                // The packet encodes at most0x1fffff bytes. Stage the source
+                // before CpuWrite so virtual and physical aliases preserve
+                // memmove behavior, and journal the completed host write.
+                std::vector<u8> staged(bytes);
+                if(src_sel==2) {
+                    std::memcpy(staged.data(),dst,bytes); // retain any trailing1..3 bytes
+                    for(u32 k=0;k+4<=bytes;k+=4)std::memcpy(staged.data()+k,&body[1],4);
+                } else {
+                    const u8* src=src_sel==1 ? (gds ? gds+(body[1]&0xffff) : nullptr) : Ptr<const u8>(body[1],body[2]);
+                    if(!src)break;
+                    std::memcpy(staged.data(),src,bytes);
+                }
+                renderer->CpuWrite(reinterpret_cast<u64>(dst),staged.data(),bytes,false);
+            } else if (src_sel == 2) {
                 for (u32 k = 0; k + 4 <= bytes; k += 4) {
                     std::memcpy(dst + k, &body[1], 4);
                 }

@@ -442,7 +442,7 @@ void ComparePixels(const std::vector<u16>& reference,const std::vector<u16>& opt
             "Synthetic fragment inputs did not produce meaningful finite output");
 }
 
-void GpuDifferential(id<MTLDevice> device,const Shader::Program& program,bool addresses=false,bool simd=false) {
+void GpuDifferential(id<MTLDevice> device,const Shader::Program& program,bool addresses=false,bool simd=false,bool readonly=false) {
     const std::string vertex=R"MSL(#include <metal_stdlib>
 using namespace metal;
 struct VOut {float4 pos [[position]];float4 p0 [[user(p0)]];float4 p1 [[user(p1)]];
@@ -487,7 +487,8 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
     std::array<id<MTLRenderPipelineState>,2> pipelines;
     for(unsigned enabled=0;enabled<2;++enabled) {
         std::vector<std::string> unsupported;
-        auto options=Options(program,simd ? false : enabled,addresses);options.simd_smrd=simd && enabled;
+        auto options=Options(program,(simd || readonly) ? false : enabled,addresses);options.simd_smrd=simd && enabled;
+        options.readonly_guest_memory=readonly && enabled;
         if(mutable_tables) {options.probe_pc=observation_pc;options.probe_x=~0u;}
         auto source=Shader::GenerateMsl(program,options,&unsupported);
         Require(unsupported.empty(),"Captured fragment translation unsupported");
@@ -513,9 +514,22 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
         auto descriptor=[MTLRenderPipelineDescriptor new];descriptor.vertexFunction=vs;
         descriptor.fragmentFunction=[library newFunctionWithName:@"main0"];
         for(u32 k=0;k<Targets+u32(simd);++k) descriptor.colorAttachments[k].pixelFormat=MTLPixelFormatRGBA16Float;
-        pipelines[enabled]=[device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+        MTLRenderPipelineReflection* reflection=nil;
+        pipelines[enabled]=readonly
+            ? [device newRenderPipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&reflection error:&error]
+            : [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
         Require(pipelines[enabled]!=nil,std::string("Cannot create differential render pipeline: ")+
             (error ? error.localizedDescription.UTF8String : "unknown error"));
+        if(readonly) {
+            unsigned inputs=0;
+            for(id<MTLBinding> binding in reflection.fragmentBindings) if(binding.type==MTLBindingTypeBuffer &&
+                    (binding.index==Shader::Binding::Mem0 || binding.index==Shader::Binding::Mem1)) {
+                Require(binding.access==(enabled ? MTLBindingAccessReadOnly : MTLBindingAccessReadWrite),
+                    "Actual captured fragment guest-memory reflection did not change RW to RO");
+                ++inputs;
+            }
+            Require(inputs==2,"Captured fragment did not reflect both guest-memory inputs");
+        }
     }
     auto memory=[device newBufferWithLength:MemoryBytes options:MTLResourceStorageModeShared];
     struct Mapping {Shader::GpuMemMap header;std::array<s32,MemoryBytes/16384> pages;};
@@ -540,6 +554,7 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
     if(simd) sampler_descriptor.mipFilter=MTLSamplerMipFilterLinear;
     auto sampler=[device newSamplerStateWithDescriptor:sampler_descriptor];auto queue=[device newCommandQueue];
     bool producer_observed=false;
+    bool readonly_descriptor_observed=false;
     std::array<bool,2> table_producer_observed{};
     bool partial_coverage_observed=false,derivative_observed=false;
     for(u32 scenario=0;scenario<8;++scenario) {
@@ -567,7 +582,7 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
             // mutable tables; all variants must keep their original GPU reads.
             if(scenario==2 || scenario==4) roots.roots[0]=Static::AddressBlock::Fallback;
             if(scenario==3 || scenario==4) roots.roots[1]=Static::AddressBlock::Fallback;
-        } else if(!simd) Require(Static::Pack(program.hash,ud,snapshots,{Arena,Capacity,8192,0,0},packed),"Fixture snapshot packing failed");
+        } else if(!simd && !readonly) Require(Static::Pack(program.hash,ud,snapshots,{Arena,Capacity,8192,0,0},packed),"Fixture snapshot packing failed");
         const auto* root_block=addresses ? &roots : nullptr;
         struct State {std::vector<u16> pixels;std::array<u32,Shader::kProbeWords> observation{};};
         auto render_pair=[&] {
@@ -631,6 +646,21 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
         const size_t original_words=simd ? 32*13*4*Targets : after.pixels.size();
         for(size_t k=0;k<original_words;++k)
             if(before.pixels[k]!=after.pixels[k] && !Nan(before.pixels[k]) && !Nan(after.pixels[k])) producer_observed=true;
+        if(readonly) {
+            // Change actual direct descriptor base words on the GPU after the
+            // first draw pair. Const device access must still observe the new
+            // descriptor and payload at the next invocation, without a probe.
+            auto update=[queue commandBuffer];auto enc=[update computeCommandEncoder];
+            [enc setComputePipelineState:table_writer];[enc setBuffer:memory offset:0 atIndex:0];
+            const std::array<u32,2> control{0,0};[enc setBytes:control.data() length:sizeof(control) atIndex:1];
+            [enc dispatchThreads:MTLSizeMake(12,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+            [enc endEncoding];[update commit];
+            const auto current=render_pair();
+            Require(update.status==MTLCommandBufferStatusCompleted,"Ordered readonly descriptor writer failed");
+            for(size_t k=0;k<original_words;++k)
+                if(after.pixels[k]!=current.pixels[k] && !Nan(after.pixels[k]) && !Nan(current.pixels[k]))
+                    readonly_descriptor_observed=true;
+        }
         if(mutable_tables) {
             auto previous=after;
             for(u32 root=0;root<2;++root) {
@@ -655,12 +685,15 @@ kernel void table_writer(device uint* memory [[buffer(0)]],constant uint2& contr
         }
     }
     Require(producer_observed,"Synthetic differential never observed the ordered GPU payload writer");
+    if(readonly) Require(readonly_descriptor_observed,"Readonly differential did not observe queued GPU descriptor replacement");
     if(mutable_tables) Require(table_producer_observed[0] && table_producer_observed[1],
         "Synthetic differential did not observe finite changes from both direct UD table writers");
     if(simd) Require(partial_coverage_observed && derivative_observed,"Partial-quad scalar derivatives were not meaningfully exercised");
     std::printf("Original %016llx %s full-fragment/GPU-producer differential passed (%u states).\n",
-        (unsigned long long)program.hash,simd ? "SIMD scalar/helper/derivatives" : addresses ? "GPU-time addresses" : "snapshot words",
+        (unsigned long long)program.hash,readonly ? "readonly device qualification" : simd ? "SIMD scalar/helper/derivatives" : addresses ? "GPU-time addresses" : "snapshot words",
         mutable_tables ? 32u : 16u);
+    if(readonly) std::printf("Original %016llx readonly full-six-MRT raw output, GPU payload ordering and actual RW/RO reflection passed.\n",
+        (unsigned long long)program.hash);
 }
 } // namespace
 
@@ -671,15 +704,22 @@ int main(int argc,char** argv) {
             if(argc==1) return 0;
             Require(argc==3 && (std::string(argv[1])=="--cpu-captures" ||
                 std::string(argv[1])=="--gpu-captures" || std::string(argv[1])=="--gpu-direct-captures" ||
-                std::string(argv[1])=="--gpu-simd-captures"),
-                "Use --cpu-captures DIR, --gpu-captures DIR, --gpu-direct-captures DIR or --gpu-simd-captures DIR");
+                std::string(argv[1])=="--gpu-simd-captures" || std::string(argv[1])=="--gpu-readonly-captures" ||
+                std::string(argv[1])=="--cpu-readonly-captures"),
+                "Use --cpu-captures/--gpu-captures/--gpu-direct-captures/--gpu-simd-captures/--cpu-readonly-captures/--gpu-readonly-captures DIR");
             auto a=Capture(argv[2],Hash68),b=Capture(argv[2],HashAff);CapturedProof(*a);CapturedProof(*b);
             CapturedSimdProof(*a);CapturedSimdProof(*b);
-            if(std::string(argv[1])=="--cpu-captures") return 0;
+            const bool readonly=std::string(argv[1]).find("readonly")!=std::string::npos;
+            if(readonly) for(const auto* program:{a.get(),b.get()}) {
+                std::string reason;
+                Require(Shader::GuestMemoryReadOnlyEligible(*program,&reason),"Original readonly proof failed: "+reason);
+                std::printf("Original %016llx readonly independent opcode/support proof passed.\n",(unsigned long long)program->hash);
+            }
+            if(std::string(argv[1])=="--cpu-captures" || std::string(argv[1])=="--cpu-readonly-captures") return 0;
             auto device=MTLCreateSystemDefaultDevice();if(!device) return 77;
             const bool addresses=std::string(argv[1])=="--gpu-direct-captures";
             const bool simd=std::string(argv[1])=="--gpu-simd-captures";
-            GpuDifferential(device,*a,addresses,simd);GpuDifferential(device,*b,addresses,simd);return 0;
+            GpuDifferential(device,*a,addresses,simd,readonly);GpuDifferential(device,*b,addresses,simd,readonly);return 0;
         } catch(const std::exception& error) {
             std::fprintf(stderr,"static SMRD fixture: %s\n",error.what());return 1;
         }

@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #include "gpu/metal/mtl_compiler.h"
 #include <cassert>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 #include <future>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <iterator>
 #include <cstring>
 
@@ -73,8 +75,10 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
 // request caching or an archive already exists on disk.
 @interface BBArchiveSpyDevice : NSProxy {
     id<MTLDevice> underlying;
+    std::atomic<unsigned> library_calls;
 }
 @property(nonatomic) unsigned archiveCalls;
+@property(nonatomic,readonly) unsigned libraryCalls;
 @property(nonatomic) BOOL captureDescriptors;
 @property(nonatomic,strong) NSMutableArray<MTLRenderPipelineDescriptor*>* renderDescriptors;
 @property(nonatomic,strong) NSMutableArray<MTLComputePipelineDescriptor*>* computeDescriptors;
@@ -83,11 +87,14 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
 @implementation BBArchiveSpyDevice
 + (instancetype)wrapping:(id<MTLDevice>)device {
     auto proxy=[BBArchiveSpyDevice alloc]; proxy->underlying=device;
+    proxy->library_calls.store(0,std::memory_order_relaxed);
     proxy.renderDescriptors=[NSMutableArray new];proxy.computeDescriptors=[NSMutableArray new];
     return proxy;
 }
 - (NSMethodSignature*)methodSignatureForSelector:(SEL)selector { return [(NSObject*)underlying methodSignatureForSelector:selector]; }
 - (void)forwardInvocation:(NSInvocation*)invocation {
+    if(invocation.selector==@selector(newLibraryWithSource:options:error:))
+        library_calls.fetch_add(1,std::memory_order_relaxed);
     if(_captureDescriptors) {
         // Capture the actual descriptors decoded by production prewarming at
         // the driver boundary, instead of duplicating its recipe decoder.
@@ -103,6 +110,7 @@ void FillOldRecipes(const std::filesystem::path& root,unsigned count,std::uint64
     }
     [invocation invokeWithTarget:underlying];
 }
+- (unsigned)libraryCalls {return library_calls.load(std::memory_order_relaxed);}
 - (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor*)descriptor error:(NSError**)error {
     (void)descriptor;
     ++_archiveCalls;
@@ -115,11 +123,18 @@ static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* pat
     char directory[]="/tmp/bb-metal-real-recipes-XXXXXX";assert(mkdtemp(directory));
     const auto root=RecipeRoot(directory,device);std::filesystem::create_directories(root);
     std::vector<std::pair<std::filesystem::path,std::string>> originals;
+    std::unordered_set<std::string> sources;
     for(int i=0;i<count;++i) {
         const std::filesystem::path source(paths[i]);
         const auto destination=root/source.filename();
         std::filesystem::copy_file(source,destination);
         originals.emplace_back(destination,FileContents(destination));
+        NSData* bytes=[NSData dataWithContentsOfFile:@(destination.c_str())];
+        NSDictionary* recipe=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+        assert([recipe isKindOfClass:NSDictionary.class]);
+        for(NSString* stage in @[@"vertex",@"fragment",@"source"])
+            if([recipe[stage] isKindOfClass:NSString.class] && [recipe[stage] length])
+                sources.emplace([recipe[stage] UTF8String]);
     }
     setenv("BB_DATA_DIR",directory,1);unsetenv("BB_GAME_DIR");unsetenv("BB_SOURCE_GAME");
     unsetenv("BB_METAL_SHADER_PREWARM");
@@ -133,6 +148,7 @@ static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* pat
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         auto stats=compiler.GetWarmupStats();
         assert(stats.loaded==static_cast<unsigned>(count) && stats.ready==static_cast<unsigned>(count));
+        assert(spy.libraryCalls==sources.size());
         NSArray<MTLRenderPipelineDescriptor*>* renders=[spy.renderDescriptors copy];
         NSArray<MTLComputePipelineDescriptor*>* computes=[spy.computeDescriptors copy];
         assert(renders.count+computes.count==static_cast<unsigned>(count));
@@ -148,12 +164,15 @@ static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* pat
         stats=compiler.GetWarmupStats();
         assert(stats.hits==static_cast<unsigned>(count)*2 && stats.pending==0);
         assert(spy.renderDescriptors.count==renders.count && spy.computeDescriptors.count==computes.count);
+        assert(spy.libraryCalls==sources.size());
         assert(spy.archiveCalls==0);
         printf("Captured prewarm: %d real recipes (%lu render, %lu compute), %llu foreground cache hits, "
                "zero additional Metal pipeline creation calls; demand total %.3f ms\n",count,
                static_cast<unsigned long>(renders.count),static_cast<unsigned long>(computes.count),
                static_cast<unsigned long long>(stats.hits),
                std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+        printf("Captured prewarm source sharing: %u library calls for %zu exact unique sources\n",
+               spy.libraryCalls,sources.size());
     }
     for(const auto& [path,contents]:originals)assert(FileContents(path)==contents);
     std::filesystem::remove_all(directory);
@@ -287,6 +306,7 @@ int main(int argc,const char** argv) {
             for(unsigned group=1;group<=area_count;++group) AreaPipeline(compiler,group);
             const auto stats=compiler.GetWarmupStats();
             assert(stats.pending==area_count && stats.retained==area_count);
+            assert(spy.libraryCalls==1); // all descriptors share the exact compiled function
             assert(stats.pending+stats.queued<=Gpu::Metal::PipelinePrewarmLimits::Recipes);
             assert(stats.pending_bytes+stats.queued_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
             assert(stats.retained_bytes<=Gpu::Metal::PipelinePrewarmLimits::Bytes);
@@ -303,6 +323,7 @@ int main(int argc,const char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             const auto stats=compiler.GetWarmupStats();
             assert(stats.loaded==area_count && stats.ready==area_count && stats.retained==area_count);
+            assert(spy.libraryCalls==1); // startup also shares the stage across all 513 recipes
             hot_recipe=AreaRecipeFile(areas_directory,area_count);
             cold_recipe=AreaRecipeFile(areas_directory,area_count-1);
             assert(!hot_recipe.empty() && !cold_recipe.empty());

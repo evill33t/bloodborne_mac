@@ -59,6 +59,8 @@ public:
     // after all transfers succeed; discard the fresh process on failure.
     bool RestoreCheckpoint(std::span<const CheckpointChunk>,std::chrono::steady_clock::time_point,std::string& error);
     void Signal(std::function<void()> done) override;
+    void NotePendingCpuWrite(GuestAddr address,std::size_t bytes) override;
+    void SignalCpuWrite(GuestAddr address,std::size_t bytes,std::function<void()> done) override;
     void NoteConstDump(std::uint64_t addr, std::uint32_t bytes) override;
     void Flip(const FlipInfo& flip) override;
     void OnContextRegs(const std::uint32_t* body, std::uint32_t body_dwords,std::size_t available_words) override;
@@ -77,6 +79,9 @@ public:
     std::uint64_t NativeIndirectDrawCount() const;
     std::uint64_t NativeIndirectDispatchCount() const;
     std::uint64_t IndirectCpuWriteWaitCount() const;
+    std::uint64_t TextureGpuSnapshotCount() const;
+    std::uint64_t TextureCoherenceWaitCount() const;
+    std::uint64_t TextureCoherenceRefreshCount() const;
     // Called on the GPU recording thread after committing a flip. The host
     // queues its presentation before returning, preserving shared-queue order.
     void SetFrameReadyCallback(std::function<void(void*)> callback);

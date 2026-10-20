@@ -35,13 +35,22 @@ inline constexpr bool IsExtended(std::uint64_t hash) {
 inline constexpr std::array<std::uint32_t,6> Formats{
     0x2006f3ac,0x20054fac,0x20054fac,0x20050fac,0x20065fac,0x2002d02c};
 inline constexpr std::array<std::uint32_t,6> Offsets{0,12,16,20,24,32};
-inline constexpr const char* Msl() {
-    return R"MSL(
+template<std::size_t... N>
+constexpr auto Concat(const char (&... pieces)[N]) {
+    std::array<char,(N+...)-sizeof...(N)+1> result{};
+    std::size_t at=0;
+    auto append=[&]<std::size_t K>(const char (&part)[K]) {
+        for(std::size_t k=0;k+1<K;++k)result[at++]=part[k];
+    };
+    (append(pieces),...);return result;
+}
+inline constexpr char kMslPrefix[]=R"MSL(
 struct DcVertexFetch { uint4 a0,a1,a2,a3,a4,a5; };
 // A single translation is safe only when the complete record stays inside
 // one guest page, one physical buffer, and its physical byte extent. Boundary
 // records use the original individual typed fetches instead.
-static inline device uint* dc_vertex_record(thread const DcMem& m,ulong a,uint bytes) {
+static inline )MSL";
+inline constexpr char kMslMiddle[]=R"MSL( dc_vertex_record(thread const DcMem& m,ulong a,uint bytes) {
     uint shift=m.map->shift;
     if((a&3ul)!=0ul || shift<14u || shift>21u ||
        ((a^(a+ulong(bytes-1u)))>>shift)!=0ul) return nullptr;
@@ -75,7 +84,8 @@ static inline bool dc_native_vertex_fetch(thread DcVertexFetch& o,thread const D
     if(dc_vbase(d1.x,d1.y)!=base+12ul || dc_vbase(d2.x,d2.y)!=base+16ul ||
        dc_vbase(d3.x,d3.y)!=base+20ul || dc_vbase(d4.x,d4.y)!=base+24ul ||
        (stride==36u && dc_vbase(d5.x,d5.y)!=base+32ul)) return false;
-    device uint* p=dc_vertex_record(m,base+ulong(vertex_index)*ulong(stride),stride);
+    )MSL";
+inline constexpr char kMslSuffix[]=R"MSL( p=dc_vertex_record(m,base+ulong(vertex_index)*ulong(stride),stride);
     if(!p) return false;
     o.a0=uint4(p[0],p[1],p[2],0x3f800000u);
     o.a1=dc_vertex_bytes(p[3]);o.a2=dc_vertex_bytes(p[4]);
@@ -91,5 +101,11 @@ static inline bool dc_native_vertex_fetch(thread DcVertexFetch& o,thread const D
     return true;
 }
 )MSL";
+// Only the guest-memory pointer type changes. The writable specialization
+// retains the exact original source bytes and existing shader cache identity.
+inline constexpr auto kMslWritable=Concat(kMslPrefix,"device uint*",kMslMiddle,"device uint*",kMslSuffix);
+inline constexpr auto kMslReadOnly=Concat(kMslPrefix,"device const uint*",kMslMiddle,"device const uint*",kMslSuffix);
+inline constexpr const char* Msl(bool readonly=false) {
+    return readonly ? kMslReadOnly.data() : kMslWritable.data();
 }
 } // namespace Gpu::Metal::NativeVertexFetch

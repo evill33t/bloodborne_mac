@@ -119,6 +119,11 @@ struct MslOptions {
     // packed records remain GPU-time loads; every failed layout/map guard
     // executes the original individual typed fetches.
     bool native_vertex_fetch = false;
+    // Opt-in immutable access qualification, not a CPU snapshot. Only supported
+    // ordinary VS/PS with an independent opcode-level no-writer proof qualify.
+    // The bounded decoded inline-fetch layout and independently proved native fetch are allowed;
+    // tessellation/probes and SMRD prototypes retain writable inputs.
+    bool readonly_guest_memory = false;
     // Fragment.
     std::array<u32, 32> ps_input_cntl{}; // SPI_PS_INPUT_CNTL_n
     u32 vs_param_mask = 0;               // params the paired VS exports
@@ -176,5 +181,10 @@ bool FragmentSimdSmrdEligible(const Program& p,std::string* failure=nullptr);
 
 // Exact original vertex/fetch hashes and register/opcode/PC contract.
 bool VertexNativeFetchEligible(const Program& p,std::string* failure=nullptr);
+
+// Fully decoded writer-free ordinary VS/PS, including only the proved single
+// branchless inline-fetch layout. Native fetch additionally requires its exact proof.
+// Reflection alone is not a proof; every buffer/image/DS opcode is checked.
+bool GuestMemoryReadOnlyEligible(const Program& p,std::string* failure=nullptr);
 
 } // namespace Gpu::Shader

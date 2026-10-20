@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "gpu/shader/msl_prelude.h"
+#include "gpu/shader/msl_readonly_prelude.h"
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/native_vertex_fetch.h"
@@ -535,6 +536,114 @@ bool ProveNativeVertexFetch(const Program& p,std::string* failure=nullptr) {
     return true;
 }
 
+bool ProveReadOnlyGuestCode(const Program& p,std::string* failure=nullptr) {
+    auto reject=[&](const char* why) {if(failure)*failure=why;return false;};
+    if((p.stage!=Stage::Vertex && p.stage!=Stage::Fragment) || p.code.empty() ||
+       p.code.size()>32768 || !p.unsupported.empty()) return reject("Not an ordinary supported VS/PS");
+    const bool fetched=p.fetch_address || p.fetch_bytes || p.fetch_ud>=0;
+    std::size_t fetch_end=1;
+    if(fetched) {
+        if(p.stage!=Stage::Vertex || !p.fetch_address || p.fetch_ud<0 || p.fetch_ud>14 ||
+           p.num_user_sgprs>16 || u32(p.fetch_ud+1)>=p.num_user_sgprs ||
+           p.fetch_bytes<8 || p.fetch_bytes>16384 || p.code.size()<4)
+            return reject("Incomplete inline-fetch metadata");
+        // The decoder replaced the single one-dword call at main PC8 with a
+        // branchless fetch body and removed its final one-dword return. Admit
+        // this exact two-segment layout, not arbitrary gaps or indirect calls.
+        const auto& prefix=p.code.front();
+        if(prefix.pc!=0 || prefix.size!=2 || prefix.enc!=Enc::SOP1 ||
+           prefix.op!=u16(Sop1::S_MOV_B32) || prefix.dst!=Operand::VccHi ||
+           prefix.src[0]!=Operand::Literal || p.code[1].pc!=kFetchPcBase)
+            return reject("Unexpected inline-fetch call prefix");
+        u32 next_fetch=kFetchPcBase;
+        for(;fetch_end<p.code.size() && p.code[fetch_end].pc>=kFetchPcBase;++fetch_end) {
+            const auto& i=p.code[fetch_end];
+            if(i.pc!=next_fetch || !i.size || i.size>2) return reject("Discontinuous inline fetch");
+            next_fetch+=4u*i.size;
+            const bool descriptor=i.enc==Enc::SMRD && i.op==u16(Smrd::S_LOAD_DWORDX4);
+            const bool load=i.enc==Enc::MUBUF && i.op<=u16(Mubuf::BUFFER_LOAD_FORMAT_XYZW) && !i.lds && !i.tfe;
+            const bool wait=i.enc==Enc::SOPP && i.op==u16(Sopp::S_WAITCNT);
+            if(!descriptor && !load && !wait) return reject("Inline fetch is not a branchless read-only fetch");
+        }
+        if(fetch_end==p.code.size() || p.code[fetch_end].pc!=12 ||
+           p.fetch_bytes!=next_fetch-kFetchPcBase+4u)
+            return reject("Inline-fetch return or resumed main layout mismatch");
+        for(u32 label:p.labels) if(label>=kFetchPcBase) return reject("Branch label enters inline fetch");
+    }
+    if(!p.buffer_writes.empty()) return reject("Reflected buffer writer");
+    for(const auto& image:p.images) if(image.storage) return reject("Storage image");
+    std::set<u32> pcs;
+    bool branches=false;
+    u32 next=0;
+    for(std::size_t k=0;k<p.code.size();++k) {
+        const auto& i=p.code[k];
+        if(fetched && k==1) next=kFetchPcBase;
+        if(fetched && k==fetch_end) next=12;
+        const bool in_fetch=fetched && k>=1 && k<fetch_end;
+        if(i.pc!=next || !i.size || i.size>2 || (!in_fetch && i.pc>=kFetchPcBase) ||
+           !OpName(i.enc,i.op) || pcs.contains(i.pc))
+            return reject("Incomplete or unclassified instruction stream");
+        next=i.pc+4u*i.size;pcs.insert(i.pc);
+        // This is independent of reflection: even a missing/stale writer
+        // descriptor must never turn a buffer store/atomic into a const input.
+        switch(i.enc) {
+        case Enc::MUBUF:
+            if(i.op>u16(Mubuf::BUFFER_LOAD_FORMAT_XYZW) &&
+               !(i.op>=u16(Mubuf::BUFFER_LOAD_UBYTE) && i.op<=u16(Mubuf::BUFFER_LOAD_DWORDX3)))
+                return reject("Buffer store/atomic or unknown buffer opcode");
+            break;
+        case Enc::MTBUF:
+            if(i.op>u16(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW)) return reject("Typed buffer writer");
+            break;
+        case Enc::MIMG:
+            switch(static_cast<Mimg>(i.op)) {
+            case Mimg::IMAGE_LOAD:case Mimg::IMAGE_LOAD_MIP:case Mimg::IMAGE_GET_RESINFO:
+            case Mimg::IMAGE_SAMPLE:case Mimg::IMAGE_SAMPLE_CL:case Mimg::IMAGE_SAMPLE_D:
+            case Mimg::IMAGE_SAMPLE_D_CL:case Mimg::IMAGE_SAMPLE_L:case Mimg::IMAGE_SAMPLE_B:
+            case Mimg::IMAGE_SAMPLE_B_CL:case Mimg::IMAGE_SAMPLE_LZ:case Mimg::IMAGE_SAMPLE_C:
+            case Mimg::IMAGE_SAMPLE_C_CL:case Mimg::IMAGE_SAMPLE_C_D:case Mimg::IMAGE_SAMPLE_C_D_CL:
+            case Mimg::IMAGE_SAMPLE_C_L:case Mimg::IMAGE_SAMPLE_C_B:case Mimg::IMAGE_SAMPLE_C_B_CL:
+            case Mimg::IMAGE_SAMPLE_C_LZ:case Mimg::IMAGE_GATHER4:case Mimg::IMAGE_GATHER4_C:
+            case Mimg::IMAGE_GET_LOD:break;
+            default:return reject("Image store/atomic or unknown image opcode");
+            }
+            break;
+        case Enc::DS:
+            if(i.op!=u16(Ds::DS_SWIZZLE_B32)) return reject("LDS/GDS instruction");
+            break;
+        case Enc::SOP1:
+            switch(static_cast<Sop1>(i.op)) {
+            case Sop1::S_SETPC_B64:case Sop1::S_SWAPPC_B64:case Sop1::S_RFE_B64:
+            case Sop1::S_MOVRELS_B32:case Sop1::S_MOVRELS_B64:
+            case Sop1::S_MOVRELD_B32:case Sop1::S_MOVRELD_B64:case Sop1::S_CBRANCH_JOIN:
+                return reject("Indirect scalar control/register access");
+            default:break;
+            }
+            break;
+        case Enc::SOP2:
+            if(i.op==u16(Sop2::S_CBRANCH_G_FORK)) return reject("Indirect fork");
+            break;
+        case Enc::SOPK:
+            if(i.op==u16(Sopk::S_CBRANCH_I_FORK)) return reject("Indirect fork");
+            break;
+        case Enc::SOPP:
+            branches|=IsBranch(i);
+            if(!IsBranch(i) && i.op!=u16(Sopp::S_ENDPGM) && i.op!=u16(Sopp::S_NOP) &&
+               i.op!=u16(Sopp::S_WAITCNT)) return reject("Unexpected scalar control");
+            break;
+        case Enc::SMRD:case Enc::SOPC:case Enc::VOP1:case Enc::VOP2:
+        case Enc::VOP3:case Enc::VOPC:case Enc::VINTRP:case Enc::EXP:break;
+        default:return reject("Unknown instruction encoding");
+        }
+    }
+    const auto& last=p.code.back();
+    if(last.enc!=Enc::SOPP || last.op!=u16(Sopp::S_ENDPGM) || branches!=p.has_branches)
+        return reject("Missing termination or branch metadata mismatch");
+    for(const auto& i:p.code) if(IsBranch(i) && (!pcs.contains(BranchTarget(i)) || BranchTarget(i)>=kFetchPcBase))
+        return reject("Invalid branch target or branch into inline fetch");
+    return true;
+}
+
 class Emitter {
 public:
     Emitter(const Program& p, const MslOptions& o) : p(p), o(o),
@@ -543,7 +652,11 @@ public:
         direct_smrd(o.direct_smrd && !o.static_smrd && !o.simd_smrd && ProveStaticSmrd(p)),
         simd_smrd(o.simd_smrd && !o.static_smrd && !o.direct_smrd && ProveSimdSmrd(p)),
         native_vertex_fetch(o.native_vertex_fetch && o.tess_stage==TessStage::None && !o.native_tess_layout &&
-            !o.rect_list && !o.points && !o.debug_capture && ProveNativeVertexFetch(p)) {}
+            !o.rect_list && !o.points && !o.debug_capture && ProveNativeVertexFetch(p)),
+        readonly_guest_memory(o.readonly_guest_memory && o.tess_stage==TessStage::None &&
+            !o.native_tess_layout && (!o.native_vertex_fetch || native_vertex_fetch) && !o.rect_list && !o.points &&
+            !o.debug_capture && o.probe_pc==~0u && !o.static_smrd && !o.direct_smrd &&
+            !o.simd_smrd && ProveReadOnlyGuestCode(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -551,6 +664,7 @@ public:
 private:
     // ---- output ----
     void Line(const std::string& s) { body += "    " + s + "\n"; }
+    std::string GuestPointer() const {return readonly_guest_memory ? "device const uint*" : "device uint*";}
     void Unsupported(const Inst& i) {
         const char* n = OpName(i.enc, i.op);
         unsupported.insert(n ? n : "op" + N(i.op));
@@ -741,6 +855,7 @@ private:
     const bool direct_smrd;
     const bool simd_smrd;
     const bool native_vertex_fetch;
+    const bool readonly_guest_memory;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -1058,7 +1173,7 @@ void Emitter::EmitSmrd(const Inst& i) {
         Line(s+" }");return;
     }
     // Scalar loads ignore the low address bits: one translation for all dwords.
-    std::string s = "{ device uint* p_ = dc_ptr_n(mem, (" + base + " + ulong(" + off + ")) & ~3ul, " +
+    std::string s = "{ " + GuestPointer() + " p_ = dc_ptr_n(mem, (" + base + " + ulong(" + off + ")) & ~3ul, " +
                     N(count * 4) + "u);";
     for (u32 k = 0; k < count; ++k) {
         s += " " + SName(static_cast<u16>(i.dst + k)) + " = p_ ? p_[" + N(k) + "] : 0u;";
@@ -1659,7 +1774,7 @@ void Emitter::EmitBuffer(const Inst& i) {
             SetV(i.vdata, "oob_ ? 0u : dc_ld(mem, a_)");
             break;
         }
-        Line("{ device uint* p_ = oob_ || (a_ & 3ul) ? nullptr : dc_ptr_n(mem, a_, " + N(4 * n) + "u);");
+        Line("{ " + GuestPointer() + " p_ = oob_ || (a_ & 3ul) ? nullptr : dc_ptr_n(mem, a_, " + N(4 * n) + "u);");
         for (u32 k = 0; k < n; ++k) {
             SetV(i.vdata + k, "p_ ? p_[" + N(k) + "] : (oob_ ? 0u : dc_ld(mem, a_ + " + N(4 * k) + "ul))");
         }
@@ -2265,12 +2380,12 @@ std::string Emitter::Run() {
         wrapped = body;
     }
 
-    std::string src = kMslPrelude;
+    std::string src = readonly_guest_memory ? kMslReadOnlyPrelude : kMslPrelude;
     if (o.native_tess_layout) src += Gpu::Metal::NativeTessellationMsl();
-    if(native_vertex_fetch) src += Gpu::Metal::NativeVertexFetch::Msl();
+    if(native_vertex_fetch) src += Gpu::Metal::NativeVertexFetch::Msl(readonly_guest_memory);
     src += "\n";
     const std::string mem_params =
-        "constant uint* ud [[buffer(0)]], device uint* gm0 [[buffer(1)]], device uint* gm1 [[buffer(2)]], "
+        "constant uint* ud [[buffer(0)]], " + GuestPointer() + " gm0 [[buffer(1)]], " + GuestPointer() + " gm1 [[buffer(2)]], " +
         "device const DcMap& gmap [[buffer(3)]]";
     if (TessPrep()) {
         src += "kernel void main0(uint dc_patch [[thread_position_in_grid]], " + mem_params +
@@ -2434,9 +2549,27 @@ bool VertexNativeFetchEligible(const Program& p,std::string* failure) {
     return ProveNativeVertexFetch(p,failure);
 }
 
+bool GuestMemoryReadOnlyEligible(const Program& p,std::string* failure) {
+    if(!ProveReadOnlyGuestCode(p,failure)) return false;
+    // BuildProgram reflects resources; translation support is reported by the
+    // emitter. Check the original generator once before caching eligibility.
+    const MslOptions options;
+    Emitter original(p,options);
+    original.Run();
+    if(!original.unsupported.empty()) {
+        if(failure)*failure="Unsupported translated instruction";
+        return false;
+    }
+    return true;
+}
+
 std::string GenerateMsl(const Program& p, const MslOptions& o, std::vector<std::string>* unsupported) {
     Emitter e(p, o);
     std::string src = e.Run();
+    if(o.readonly_guest_memory && !e.unsupported.empty()) {
+        auto fallback=o;fallback.readonly_guest_memory=false;
+        return GenerateMsl(p,fallback,unsupported);
+    }
     if (unsupported) {
         unsupported->assign(e.unsupported.begin(), e.unsupported.end());
     }

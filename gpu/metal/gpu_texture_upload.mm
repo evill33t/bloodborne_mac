@@ -74,7 +74,8 @@ static inline void detile(device const uint* source,device uint* linear,
                       (256ul*layout.pixel_words);
     const ulong total=macro+ulong(micro)*(4ul*layout.pixel_words);
     const bool micro_only=layout.tile==5u || layout.tile==9u || layout.tile==13u;
-    const ulong offset=micro_only ?
+    const ulong offset=(layout.tile==8u || layout.tile==31u) ?
+        (ulong(p.y)*layout.pitch+p.x)*(4ul*layout.pixel_words) : micro_only ?
         (ulong(ty)*((layout.pitch+7u)>>3)+tx)*(256ul*layout.pixel_words)+ulong(micro)*(4ul*layout.pixel_words) :
         (total&255ul)|(ulong(pipe)<<8)|(ulong(bank)<<11)|((total>>8)<<(wide?14u:15u));
     const ulong destination=(layout.destination_offset>>2)+ulong(p.y)*layout.row_words+
@@ -132,7 +133,7 @@ struct GpuTextureUploader::Impl {
     struct Arena {
         id<MTLBuffer> buffer=nil;
         std::uint64_t head=0;
-    } snapshots,scratch,metadata;
+    } snapshots,gpu_snapshots,scratch,metadata;
     id<MTLBuffer> Reserve(Arena& arena,std::uint64_t bytes,MTLResourceOptions options,
                          std::uint64_t& offset,std::uint64_t page_bytes=kStagingPageBytes) {
         const auto begin=(arena.head+255)&~255ull;
@@ -145,7 +146,7 @@ struct GpuTextureUploader::Impl {
     }
     void BeginStaging(id<MTLCommandBuffer> command) {
         if(command==staging_command)return;
-        staging_command=command;snapshots={};scratch={};metadata={};
+        staging_command=command;snapshots={};gpu_snapshots={};scratch={};metadata={};
     }
 };
 
@@ -200,13 +201,25 @@ bool GpuTextureUploader::SupportsFormat(std::uint64_t format) const {
         (impl->extended && impl->device.supportsBCTextureCompression));
 }
 
-GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void* texture_handle,
-                                                     const Upload& upload,InitialHashes* initial_hashes) {
+bool GpuTextureUploader::SupportsGpuSourceTile(std::uint32_t tile) const {
+    return MacroThin(tile) || (impl->extended && MicroThin(tile)) || Liverpool::Tiling::IsLinear(tile);
+}
+GpuTextureUploader::Result GpuTextureUploader::Encode(void* command,void* texture,const Upload& upload,InitialHashes* hashes) {
+    return EncodeImpl(command,texture,upload,hashes,nullptr,0);
+}
+GpuTextureUploader::Result GpuTextureUploader::EncodeGpuSource(void* command,void* texture,const Upload& upload,
+        void* source,std::uint64_t offset) {
+    if(!source)return Result::Fallback;
+    return EncodeImpl(command,texture,upload,nullptr,source,offset);
+}
+GpuTextureUploader::Result GpuTextureUploader::EncodeImpl(void* command_handle,void* texture_handle,
+        const Upload& upload,InitialHashes* initial_hashes,void* gpu_source_handle,std::uint64_t gpu_source_offset) {
     if(initial_hashes)*initial_hashes={};
     if(!Ready())return Result::Fallback;
     impl->error.clear();
     auto command=(__bridge id<MTLCommandBuffer>)command_handle;
     auto texture=(__bridge id<MTLTexture>)texture_handle;
+    auto gpu_source=(__bridge id<MTLBuffer>)gpu_source_handle;
     const auto bytes_per_pixel=BytesPerElement(texture.pixelFormat);
     const auto block=BlockExtent(texture.pixelFormat);
     const auto reject=[&](const char* reason){impl->error=reason;return Result::Fallback;};
@@ -215,6 +228,9 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
        command.status>=MTLCommandBufferStatusCommitted || texture.framebufferOnly ||
        texture.storageMode==MTLStorageModeMemoryless || !SupportsFormat(texture.pixelFormat))
         return reject("GPU texture upload has an unsupported Metal destination or command buffer.");
+    if(gpu_source && (gpu_source.device!=impl->device || (gpu_source_offset&3) || (upload.bytes&3) ||
+       gpu_source_offset>gpu_source.length || upload.bytes>gpu_source.length-gpu_source_offset))
+        return reject("GPU texture snapshot source buffer range is invalid.");
     const bool array=texture.textureType==MTLTextureType2DArray;
     if(!array && texture.textureType!=MTLTextureType2D)
         return reject("GPU texture upload supports only 2D images and arrays.");
@@ -234,7 +250,7 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
     for(const auto& level:upload.levels) {
         const auto width_el=(level.width+block-1)/block,height_el=(level.height+block-1)/block;
         if(level.level>=levels || level.slice>=slices ||
-           !(MacroThin(level.tile) || (impl->extended && MicroThin(level.tile))) ||
+           !(gpu_source ? SupportsGpuSourceTile(level.tile) : (MacroThin(level.tile) || (impl->extended && MicroThin(level.tile)))) ||
            level.width!=std::max<NSUInteger>(texture.width>>level.level,1) ||
            level.height!=std::max<NSUInteger>(texture.height>>level.level,1) ||
            level.pitch<width_el || level.pitch>16384 || level.src_offset%bytes_per_pixel)
@@ -276,13 +292,13 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
     impl->BeginStaging(command);
     {
         StutterTrace::Scope timing("texture_gpu_snapshot_allocate",0,source_address,upload.bytes,1);
-        snapshot=impl->Reserve(impl->snapshots,upload.bytes,MTLResourceStorageModeShared,snapshot_offset);
+        snapshot=impl->Reserve(gpu_source ? impl->gpu_snapshots : impl->snapshots,upload.bytes,gpu_source ? MTLResourceStorageModePrivate : MTLResourceStorageModeShared,snapshot_offset);
     }
     {
         StutterTrace::Scope timing("texture_gpu_scratch_allocate",0,source_address,scratch_bytes,1);
         scratch=impl->Reserve(impl->scratch,scratch_bytes,MTLResourceStorageModePrivate,scratch_offset);
     }
-    if(!snapshot || !snapshot.contents || !scratch)
+    if(!snapshot || (!gpu_source && !snapshot.contents) || !scratch)
         return reject("GPU texture upload could not allocate its immutable snapshot and scratch.");
     if(packed) {
         StutterTrace::Scope timing("texture_gpu_job_metadata",0,source_address,packed_jobs.size(),1);
@@ -297,21 +313,21 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
         std::memcpy(static_cast<unsigned char*>(metadata.contents)+metadata_offset,
             packed_jobs.data(),packed_jobs.size()*sizeof(PackedJob));
     }
-    auto* snapshot_bytes=static_cast<unsigned char*>(snapshot.contents)+snapshot_offset;
+    auto* snapshot_bytes=gpu_source ? nullptr : static_cast<unsigned char*>(snapshot.contents)+snapshot_offset;
     mach_vm_size_t copied=0;
-    kern_return_t copy_result;
+    kern_return_t copy_result=KERN_SUCCESS;
     bool mapped_copy=false;
-    {
+    if(!gpu_source) {
         StutterTrace::Scope timing("texture_gpu_source_copy",0,source_address,upload.bytes,1);
         if(impl->mapped_snapshot)mapped_copy=runtime_gpu_memory_snapshot(source_address,snapshot_bytes,upload.bytes)!=0;
         if(mapped_copy) {copy_result=KERN_SUCCESS;copied=upload.bytes;}
         else copy_result=mach_vm_read_overwrite(mach_task_self(),reinterpret_cast<mach_vm_address_t>(upload.source),
                 upload.bytes,reinterpret_cast<mach_vm_address_t>(snapshot_bytes),&copied);
     }
-    if(copy_result!=KERN_SUCCESS || copied!=upload.bytes)
+    if(!gpu_source && (copy_result!=KERN_SUCCESS || copied!=upload.bytes))
         return reject("GPU texture upload source snapshot was not readable.");
     std::vector<std::uint64_t> snapshot_chunks;
-    if(initial_hashes) {
+    if(initial_hashes && !gpu_source) {
         StutterTrace::Scope timing("texture_gpu_snapshot_hash",0,source_address,upload.bytes,1);
         snapshot_chunks=ContentHash::Chunks(snapshot_bytes,upload.bytes);
         initial_hashes->bytes_hashed=upload.bytes;
@@ -319,9 +335,19 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
 
     // All validation, allocation and the one CPU snapshot finish before the
     // first encoder. Resource retention belongs to this existing command buffer.
+    if(gpu_source) {
+        auto copy=[command blitCommandEncoder];
+        if(!copy)return reject("GPU texture snapshot could not create its source copy encoder.");
+        [copy copyFromBuffer:gpu_source sourceOffset:gpu_source_offset toBuffer:snapshot
+            destinationOffset:snapshot_offset size:upload.bytes];
+        [copy endEncoding];
+    }
     StutterTrace::Scope compute_timing("texture_gpu_compute_encode",0,source_address,upload.bytes,1);
     auto compute=[command computeCommandEncoder];
-    if(!compute)return reject("GPU texture upload could not create its compute encoder.");
+    if(!compute) {
+        impl->error="GPU texture upload could not create its compute encoder.";
+        return gpu_source ? Result::Failed : Result::Fallback;
+    }
     [compute setComputePipelineState:packed ? impl->packed_pipeline : impl->pipeline];
     [compute setBuffer:snapshot offset:0 atIndex:0];
     [compute setBuffer:scratch offset:0 atIndex:1];
@@ -356,8 +382,10 @@ GpuTextureUploader::Result GpuTextureUploader::Encode(void* command_handle,void*
     ++impl->stats.uploads;impl->stats.jobs+=jobs.size();
     impl->stats.compute_dispatches+=packed ? 1 : jobs.size();
     impl->stats.packed_uploads+=packed;
-    if(mapped_copy) {++impl->stats.mapped_snapshots;impl->stats.mapped_bytes+=upload.bytes;}
-    else {++impl->stats.mach_snapshots;impl->stats.mach_bytes+=upload.bytes;}
+    if(!gpu_source) {
+        if(mapped_copy) {++impl->stats.mapped_snapshots;impl->stats.mapped_bytes+=upload.bytes;}
+        else {++impl->stats.mach_snapshots;impl->stats.mach_bytes+=upload.bytes;}
+    }
     return Result::Encoded;
 }
 } // namespace Gpu::Metal

@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "gpu/metal/native_indirect.h"
+#include "gpu/metal/native_worklist_extent.h"
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_renderer.h"
 #include "gpu/liverpool/command_processor.h"
@@ -39,6 +40,10 @@ struct ProbeRenderer final:Renderer {
     void Dispatch(const RegFile& r,u32,u32,u32) override {observed=r;}
     bool delay_signals=false;
     std::vector<std::function<void()>> signals;
+    unsigned announced_cpu_writes=0;
+    void SignalCpuWrite(GuestAddr,std::size_t,std::function<void()> done) override {
+        ++announced_cpu_writes;Signal(std::move(done));
+    }
     bool DrawIndirect(const RegFile&,const DrawCall&,GuestAddr a,const std::function<bool(GuestAddr,std::size_t)>& ready) override {
         if(!accept || (ready && !ready(a,16)))return false;++native_draws;address=a;return true;
     }
@@ -126,6 +131,7 @@ static void Cpu(u64 address,u64 alias) {
         Packet(q,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(selector<<29),1,0});
         Packet(q,Op::DispatchIndirect,{0,1});Execute(pending,q);
         assert(pending.waits==1 && pending.native_dispatches==0 && pending.signals.empty());
+        assert(pending.announced_cpu_writes==1);
     }
     puts("indirect CPU: range/packet admission, drained register state and zero-instance cases passed");
 }
@@ -152,6 +158,8 @@ static std::array<unsigned char,4> Pixel(Gpu::Metal::Device& device,Gpu::Metal::
 }
 static void GpuCases(u64 address,u64 alias) {
     setenv("BB_METAL_NATIVE_INDIRECT","1",1);
+    setenv("BB_METAL_NATIVE_WORKLIST_EXTENT","1",1);
+    setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","0",1);
     using namespace Gpu::Shader::Gcn;
     auto* base=reinterpret_cast<unsigned char*>(address);
     // Mapped code allows real queued DMA code/fetch overwrite regressions.
@@ -485,6 +493,540 @@ static void GpuCases(u64 address,u64 alias) {
         assert(renderer.DrawIndirect(from_table,DrawCall{},address+32)); // independent blue payload
     });
     pixel=Pixel(device,renderer,address+16384);assert(pixel[0]==255 && pixel[1]==0);
+
+    // An inactive vector definition does not replace a retained value. The
+    // same cached kernel runs first with z=1, then z=32. Its second dispatch
+    // actually writes offset1984 into the sampled centre texel, beyond the
+    // first context's1008 bound. The producer footprint must use exact group
+    // dimensions and protect that tail while still admitting unrelated blue.
+    const u32 exec_off=0xbe800000u|(u32(Operand::ExecLo)<<16)|
+        (u32(Sop1::S_MOV_B64)<<8)|Operand::Zero;
+    const u32 exec_on=0xbe800000u|(u32(Operand::ExecLo)<<16)|
+        (u32(Sop1::S_MOV_B64)<<8)|(Operand::IntPosMax+1);
+    const u32 dynamic_writer[]{v2(Vop::V_LSHLREV_B32,2,Operand::Zero+6,2),exec_off,
+        v2(Vop::V_AND_B32,0,Operand::Zero+63,0),v2(Vop::V_LSHLREV_B32,2,Operand::Zero+4,0),
+        exec_on,vmov(1,Operand::Zero),vmov(3,Operand::Zero+23),
+        0xe0003000u|(u32(Mubuf::BUFFER_ATOMIC_ADD)<<18),0x80000301u,0xbf810000};
+    std::memcpy(shader+1024,dynamic_writer,sizeof(dynamic_writer));
+    auto dynamic_compute=compute;
+    dynamic_compute[Reg::COMPUTE_PGM_LO]=u32(uintptr_t(shader+1024)>>8);
+    dynamic_compute[Reg::COMPUTE_PGM_RSRC2]=(4u<<1)|(2u<<11);
+    const u64 dynamic_base=centre-1984;
+    dynamic_compute[Reg::COMPUTE_USER_DATA_0]=u32(dynamic_base);
+    dynamic_compute[Reg::COMPUTE_USER_DATA_0+1]=u32(dynamic_base>>32)|(4u<<16);
+    dynamic_compute[Reg::COMPUTE_USER_DATA_0+2]=1;
+    dynamic_compute[Reg::COMPUTE_USER_DATA_0+3]=0x24004;
+    renderer.Dispatch(dynamic_compute,1,1,1);Drain(renderer); // code/cache warmup
+    const std::array<u32,128> clear_texture{};
+    renderer.CpuWrite(address+32768,clear_texture.data(),sizeof(clear_texture),false);
+    dynamic_compute[Reg::COMPUTE_NUM_THREAD_X]=64;
+    guarded([&] {
+        renderer.Dispatch(dynamic_compute,1,1,1);
+        assert(renderer.DrawIndirect(sampled,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==0);
+    // Match the normal frame boundary between uploaded texture versions.
+    // GetTexture currently reuses an upload within one frame even after a
+    // raw GPU buffer write; that separate coherence gap must not be hidden
+    // by a CPU rewrite or by weakening the retained-offset admission checks.
+    pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==0 && pixel[1]==0 && pixel[0]==0);
+    dynamic_compute[Reg::COMPUTE_NUM_THREAD_X]=1;
+    dynamic_compute[Reg::COMPUTE_NUM_THREAD_Z]=32;
+    guarded([&] {
+        renderer.Dispatch(dynamic_compute,1,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==23);
+    renderer.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    if(pixel[2]!=23 || pixel[1]!=0 || pixel[0]!=0)
+        std::fprintf(stderr,"dynamic-offset sample BGRA=%u,%u,%u,%u guestcentre=%#x prev=%#x next=%#x\n",
+            pixel[0],pixel[1],pixel[2],pixel[3],*reinterpret_cast<const u32*>(centre),
+            *reinterpret_cast<const u32*>(centre-4),*reinterpret_cast<const u32*>(centre+4));
+    assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+    // Separate original SAME-FRAME regression: the first admitted shape
+    // uploads zeros. The second queued producer writes23, then completes and
+    // is pruned before setup. No Flip or host texel rewrite is allowed between
+    // versions: the journal must invalidate that already uploaded texture.
+    renderer.CpuWrite(address+32768,clear_texture.data(),sizeof(clear_texture),false);
+    dynamic_compute[Reg::COMPUTE_NUM_THREAD_X]=64;dynamic_compute[Reg::COMPUTE_NUM_THREAD_Z]=1;
+    guarded([&] {
+        renderer.Dispatch(dynamic_compute,1,1,1);
+        assert(renderer.DrawIndirect(sampled,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==0);
+    dynamic_compute[Reg::COMPUTE_NUM_THREAD_X]=1;dynamic_compute[Reg::COMPUTE_NUM_THREAD_Z]=32;
+    guarded([&] {
+        renderer.Dispatch(dynamic_compute,1,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==23);
+    const auto full_before=renderer.TextureCoherenceRefreshCount();
+    renderer.Draw(sampled,DrawCall{.count=3});
+    assert(renderer.TextureCoherenceRefreshCount()==full_before+1);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+    // Completed host writes through another VA must invalidate the same
+    // physical texture, while unrelated writes retain the no-hash/no-wait
+    // same-frame path.
+    renderer.Draw(sampled,DrawCall{.count=3});
+    const u32 red47=0xff00002fu;
+    renderer.CpuWrite(texture_alias+(centre-address),&red47,4,false);
+    renderer.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+    renderer.Draw(sampled,DrawCall{.count=3});
+    const auto unrelated_full=renderer.TextureCoherenceRefreshCount(),unrelated_wait=renderer.TextureCoherenceWaitCount();
+    assert(renderer.DmaData(0,address+64000,2,0,16));
+    renderer.Draw(sampled,DrawCall{.count=3});
+    assert(renderer.TextureCoherenceRefreshCount()==unrelated_full && renderer.TextureCoherenceWaitCount()==unrelated_wait);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+
+    // A real CP EOP fence stores from the asynchronous callback worker. Its
+    // physical alias marker and Signal must be published atomically, and the
+    // CPU texture read must await BOTH GPU completion and the actual callback.
+    {
+        renderer.Draw(sampled,DrawCall{.count=3});
+        auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+        [blocker encodeWaitForEvent:event value:1];[blocker commit];
+        CommandProcessor cp;cp.SetRenderer(&renderer);
+        const u64 destination=texture_alias+(centre-address);const u32 red71=0xff000047u;
+        std::vector<u32> fence;
+        Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),red71,0});
+        cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+        const auto waits=renderer.TextureCoherenceWaitCount();
+        std::jthread release([event]{std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;});
+        renderer.Draw(sampled,DrawCall{.count=3});release.join();
+        assert(renderer.TextureCoherenceWaitCount()==waits+1 && *reinterpret_cast<const u32*>(centre)==red71);
+        pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==71 && pixel[1]==0 && pixel[0]==0);
+
+        // Two bytes force the CP's host DMA fallback, preserving alpha and
+        // copying through CpuWrite rather than silently bypassing the journal.
+        renderer.Draw(sampled,DrawCall{.count=3});
+        const u16 red90=90;renderer.CpuWrite(address+72000,&red90,2,false);
+        std::vector<u32> dma;
+        Packet(dma,Op::DmaData,{0,u32(address+72000),u32((address+72000)>>32),
+            u32(destination),u32(destination>>32),2});
+        cp.SubmitGraphics({{{dma.data(),dma.size()},{}}});cp.WaitIdle();
+        renderer.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+        assert(pixel[2]==90 && pixel[1]==0 && pixel[0]==0 && !cp.Execution()->Failed());
+    }
+    renderer.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+
+    // A cold two-chunk texture is changed only in the SECOND64KiB chunk.
+    // The ordinary rotating cold check would inspect chunk0 and miss it.
+    // Completed write history must force a complete content check even after
+    // Flip, without waiting an already completed producer.
+    u64 large_physical=0;assert(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),131072,16384,0,&large_physical));
+    uintptr_t large_address=0,large_alias=0;
+    assert(!runtime_gpu_memory_map(&large_address,131072,3,0,large_physical,16384));
+    assert(!runtime_gpu_memory_map(&large_alias,131072,3,0,large_physical,16384));
+    std::vector<u32> large_pixels(32768,0xff000000u);
+    renderer.CpuWrite(large_address,large_pixels.data(),large_pixels.size()*4,false);
+    auto large_sample=sampled;
+    const u32 large_texture[]{u32(large_address>>8),u32(large_address>>40)|(10u<<20),
+        255u|(127u<<14),0x90800fac,255u<<13,0,0,0};
+    for(unsigned k=0;k<8;++k)large_sample[Reg::SPI_SHADER_USER_DATA_PS_0+k]=large_texture[k];
+    renderer.Draw(large_sample,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==0 && pixel[1]==0 && pixel[0]==0);
+    const u64 large_centre=large_address+64*1024+128*4;
+    assert(renderer.DmaData(0,large_alias+(large_centre-large_address),2,0xff000079u,4));Drain(renderer);
+    const auto completed_waits=renderer.TextureCoherenceWaitCount();
+    renderer.Draw(large_sample,DrawCall{.count=3});
+    assert(renderer.TextureCoherenceWaitCount()==completed_waits);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==121 && pixel[1]==0 && pixel[0]==0);
+    assert(renderer.DmaData(0,large_centre,2,0xff000089u,4));Drain(renderer);
+    for(u32 k=0;k<513;++k)renderer.CpuWrite(address+72000,&k,4,false);
+    const auto forgotten_full=renderer.TextureCoherenceRefreshCount();
+    renderer.Draw(large_sample,DrawCall{.count=3});
+    assert(renderer.TextureCoherenceRefreshCount()==forgotten_full+1);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==137 && pixel[1]==0 && pixel[0]==0);
+
+    // A fence destination that was disjoint may become the texture's backing
+    // after remap. Its epoch was already observed, so mapping generation must
+    // independently force full content and deferred-callback readiness.
+    u64 remap_physical=0;assert(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),32768,16384,0,&remap_physical));
+    uintptr_t remap_address=0,fence_alias=0;
+    assert(!runtime_gpu_memory_map(&remap_address,16384,3,0,remap_physical,16384));
+    assert(!runtime_gpu_memory_map(&fence_alias,16384,3,0,remap_physical+16384,16384));
+    std::array<u32,128> remap_pixels{};remap_pixels.fill(0xff000000u);
+    renderer.CpuWrite(remap_address,remap_pixels.data(),sizeof(remap_pixels),false);
+    renderer.CpuWrite(fence_alias,remap_pixels.data(),sizeof(remap_pixels),false);
+    auto remap_sample=sampled;
+    for(unsigned k=0;k<8;++k)remap_sample[Reg::SPI_SHADER_USER_DATA_PS_0+k]=texture[k];
+    remap_sample[Reg::SPI_SHADER_USER_DATA_PS_0]=u32(remap_address>>8);
+    remap_sample[Reg::SPI_SHADER_USER_DATA_PS_0+1]=u32(remap_address>>40)|(10u<<20);
+    renderer.Draw(remap_sample,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==0 && pixel[1]==0 && pixel[0]==0);
+    {
+        CommandProcessor cp;cp.SetRenderer(&renderer);
+        auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+        [blocker encodeWaitForEvent:event value:1];[blocker commit];
+        const u64 destination=fence_alias+(centre-address-32768);const u32 red105=0xff000069u;
+        std::vector<u32> fence;
+        Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),red105,0});
+        cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+        renderer.Draw(remap_sample,DrawCall{.count=3}); // source stilldisjoint: observe fenceepoch
+        const auto old_address=remap_address;
+        assert(!runtime_gpu_memory_map(&remap_address,16384,3,0x10,remap_physical+16384,16384));
+        assert(remap_address==old_address);
+        const auto waits=renderer.TextureCoherenceWaitCount();
+        std::jthread release([event]{std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;});
+        renderer.Draw(remap_sample,DrawCall{.count=3});release.join();
+        assert(renderer.TextureCoherenceWaitCount()==waits+1);
+        pixel=Pixel(device,renderer,address+16384);assert(pixel[2]==105 && pixel[1]==0 && pixel[0]==0);
+        assert(*reinterpret_cast<const u32*>(remap_address+(centre-address-32768))==red105 && !cp.Execution()->Failed());
+    }
+    renderer.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+
+    // A complete semantic assembly of the 15-instruction scatter kernel.
+    // No retail byte array is embedded: every word is assembled from the
+    // public decoder's instruction fields and checked against production's
+    // full identity/semantic matcher before using the refinement.
+    namespace Worklist=Gpu::Metal::NativeWorklist;
+    const auto sop1=[](Sop1 op,u32 dst,u32 src) {
+        return 0xbe800000u|(dst<<16)|(u32(op)<<8)|src;
+    };
+    const auto compare=[](u32 op,u32 first,u32 second) {
+        return 0x7c000000u|(op<<17)|(second<<9)|first;
+    };
+    const auto scalar=[](Sopp op,u32 immediate=0) {
+        return 0xbf800000u|(u32(op)<<16)|immediate;
+    };
+    std::vector<u32> scatter{sop1(Sop1::S_MOV_B32,Operand::VccHi,Operand::Literal),12,vmov(1,16)};
+    const auto buffer=[&](Mubuf op,u32 data,u32 descriptor,u32 index) {
+        scatter.push_back(0xe0002000u|(u32(op)<<18));
+        scatter.push_back(0x80000000u|((descriptor/4)<<16)|(data<<8)|index);
+    };
+    buffer(Mubuf::BUFFER_LOAD_FORMAT_XYZ,1,8,1);
+    scatter.insert(scatter.end(),{scalar(Sopp::S_WAITCNT,0xf70),compare(0xc6,Operand::Vgpr0+3,0),
+        sop1(Sop1::S_AND_SAVEEXEC_B64,0,Operand::VccLo),v2(Vop::V_ADD_I32,2,Operand::Vgpr0,2),
+        scalar(Sopp::S_CBRANCH_EXECZ,8)});
+    buffer(Mubuf::BUFFER_LOAD_FORMAT_X,2,4,2);
+    scatter.insert(scatter.end(),{v2(Vop::V_ADD_I32,0,Operand::Vgpr0,1),compare(0xc4,14,0),
+        sop1(Sop1::S_AND_SAVEEXEC_B64,0,Operand::VccLo),scalar(Sopp::S_WAITCNT,0xf70)});
+    buffer(Mubuf::BUFFER_STORE_FORMAT_X,2,12,0);scatter.push_back(scalar(Sopp::S_ENDPGM));
+    std::memcpy(shader+1152,scatter.data(),scatter.size()*4);
+    auto worklist=compute;worklist[Reg::COMPUTE_PGM_LO]=u32(uintptr_t(shader+1152)>>8);
+    worklist[Reg::COMPUTE_PGM_RSRC2]=0xa0;
+    worklist[Reg::COMPUTE_NUM_THREAD_X]=64;
+    worklist[Reg::COMPUTE_NUM_THREAD_Y]=worklist[Reg::COMPUTE_NUM_THREAD_Z]=1;
+    const u64 work_table=address+73000,work_destination=address+30000,work_source=address+80000;
+    const auto work_descriptor=[&](u32 ud,u64 at,u32 stride,u32 count,u32 format) {
+        worklist[Reg::COMPUTE_USER_DATA_0+ud]=u32(at);
+        worklist[Reg::COMPUTE_USER_DATA_0+ud+1]=u32(at>>32)|(stride<<16);
+        worklist[Reg::COMPUTE_USER_DATA_0+ud+2]=count;
+        worklist[Reg::COMPUTE_USER_DATA_0+ud+3]=format;
+    };
+    work_descriptor(4,work_source,4,64,0x24004);
+    work_descriptor(8,work_table,12,1,0x6c1ac);
+    work_descriptor(12,work_destination,4,16000,0x24004);
+    const auto scatter_program=Gpu::Shader::BuildProgram({.stage=Gpu::Shader::Stage::Compute,
+        .address=uintptr_t(shader+1152),.user_data=worklist.UserData(Reg::COMPUTE_USER_DATA_0),
+        .num_user_sgprs=16,.vgpr_comp_cnt=0,.code=scatter.data(),.compute_rsrc2=0xa0});
+    assert(scatter_program && Worklist::Matches(*scatter_program));
+    std::array<u32,64> work_payload;work_payload.fill(23);work_payload[1]=31;
+    renderer.CpuWrite(work_source,work_payload.data(),sizeof(work_payload),false);
+    const auto work_job=[&](u64 destination,u32 last=0) {
+        assert(destination>=work_destination && (destination-work_destination)%4==0);
+        return Worklist::Job{u32((destination-work_destination)/4),0,last};
+    };
+    auto job=work_job(centre);renderer.CpuWrite(work_table,&job,sizeof(job),false);
+    renderer.Dispatch(worklist,1,1,1);Drain(renderer); // warm complete program
+    const u32 work_zero=0;renderer.CpuWrite(centre,&work_zero,4,false);
+    guarded([&] {
+        renderer.Dispatch(worklist,1,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+        // Its old full V# spans both this texture's descriptor and pixels.
+        // The proved actual scatter destination does not overlap either.
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==23);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[0]==255 && pixel[1]==0 && pixel[2]==0);
+    renderer.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+    auto captured_layout=worklist;
+    captured_layout[Reg::COMPUTE_USER_DATA_0+9]|=0xb000;
+    captured_layout[Reg::COMPUTE_USER_DATA_0+13]|=0x8000;
+    guarded([&] {
+        renderer.Dispatch(captured_layout,1,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+
+    // The retained Dream inventory includes1112 groups and a second exact
+    // destination flag pattern. All input records must be read/protected,
+    // including a distinct final record beyond the former512-job bound.
+    constexpr u32 many_groups=1112;
+    std::vector<Worklist::Job> many_jobs(many_groups);
+    many_jobs[0]=work_job(centre);
+    for(u32 k=1;k<many_groups;++k)many_jobs[k]=work_job(address+70400+4*(k-1));
+    many_jobs.back().source=1;
+    const u64 many_table=address+50000,last_destination=address+70400+4*(many_groups-2);
+    renderer.CpuWrite(many_table,many_jobs.data(),many_jobs.size()*sizeof(Worklist::Job),false);
+    renderer.CpuWrite(centre,&work_zero,4,false);renderer.CpuWrite(last_destination,&work_zero,4,false);
+    auto many_worklist=captured_layout;
+    many_worklist[Reg::COMPUTE_USER_DATA_0+8]=u32(many_table);
+    many_worklist[Reg::COMPUTE_USER_DATA_0+9]=u32(many_table>>32)|0x000cb000;
+    many_worklist[Reg::COMPUTE_USER_DATA_0+10]=many_groups;
+    many_worklist[Reg::COMPUTE_USER_DATA_0+13]=u32(work_destination>>32)|0x0004b000;
+    guarded([&] {
+        renderer.Dispatch(many_worklist,many_groups,1,1);
+        assert(!renderer.DrawIndirect(sampled,DrawCall{},address+32));
+        assert(renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(centre)==23);
+    assert(*reinterpret_cast<const u32*>(last_destination)==31);
+    pixel=Pixel(device,renderer,address+16384);assert(pixel[0]==255 && pixel[1]==0 && pixel[2]==0);
+    renderer.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,renderer,address+16384);
+    assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+    // Lease mutable worklist bytes on the actual producer command. Same-VA
+    // and physical-alias host rewrites must wait. An empty clipped write set
+    // still needs this lease, since the rewrite can activate a later job.
+    for(unsigned variant=0;variant<3;++variant) {
+        const u64 first=address+70400,second=address+70656;
+        auto before=work_job(first),after=work_job(second);
+        if(variant==2)before.destination=16000;
+        renderer.CpuWrite(first,&work_zero,4,false);renderer.CpuWrite(second,&work_zero,4,false);
+        renderer.CpuWrite(work_table,&before,sizeof(before),false);
+        auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+        [blocker encodeWaitForEvent:event value:1];[blocker commit];
+        renderer.Dispatch(worklist,1,1,1);
+        const auto waits=renderer.IndirectCpuWriteWaitCount();
+        std::jthread release([event] {std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;});
+        renderer.CpuWrite((variant==1 ? texture_alias : address)+73000,&after,sizeof(after),false);
+        release.join();Drain(renderer);
+        assert(renderer.IndirectCpuWriteWaitCount()==waits+1);
+        assert(*reinterpret_cast<const u32*>(first)==(variant==2 ? 0u : 23u));
+        assert(*reinterpret_cast<const u32*>(second)==0);
+        renderer.Dispatch(worklist,1,1,1);Drain(renderer);
+        assert(*reinterpret_cast<const u32*>(second)==23);
+    }
+    // A mapping mutation must likewise retire the read lease before removing
+    // a worklist alias. The output is written through the remaining mapping.
+    uintptr_t work_alias=0;
+    assert(!runtime_gpu_memory_map(&work_alias,131072,3,0,alias_physical,16384));
+    job=work_job(address+70912);renderer.CpuWrite(work_table,&job,sizeof(job),false);
+    renderer.CpuWrite(address+70912,&work_zero,4,false);
+    auto alias_worklist=worklist;
+    alias_worklist[Reg::COMPUTE_USER_DATA_0+8]=u32(work_alias+73000);
+    alias_worklist[Reg::COMPUTE_USER_DATA_0+9]=u32((work_alias+73000)>>32)|(12u<<16);
+    auto work_gate=[metal newSharedEvent];auto work_blocker=[queue commandBuffer];
+    [work_blocker encodeWaitForEvent:work_gate value:1];[work_blocker commit];
+    renderer.Dispatch(alias_worklist,1,1,1);
+    const auto work_mutation_waits=renderer.IndirectCpuWriteWaitCount();
+    std::jthread work_release([work_gate] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));work_gate.signaledValue=1;
+    });
+    assert(!unmap(reinterpret_cast<void*>(work_alias),131072));work_release.join();Drain(renderer);
+    assert(renderer.IndirectCpuWriteWaitCount()==work_mutation_waits+1);
+    assert(*reinterpret_cast<const u32*>(address+70912)==23);
+    // Input self-modification and an earlier queued GPU table writer must
+    // leave the original conservative output span intact, transactionally.
+    job=work_job(work_table);renderer.CpuWrite(work_table,&job,sizeof(job),false);
+    guarded([&] {
+        renderer.Dispatch(worklist,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(work_table)==23);
+    job=work_job(address+70400);renderer.CpuWrite(work_table,&job,sizeof(job),false);
+    guarded([&] {
+        assert(renderer.DmaData(0,texture_alias+73000,2,job.destination,4));
+        renderer.Dispatch(worklist,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    // CPU EOP callbacks use the CP readiness predicate, independently of the
+    // GPU writer registry. A pending alias store must also refuse refinement.
+    {
+        CommandProcessor cp;cp.SetRenderer(&renderer);
+        auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+        [blocker encodeWaitForEvent:event value:1];[blocker commit];
+        std::vector<u32> fence;const u64 destination=texture_alias+73000;
+        Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),job.destination,0});
+        cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+        renderer.Dispatch(worklist,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+        event.signaledValue=1;Drain(renderer);assert(!cp.Execution()->Failed());
+    }
+    renderer.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+    // A missing worklist record returns XYZ zero, yet lane0 still stores to
+    // output index0. count<groups must not be mistaken for an empty job.
+    renderer.CpuWrite(work_destination,&work_zero,4,false);
+    guarded([&] {
+        renderer.Dispatch(worklist,2,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(work_destination)==23);
+    // Unknown hardware layout flags are not admitted merely because the
+    // current MSL ignores them. Preserve the original full writer footprint.
+    auto flagged_worklist=worklist;
+    flagged_worklist[Reg::COMPUTE_USER_DATA_0+9]|=0x4000;
+    guarded([&] {
+        renderer.Dispatch(flagged_worklist,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    // uint destination+lane wraps BEFORE idx<count. Reject refinement even
+    // if the first destination is OOB: lane1 wraps to0 and actually writes.
+    job={UINT32_MAX,0,1};renderer.CpuWrite(work_table,&job,sizeof(job),false);
+    renderer.CpuWrite(work_destination,&work_zero,4,false);
+    guarded([&] {
+        renderer.Dispatch(worklist,1,1,1);
+        assert(!renderer.DrawIndirect(from_table,DrawCall{},address+32));
+    });
+    assert(*reinterpret_cast<const u32*>(work_destination)==31);
+    puts("worklist GPU: exact scatter, disjoint admission, affected rejection, alias/empty leases, self-modification, OOB record and uint wrap passed");
+
+    // The opt-in texture path must preserve real producer->snapshot->sample
+    // order without draining the CPU. Use a separate renderer so every older
+    // flag-OFF rejection above remains a regression of the reference path.
+    Drain(renderer);
+    setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","1",1);
+    {
+        Gpu::Metal::MetalRenderer snapshot(device);
+        assert(runtime_gpu_memory_set_mutation_hooks(&snapshot,
+            [](void* p)->int{return static_cast<Gpu::Metal::MetalRenderer*>(p)->BeginGuestMemoryMutation();},
+            [](void* p){static_cast<Gpu::Metal::MetalRenderer*>(p)->EndGuestMemoryMutation();}));
+        auto snapshot_compute=compute;
+        snapshot_compute[Reg::COMPUTE_USER_DATA_0]=u32(centre);
+        snapshot_compute[Reg::COMPUTE_USER_DATA_0+1]=u32(centre>>32)|(4u<<16);
+        snapshot_compute[Reg::COMPUTE_USER_DATA_0+2]=1;
+        snapshot_compute[Reg::COMPUTE_USER_DATA_0+3]=0x24004;
+        auto snapshot_second=sampled;
+        snapshot_second[Reg::CB_COLOR0_BASE]=u32((address+20480)>>8);
+        const u32 black=0xff000000u,red47=0xff00002fu;
+        snapshot.CpuWrite(centre,&black,4,false);
+        snapshot.Draw(sampled,DrawCall{.count=3});
+        snapshot.Draw(snapshot_second,DrawCall{.count=3});Drain(snapshot);
+        snapshot.Dispatch(snapshot_compute,1,1,1);Drain(snapshot); // cache the original raw writer
+        snapshot.CpuWrite(centre,&black,4,false);
+        snapshot.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==0 && pixel[1]==0 && pixel[0]==0);
+        snapshot.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+        const auto snapshot_blocked=[&](auto&& work) {
+            auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+            [blocker encodeWaitForEvent:event value:1];[blocker commit];
+            std::atomic<bool> timeout=false;
+            std::jthread watchdog([event,&timeout](std::stop_token stop) {
+                for(unsigned k=0;k<300 && !stop.stop_requested();++k)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if(!stop.stop_requested()){timeout=true;event.signaledValue=1;}
+            });
+            work();event.signaledValue=1;watchdog.request_stop();watchdog.join();
+            Drain(snapshot);assert(!timeout);
+        };
+        const auto first_snapshots=snapshot.TextureGpuSnapshotCount();
+        const auto first_waits=snapshot.TextureCoherenceWaitCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==first_snapshots+1);
+            assert(snapshot.TextureCoherenceWaitCount()==first_waits);
+        });
+        assert(*reinterpret_cast<const u32*>(centre)==23);
+        pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        // Flip completed the producer. This ordinary guest CPU edit bypasses
+        // the journal intentionally: a hashless snapshot MUST rebuild a full
+        // CPU baseline next frame, including when its chunk vector is empty.
+        std::memcpy(reinterpret_cast<void*>(centre),&red47,4);
+        const auto cpu_rebuild_snapshots=snapshot.TextureGpuSnapshotCount();
+        snapshot.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+        assert(snapshot.TextureGpuSnapshotCount()==cpu_rebuild_snapshots);
+
+        // Two versions are queued before GPU completion. Replacing the cache
+        // entry must not change the earlier draw's retained texture version.
+        const auto versions=snapshot.TextureGpuSnapshotCount();
+        const auto version_waits=snapshot.TextureCoherenceWaitCount();
+        snapshot_blocked([&] {
+            snapshot.Dispatch(snapshot_compute,1,1,1);
+            assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.DmaData(0,texture_alias+(centre-address),2,red47,4));
+            assert(snapshot.DrawIndirect(snapshot_second,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==versions+2);
+            assert(snapshot.TextureCoherenceWaitCount()==version_waits);
+        });
+        pixel=Pixel(device,snapshot,address+16384);assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        pixel=Pixel(device,snapshot,address+20480);assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+
+        const u64 unknown_output=address+76000;
+        const u32 unknown_descriptor[]{u32(unknown_output),u32(unknown_output>>32)|(4u<<16),1,0x24004};
+        snapshot.CpuWrite(address+49152,unknown_descriptor,sizeof(unknown_descriptor),false);
+        snapshot_blocked([&] {
+            const auto unknown_snapshots=snapshot.TextureGpuSnapshotCount();
+            snapshot.Dispatch(snapshot_compute,1,1,1); // otherwise eligible known overlapping source
+            snapshot.Dispatch(unknown_compute,1,1,1);
+            assert(!snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==unknown_snapshots);
+        });
+        assert(*reinterpret_cast<const u32*>(unknown_output)==23);
+
+        // A physical-alias host edit cannot race the queued GPU source copy.
+        // The old draw observes23; later CPU upload observes the new47.
+        auto snapshot_gate=[metal newSharedEvent];auto snapshot_blocker=[queue commandBuffer];
+        [snapshot_blocker encodeWaitForEvent:snapshot_gate value:1];[snapshot_blocker commit];
+        snapshot.Dispatch(snapshot_compute,1,1,1);
+        assert(snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+        const auto snapshot_cpu_waits=snapshot.IndirectCpuWriteWaitCount();
+        std::jthread snapshot_release([snapshot_gate] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));snapshot_gate.signaledValue=1;
+        });
+        snapshot.CpuWrite(texture_alias+(centre-address),&red47,4,false);
+        snapshot_release.join();Drain(snapshot);
+        assert(snapshot.IndirectCpuWriteWaitCount()==snapshot_cpu_waits+1);
+        pixel=Pixel(device,snapshot,address+16384);assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+        snapshot.Draw(sampled,DrawCall{.count=3});pixel=Pixel(device,snapshot,address+16384);
+        assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0);
+
+        // Retain the same read ownership while the source mapping changes.
+        uintptr_t snapshot_alias=0;
+        assert(!runtime_gpu_memory_map(&snapshot_alias,131072,3,0,alias_physical,16384));
+        auto alias_sample=sampled;
+        alias_sample[Reg::SPI_SHADER_USER_DATA_PS_0]=u32((snapshot_alias+32768)>>8);
+        alias_sample[Reg::SPI_SHADER_USER_DATA_PS_0+1]=u32((snapshot_alias+32768)>>40)|(10u<<20);
+        snapshot.Draw(alias_sample,DrawCall{.count=3});Drain(snapshot);
+        auto mapping_gate=[metal newSharedEvent];auto mapping_blocker=[queue commandBuffer];
+        [mapping_blocker encodeWaitForEvent:mapping_gate value:1];[mapping_blocker commit];
+        snapshot.Dispatch(snapshot_compute,1,1,1);
+        assert(snapshot.DrawIndirect(alias_sample,DrawCall{},address+32));
+        const auto snapshot_mapping_waits=snapshot.IndirectCpuWriteWaitCount();
+        std::jthread mapping_release([mapping_gate] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));mapping_gate.signaledValue=1;
+        });
+        assert(!unmap(reinterpret_cast<void*>(snapshot_alias),131072));mapping_release.join();Drain(snapshot);
+        assert(snapshot.IndirectCpuWriteWaitCount()==snapshot_mapping_waits+1);
+        pixel=Pixel(device,snapshot,address+16384);assert(pixel[2]==23 && pixel[1]==0 && pixel[0]==0);
+
+        // CPU fence callbacks cannot be frozen by a GPU copy. They must keep
+        // the native rejection plus bounded normal-path callback drain.
+        {
+            CommandProcessor cp;cp.SetRenderer(&snapshot);
+            auto event=[metal newSharedEvent];auto blocker=[queue commandBuffer];
+            [blocker encodeWaitForEvent:event value:1];[blocker commit];
+            std::vector<u32> fence;const u64 destination=texture_alias+(centre-address);
+            Packet(fence,Op::EventWriteEop,{0x14,u32(destination),u32(destination>>32)|(1u<<29),red47,0});
+            cp.SubmitGraphics({{{fence.data(),fence.size()},{}}});cp.WaitIdle();
+            const auto pending_snapshots=snapshot.TextureGpuSnapshotCount();
+            assert(!snapshot.DrawIndirect(sampled,DrawCall{},address+32));
+            assert(snapshot.TextureGpuSnapshotCount()==pending_snapshots);
+            std::jthread release([event] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));event.signaledValue=1;
+            });
+            snapshot.Draw(sampled,DrawCall{.count=3});release.join();
+            pixel=Pixel(device,snapshot,address+16384);
+            assert(pixel[2]==47 && pixel[1]==0 && pixel[0]==0 && !cp.Execution()->Failed());
+        }
+        Drain(snapshot);
+        assert(runtime_gpu_memory_set_mutation_hooks(&renderer,
+            [](void* p)->int{return static_cast<Gpu::Metal::MetalRenderer*>(p)->BeginGuestMemoryMutation();},
+            [](void* p){static_cast<Gpu::Metal::MetalRenderer*>(p)->EndGuestMemoryMutation();}));
+    }
+    setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","0",1);
+    const u32 restore_red23=23;renderer.CpuWrite(centre,&restore_red23,4,false);
+    puts("texture GPU snapshot: no CPU wait, real23/47 pixels, queued immutable versions, alias/mapping read leases, hashless CPU rebuild and CP-fence fallback passed");
 
     // A later CP write to the table must not redirect an already queued
     // producer. Exercise the same VA, a physical alias, and zero records:

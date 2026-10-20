@@ -4,6 +4,33 @@ Target: native 1920×1080, temporal AA and native motion vectors, direct Metal.
 Original game files and master saves remain outside the implementation and
 test writes; gameplay uses cloned saves.
 
+## Result and default behavior
+
+Implemented guarded native Metal indirect draw/dispatch execution, packed
+mip uploads, runtime-backed texture snapshots and an optional two-world-frame
+queue limit. These are opt-in experiments: **all four new options remain off
+by default**. The live game uses native indirect compute, while the intended
+steady-Dream indirect draw still requires the existing synchronized fallback.
+
+**60 FPS is not achieved.** The final executable's matched, unprofiled battery
+runs measure 29.914 FPS with native indirect off, 29.892 FPS on, and 29.782 FPS
+on with the queue limit. Each runs for 90 seconds at native 1920×1080 with
+temporal AA and native motion vectors. All have complete presentation
+timestamps and zero GPU failures. These results do not establish a throughput
+gain. Texture-streaming timings are mixed and also do not justify enabling
+the experiments by default.
+
+The final executable is
+`63f5b5a289fe4e17d4380f1ecdc4ff02d9a8fda0637d63edd322b90932148e52`.
+Its full suite finishes with 79 tests passed, two expected private-input skips
+and zero failures; all 11 focused memory, indirect, queue and upload tests pass.
+The 330-second movement replay completes all four requested area transitions
+with every experiment enabled and no crash, GPU failure or fence timeout.
+It still has dropped presentations and pipeline-compilation stalls, including
+a 466.666 ms display gap. Its power source changes during the run, so its
+aggregate FPS does not establish a performance improvement. Final original-file
+inventory, executable hashes and master-save hashes match their baselines.
+
 This follows `MACOS_METAL_GPU_STALLS_2026-10-20.md`. The starting executable is
 `1fb49b673312fe7847e6f0b32f8e14202f93cd9223b68b54c782577b5c83533e`.
 Research, captures and test logs live in
@@ -86,8 +113,9 @@ Native admission also proves that CPU-resolved image/sampler descriptors,
 texture upload bytes and constant snapshots have no outstanding GPU or CPU
 fence writer. Queued buffer writers carry bounded physical-range completion
 tickets; unknown extents conservatively reject CPU resource reads. Mutable
-table-loaded writer descriptors remain unknown even if their current address
-can be read. Direct user-data words have immutable Metal `setBytes` ownership.
+table-loaded writer descriptors require reaching-definition and read-lifetime
+proof; reading their current words alone is insufficient. Direct user-data
+words have immutable Metal `setBytes` ownership.
 Array/3D upload cases and uncertain mip aliases retain the drained path.
 This closes a dependency that simply removing argument waits would miss.
 
@@ -325,3 +353,116 @@ is not comparable to the earlier AC measurements. Two later AC comparison
 startups refuse to run because the unrestricted power check reports battery.
 The sandboxed `pmset` query misleadingly labels that condition AC; future
 power validation uses the same unrestricted environment as the game.
+
+## Final battery comparison
+
+The user chose to continue on battery. All three runs below verify Battery
+Power at both ends in the unrestricted gameplay environment, use the same
+final executable and cloned Dream save/pose, and disable captures, GPU cuts,
+CPU-stage diagnostics and presentation diagnostics. Native motion vectors,
+temporal AA, native tessellation and optimized lighting remain enabled.
+The frame cap is 120. Streaming experiments are off in this comparison.
+
+| Native indirect | World-frame limit | Presented FPS | p99 display interval | Largest gap | Missing timestamps | GPU failures |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Off | Off | 29.914 | 33.339 ms | 58.333 ms | 0 | 0 |
+| On | Off | 29.892 | 41.667 ms | 66.667 ms | 0 | 0 |
+| On | 2 | 29.782 | 41.667 ms | 58.333 ms | 0 | 0 |
+
+Battery charge spans 93–91%, 91–88% and 88–85%, respectively. Do not pool
+these measurements with the earlier AC runs. No run reports a fence timeout.
+Evidence: `flow-battery-comparison.json`, the three
+`dream-flow-battery-*/metrics.json` files and their launch logs.
+
+The enabled runs end with 2,526 and 2,554 native dispatches respectively,
+including startup. Both end with **zero native draws**. The remaining unknown
+writer is not private tessellation output: captured program
+`26ec0808a6cd92dc`, PC `0x27a0`, is a compute `BUFFER_ATOMIC_ADD` with both
+indexed and vector-offset addressing. Generated MSL performs the atomic in
+guest memory. Descriptor reaching-definition proof alone cannot establish
+the vector offset's write extent. The safety fallback remains necessary.
+Evidence: `26ec-factor-store-check.md` and retained shader/packet captures.
+
+## Running the experiments
+
+Use per-process environment variables; no game-file changes are required:
+
+| Option | Effect |
+| --- | --- |
+| `BB_METAL_NATIVE_INDIRECT=1` | Admit the proved native draw/dispatch subset; retain synchronized fallback elsewhere |
+| `BB_METAL_GPU_BATCH_MIPS=1` | Pack eligible texture mip/slice jobs into one dispatch |
+| `BB_METAL_GPU_MAPPED_SNAPSHOT=1` | Copy validated runtime ranges through their backing mapping |
+| `BB_METAL_WORLD_FRAME_LIMIT=2` | Bound unfinished world frames on the producer after presentation acknowledgement |
+
+Omitting these variables preserves the existing default paths. Diagnostic
+argument/writer tracing is separate and is not required for native execution.
+
+## Final automated validation
+
+The final build passes. The full CTest suite registers 81 tests: **79 pass,
+two skip, zero fail**, in 104.85 seconds. The skipped tests are
+`darwin-metal-native_tessellation` and `darwin-native-motion-capture`, which
+need their private inputs. The focused suite passes **11/11** in 6.57 seconds,
+including real Metal indirect execution, CPU/mapping lifetime hazards,
+world-frame completion ordering and all four upload option combinations.
+Captured retail shader inputs additionally pass the production descriptor
+proof with verified hashes; those bytes remain outside source fixtures.
+
+Evidence: `flow-proof-full-build.log`, `flow-proof-full-ctest.log`,
+`flow-proof-focused-tests.log`, `flow-proof-synthetic.log` and
+`flow-proof-private-*.log`. Fixture success does not establish flicker-free
+gameplay or 60 FPS.
+
+## Movement and transition stress
+
+`flow-streaming-stress` runs for 330 seconds with all four experiments enabled,
+native 1920×1080, TAA and native motion vectors. The route repeats forward/back
+movement, camera rotation, attacks and stationary observation. It requests
+lamp transitions at 60, 120, 180 and 240 seconds. All four commands return zero,
+and state samples confirm loading followed by the world sequence
+`18010000 → 15000000 → 18010000 → 18000000 → 18010000`.
+There are 211 adjacent valid position samples showing movement and 18 showing
+yaw changes; the test exercises gameplay, not just a stationary window.
+
+The process stays alive until the harness's planned SIGTERM. It records zero
+GPU failures and zero fence timeouts. Counters finish at 247 native draws,
+512 native dispatches, 8,713 mapped snapshots and zero Mach snapshots. The
+uploader executes 76,240 mip/slice jobs in 8,713 dispatches, including 8,141
+packed uploads, copying 2,410,480,896 bytes. These counts establish that the
+experimental paths ran; fewer dispatches do not establish faster gameplay.
+
+The replay presents 14,622 of 14,633 submitted frames; **11 presentation
+timestamps are missing**. Including display gaps, it reports 44.347 aggregate
+presented FPS, p95 33.333 ms, p99 41.667 ms and 18 gaps over 50 ms. This is
+not a matched throughput result: it traverses different scenes, enables
+argument/writer diagnostics, and starts on battery at 85% but finishes on AC
+at 80%. Do not compare its aggregate FPS with the stationary Dream controls.
+
+Two required-pipeline waits remain: 285.190 ms at replay time 71.256 seconds
+and 184.029 ms at 219.215 seconds. They align with the largest display gaps,
+466.666 ms and 283.334 ms respectively. The new streaming and indirect paths
+do not remove these waits. The largest world-frame admission wait is
+67.329 ms during the first transition. Resident memory grows from 4,018,592
+to 5,139,172 KiB, peaking at 5,150,004 KiB across the loaded areas; this finite
+run does not establish a long-term memory bound.
+
+Evidence: `flow-streaming-stress/metrics.json`, `game-state.csv`,
+`cpu-stalls.csv`, `frame-times.csv`, `launch.log` and `stress-analysis.json`.
+The earlier captured Dream image is a visual spot check only; no claim of
+flicker-free animation or resolution of all graphics issues follows from it.
+
+## Original-file integrity
+
+After the final gameplay process exits, `verify-originals.py` passes:
+
+- All 28,779 original dump files retain their baseline size and nanosecond mtime.
+- Original `eboot.bin` SHA-256 remains
+  `d65f0b4f01d59166aed16f8604196d8b7dd805abbf0758b356e8f1354c9429f9`.
+- The original prepared ELF SHA-256 remains
+  `cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86`.
+- All 16 master-save file hashes match their baselines.
+
+Game runs use copied user directories. No original game instructions or files
+are patched by these experiments. Evidence: `final-integrity.log` and
+`original-integrity.json`. The final executable hash remains `63f5b5a2…` after
+testing, and `git diff --check` passes.
