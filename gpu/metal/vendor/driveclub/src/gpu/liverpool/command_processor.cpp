@@ -275,7 +275,10 @@ void CommandProcessor::AuditDraw(bool indexed,u32 count,u32 offset,u32 first,u32
     } catch(const std::exception&) { /* Diagnostic allocation must not fail execution. */ }
 }
 
-CommandProcessor::CommandProcessor() {
+CommandProcessor::CommandProcessor()
+    :fence_map_cache(Metal::CpFenceMapCache::ConfiguredEnabled(
+        std::getenv("BB_METAL_CP_FENCE_MAP_CACHE")),Core::Memory::kDirectSize,
+        Metal::CpFenceMapCache::ConfiguredEnabled(std::getenv("BB_METAL_CP_FENCE_DEST_INDEX"))) {
     trace = std::getenv("DC_CP_TRACE") != nullptr;
     const char* validation=std::getenv("BB_METAL_CP_VALIDATE");
     validate_registers=validation && !std::strcmp(validation,"1");
@@ -578,6 +581,9 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
         ticket=++next_fence_ticket;
         const u32 ring=t_ring ? t_ring->index : 0;
         const bool known=data_sel==kData32 || data_sel==kData64;
+        // Advance before any potentially allocating insertion/overwrite. Both
+        // qword halves form one transaction under this existing lock.
+        pending_fence_epoch.Change();
         pending_fences[addr] = {lo,ticket,ring,known};
         if (bytes==8) {
             pending_fences[addr + 4] = {hi,ticket,ring,known};
@@ -591,13 +597,16 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
         if (bytes) {
             std::scoped_lock lk(fence_lock);
             // A later write to the same label may still be on its way.
+            bool changed=false;
             auto it = pending_fences.find(addr);
             if (it != pending_fences.end() && it->second.ticket == ticket) {
+                pending_fence_epoch.Change();changed=true;
                 pending_fences.erase(it);
             }
             if (bytes==8) {
                 it = pending_fences.find(addr + 4);
                 if (it != pending_fences.end() && it->second.ticket == ticket) {
+                    if(!changed)pending_fence_epoch.Change();
                     pending_fences.erase(it);
                 }
             }
@@ -622,8 +631,17 @@ bool CommandProcessor::PendingFence(u64 addr, u32* value) {
     return true;
 }
 
+Metal::CpFenceMapCache::Counters CommandProcessor::FenceMapCacheStats() {
+    std::scoped_lock lock(fence_lock);
+    return fence_map_cache.Statistics();
+}
+
 bool CommandProcessor::PendingFenceOverlaps(u64 address,u64 bytes) {
     std::scoped_lock lock(fence_lock);
+    if(fence_map_cache.Enabled())return fence_map_cache.Overlaps(address,bytes,pending_fences,
+        [&] {return pending_fence_epoch.Current();},
+        [] {return Core::Memory::DirectMapGeneration();},
+        [] {return Core::Memory::DirectMappings();});
     if(!bytes) return false;
     if(address>UINT64_MAX-bytes) return true;
     if(pending_fences.empty()) return false;

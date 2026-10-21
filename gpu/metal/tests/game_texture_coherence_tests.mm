@@ -5,6 +5,7 @@
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_renderer.h"
 #include "gpu/liverpool/registers.h"
+#include "gpu/liverpool/command_processor.h"
 #include "gpu/liverpool/tiling.h"
 #include "common/content_hash.h"
 #include "src/runtime_gpu_memory.h"
@@ -16,11 +17,41 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <thread>
 #include <vector>
 
 extern "C" void runtime_restart() { std::abort(); }
-int main() {
+namespace {
+// The optional mode uses the production CP predicate, not an always-true stub.
+// Destruction drains before removing hooks/destroying CP; renderer outlives it.
+struct FixtureCpBinding {
+    Gpu::Metal::MetalRenderer& renderer;
+    std::unique_ptr<Gpu::Liverpool::CommandProcessor> cp;
+    explicit FixtureCpBinding(Gpu::Metal::MetalRenderer& r,bool enabled):renderer(r) {
+        if(!enabled)return;
+        cp=std::make_unique<Gpu::Liverpool::CommandProcessor>();cp->SetRenderer(&renderer);
+        assert(runtime_gpu_memory_set_mutation_hooks(&renderer,
+            [](void* p)->int{return static_cast<Gpu::Metal::MetalRenderer*>(p)->BeginGuestMemoryMutation();},
+            [](void* p){static_cast<Gpu::Metal::MetalRenderer*>(p)->EndGuestMemoryMutation();}));
+    }
+    ~FixtureCpBinding() {
+        if(!cp)return;
+        cp->WaitIdle();renderer.WaitIdle();
+        assert(runtime_gpu_memory_set_mutation_hooks(nullptr,nullptr,nullptr));
+        cp.reset(); // clears its renderer predicate while renderer remains alive
+    }
+};
+}
+int main(int argc,char** argv) {
+    const bool parallel_hash=argc==2 && !std::strcmp(argv[1],"--parallel-hash");
+    if(argc!=1 && !parallel_hash)return 2;
+    if(parallel_hash) {
+        setenv("BB_METAL_NATIVE_INDIRECT","1",1);
+        setenv("BB_METAL_NATIVE_TEXTURE_COHERENCE","1",1);
+        setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","1",1);
+        setenv("BB_METAL_PARALLEL_TEXTURE_HASH","4",1);
+    }
     @autoreleasepool {
         if (!MTLCreateSystemDefaultDevice()) return 77;
         uint64_t physical=0;
@@ -78,6 +109,7 @@ int main() {
         };
         Gpu::Metal::Device device;
         Gpu::Metal::MetalRenderer renderer(device);
+        FixtureCpBinding cp_binding(renderer,parallel_hash);
         const auto metal=(__bridge id<MTLDevice>)device.Handle();
         const auto queue=(__bridge id<MTLCommandQueue>)device.Queue();
         const auto draw=[&] {
@@ -123,8 +155,10 @@ int main() {
         // First change chunk0 to make the existing cache hot, then change only
         // the sampled pixel in the final partial chunk. The next draw must see
         // that edit, while the already queued draw keeps the prior upload.
-        constexpr unsigned large_width=1025,large_height=129,large_pitch=1041,tile=14;
+        constexpr unsigned large_width=1025,large_pitch=1041,tile=14;
+        const unsigned large_height=parallel_hash ? 257 : 129;
         const size_t large_size=Tiling::SliceSize(tile,large_pitch,large_height,4);
+        if(parallel_hash)assert(large_size>=(1u<<20));
         uint64_t large_physical=0;
         assert(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),large_size,16384,0,&large_physical));
         uintptr_t large_address=0;
@@ -154,6 +188,16 @@ int main() {
         regs[Reg::SPI_SHADER_USER_DATA_PS_0+13]=std::bit_cast<uint32_t>((large_height-.5f)/large_height);
         id<MTLTexture> warm_large=draw();renderer.WaitIdle();
         if(!check(warm_large,0))return 1;
+        if(parallel_hash) {
+            // Make this exact >=1MiB cache entry hot, then prove an unchanged
+            // full scan actually dispatches workers before holding the queue.
+            large_source[0]^=0xff00u;
+            id<MTLTexture> hot=draw();renderer.WaitIdle();if(!check(hot,0))return 1;
+            const auto before=renderer.ParallelTextureHashCheckCount();
+            id<MTLTexture> unchanged=draw();renderer.WaitIdle();
+            assert(renderer.ParallelTextureHashCheckCount()==before+1);
+            if(!check(unchanged,0))return 1;
+        }
         auto chunk_gate=[metal newSharedEvent];assert(chunk_gate);
         auto chunk_blocked=[queue commandBuffer];[chunk_blocked encodeWaitForEvent:chunk_gate value:1];[chunk_blocked commit];
         std::atomic<bool> chunk_timeout{false};
@@ -162,14 +206,23 @@ int main() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             if(!stop.stop_requested()){chunk_timeout=true;chunk_gate.signaledValue=1;}
         });
-        large_source[0]^=0xff00u; // detected by the first cold chunk check
+        const auto first_before=renderer.ParallelTextureHashCheckCount();
+        large_source[0]^=0xff00u; // first chunk; the optional mode is already hot
         id<MTLTexture> old_partial=draw();
+        // A first-chunk edit must take the serial precheck, not dispatch jobs.
+        if(parallel_hash)assert(renderer.ParallelTextureHashCheckCount()==first_before);
         large_source[last_pixel_offset/4]=0xff00ff00u; // green, only in last partial chunk
         id<MTLTexture> new_partial=draw();
+        if(parallel_hash)assert(renderer.ParallelTextureHashCheckCount()==first_before+1);
         chunk_gate.signaledValue=1;chunk_watchdog.request_stop();chunk_watchdog.join();renderer.WaitIdle();
         if(chunk_timeout){fputs("Snapshot hash regeneration waited for queued GPU work\n",stderr);return 1;}
         if(!check(old_partial,0) || !check(new_partial,1))return 1;
         puts("Metal snapshot hashes: next-draw changes in first and final partial chunks regenerate immutable queued versions");
+        if(parallel_hash) {
+            assert(cp_binding.cp && !cp_binding.cp->Execution()->Failed());
+            printf("Parallel texture hashing: actual CP guard, %zu-byte hot source, unchanged worker dispatch, first-chunk serial exit and queued last-partial edit passed (%llu dispatches).\n",
+                large_size,(unsigned long long)renderer.ParallelTextureHashCheckCount());
+        }
 
         // Sample every visible face at every mip from physical array storage.
         // The padding faces have distinct colours, so using the view's face

@@ -226,5 +226,45 @@ scopes overlap. No late `cp_sync_renderer` event remains. This supports
 investigating both CPU resource bookkeeping and translated GPU loads rather
 than assuming the remaining limit is exclusively GPU throughput.
 
-Long gameplay, additional candidate comparisons and final original-file
+The frozen default executable also completed a 900-second movement, camera and
+attack replay with all four requested lamp transitions, including the return
+trip, and no crash or reported GPU error. It submitted 31,433 frames. Its 33
+missing presentation timestamps exclude its 34.89-FPS aggregate from clean
+performance comparisons. RSS rose from 3,731 to 4,277 MiB while visiting and
+reloading multiple areas; this duration does not establish a long-term bound.
+
+That run retained a 137.7-ms CPU draw hitch. Two overlapping library-creation
+scopes account for 37.8 and 14.5 ms, and no `pipeline_wait` scope is recorded.
+An exact source hash identifies the latter as captured hull shader
+`f916abafa71dddf5`. Its source is absent from the post-run compute-recipe
+inventory. The translated tessellation preparation path called the device's
+compute-pipeline convenience API directly, bypassing `ShaderCompiler` recipe
+persistence. It now passes an otherwise-default descriptor through
+`ShaderCompiler::ComputePipeline`; native tessellation's early path and the
+translated buffers, resources and dispatches are unchanged. This corrects the
+cache route but does not remove an unseen shader's first-use work in the
+current launch. Live persistence/replay validation follows the candidate runs.
+
+Optional address-only PS and VS root paths retain GPU-time descriptor loads
+through the existing guest buffers, with per-root fallback and late consumer
+leases. They do not copy descriptor values to CPU snapshots or introduce
+overlapping Metal resource arguments. Full six-MRT differentials for both
+material programs and full-output differentials for all six captured vertex
+programs pass, including queued GPU descriptor/payload/base/format changes.
+The real native-indirect fixture also passes with both options enabled. These
+checks do not replace the pending actual-renderer post-cut lease integration
+test or a positive live performance result. Both options remain OFF.
+
+The optional `BB_METAL_WRITER_PRUNE_EPOCH=1` skips registry compaction while
+its shared completion epoch is unchanged. It leaves current content, callback,
+CP and mapping checks intact. Conditional completion probes prevent a retained
+completed writer from qualifying as a pending producer. Deterministic race,
+saturation and lifetime fixtures exercise the same production gate. With this
+option enabled, the updated suite passes 93 of 95 tests in 111.42 seconds,
+with the same two expected skips. The separate original tessellation capture
+fixture also passes its LS/HS and domain-output comparisons.
+
+The next frozen executable is
+`62248f2db09d2be8a1112c886f25a8a84dd258dad6c593968584d699b3dd8d06`.
+Additional candidate comparisons, live cache replay and final original-file
 integrity results will be recorded after the remaining controlled runs complete.

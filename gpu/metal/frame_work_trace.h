@@ -30,7 +30,10 @@ inline constexpr std::array Names{
     "texture_gpu_compute_encode", "texture_gpu_blit_encode", "texture_gpu_job_metadata",
     "render_pass_begin", "render_pass_end", "render_encoder_create",
     "shader_decode", "shader_msl", "pipeline_wait", "texture_collection",
-    "frame_handoff", "submit_record", "dma_record"};
+    "frame_handoff", "submit_record", "dma_record",
+    "draw_pipeline_bind", "draw_fixed_bind", "draw_bind_resources",
+    "draw_vertex_texture_bind", "draw_fragment_texture_bind", "draw_encode",
+    "draw_direct_ps_root", "draw_direct_vs_root", "tessellation_pipeline"};
 class Log {
     std::FILE* file=nullptr;
     std::mutex mutex;

@@ -27,6 +27,7 @@
 
 #include "common/log.h"
 #include "common/content_hash.h"
+#include "gpu/metal/parallel_chunk_hash.h"
 #include "core/memory.h"
 #include "gpu/liverpool/pm4.h"
 #include "gpu/liverpool/registers.h"
@@ -47,6 +48,7 @@
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
+#include "gpu/metal/wind_capture_contract.h"
 #include "gpu/metal/ps_root_read.h"
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
@@ -54,6 +56,7 @@
 #include "gpu/metal/direct_root_span.h"
 #include "gpu/metal/direct_root_read.h"
 #include "gpu/metal/native_indirect.h"
+#include "gpu/metal/guest_writer_prune_epoch.h"
 #include "gpu/metal/native_writer_proof.h"
 #include "gpu/metal/native_writer_offsets.h"
 #include "gpu/metal/native_worklist_extent.h"
@@ -749,6 +752,8 @@ struct MetalRenderer::Impl {
     u64 submission=0;
   };
   std::vector<GuestWriter> guest_writers;
+  GuestWriterPruneEpoch writer_prune{GuestWriterPruneEpoch::ConfiguredEnabled(
+      std::getenv("BB_METAL_WRITER_PRUNE_EPOCH"))};
   static constexpr std::size_t kGuestWriterLimit=512;
   u64 indirect_resource_rejects=0,unknown_guest_writers=0;
   bool indirect_read_trace=std::getenv("BB_METAL_INDIRECT_READ_TRACE") &&
@@ -776,6 +781,13 @@ struct MetalRenderer::Impl {
   std::unordered_map<std::string, ProfileEntry> profile_data;
   std::atomic<u64> gpu_ns{0};
   u64 stat_hashed = 0;
+  unsigned parallel_texture_hash_workers=ParallelChunkHash::ConfiguredWorkers(
+      std::getenv("BB_METAL_PARALLEL_TEXTURE_HASH"));
+  bool texture_hash_profile_enabled=parallel_texture_hash_workers ||
+      ParallelChunkHash::Histogram::ConfiguredEnabled(std::getenv("BB_METAL_TEXTURE_HASH_PROFILE"));
+  ParallelChunkHash::Histogram texture_hash_histogram;
+  u64 parallel_texture_hash_invalid=0;
+
   u64 stat_commits = 0, stat_waits = 0, stat_dispatches = 0, stat_draws = 0;
   u64 stat_depth_copies = 0, stat_upload_base = 0;
   double stat_wait_s = 0;
@@ -793,6 +805,7 @@ struct MetalRenderer::Impl {
   // ================= setup =================
 
 #include "gpu/metal/renderer_capture.inc"
+#include "gpu/metal/wind_capture.inc"
 #include "gpu/metal/htile_capture.inc"
 #include "gpu/metal/native_velocity.inc"
 #include "gpu/metal/renderer_binding_cache.inc"
@@ -800,6 +813,7 @@ struct MetalRenderer::Impl {
   void Init() {
     stage_counter_log=StageCounterTimeline::Log::Open(device);
     InitCapture();
+    InitWindCapture();
     // Immutable snapshots and raw GPU detiling avoid the large CPU upload
     // stalls. Unsupported layouts retain the reference uploader; 0 disables
     // this path for diagnostics without changing the game's source files.
@@ -1046,11 +1060,7 @@ struct MetalRenderer::Impl {
     }
     return true;
   }
-  void PruneGuestWriters() {
-    std::erase_if(guest_writers,[](const GuestWriter& writer) {
-      return writer.completed->load(std::memory_order_acquire);
-    });
-  }
+  void PruneGuestWriters() {writer_prune.Prune(guest_writers);}
   bool CpuResourceRead(u64 address,u64 bytes,const CpuReadReady& ready={}) {
     const auto reject=[&](u32 reason,const char* label,NativeIndirect::Range writer={},
         NativeIndirect::Range read={}) {
@@ -1097,9 +1107,21 @@ struct MetalRenderer::Impl {
     if(callback_proof)for(const auto& range:physical)
       if(SignalSourceBlock(range)!=UINT32_MAX)return reject(7,"pending-callback-effect");
     for(const auto& writer:guest_writers) {
-      if(writer.unknown)return reject(5,"unknown-writer");
-      for(const auto& a:writer.physical)for(const auto& b:physical)
-        if(NativeIndirect::Overlap(a,b))return reject(6,"physical-writer-overlap",a,b);
+      if(writer.unknown) {
+        if(writer_prune.RetainedCompleted(writer.completed,GuestWriterPruneEpoch::Use::CpuReject))continue;
+        return reject(5,"unknown-writer");
+      }
+      // A completion may publish its flag before advancing the shared epoch.
+      // Check only a ticket which would otherwise reject this current read.
+      const auto readable=[&] {
+        for(const auto& a:writer.physical)for(const auto& b:physical)
+          if(NativeIndirect::Overlap(a,b)) {
+            if(writer_prune.RetainedCompleted(writer.completed,GuestWriterPruneEpoch::Use::CpuReject))return true;
+            return reject(6,"physical-writer-overlap",a,b);
+          }
+        return true;
+      };
+      if(!readable())return false;
     }
     return true;
   }
@@ -1176,7 +1198,12 @@ struct MetalRenderer::Impl {
     if(unknown) ++unknown_guest_writers;
     auto completed=std::make_shared<std::atomic<bool>>(false);
     guest_writers.push_back({std::move(physical),unknown,completed,submission_id});
-    [cmd addCompletedHandler:^(id<MTLCommandBuffer>){completed->store(true,std::memory_order_release);}];
+    writer_prune.Published();
+    if(const auto epoch=writer_prune.SharedState()) {
+      [cmd addCompletedHandler:^(id<MTLCommandBuffer>){GuestWriterPruneEpoch::Complete(completed,epoch);}];
+    } else {
+      [cmd addCompletedHandler:^(id<MTLCommandBuffer>){completed->store(true,std::memory_order_release);}];
+    }
   }
   void NoteTextureCpuWrite(u64 address,u64 bytes,bool deferred=false) {
     if(!native_texture_coherence || !bytes)return;
@@ -1460,8 +1487,16 @@ struct MetalRenderer::Impl {
     if(const auto reason=SignalSourceBlock(physical);reason!=UINT32_MAX)return reject(reason);
     PruneGuestWriters();bool overlap=false;
     for(const auto& writer:guest_writers) {
-      if(writer.unknown)return reject(7);
-      for(const auto& range:writer.physical)overlap|=NativeIndirect::Overlap(range,physical);
+      if(writer.unknown) {
+        if(writer_prune.RetainedCompleted(writer.completed,GuestWriterPruneEpoch::Use::GpuUnknown))continue;
+        return reject(7);
+      }
+      bool intersects=false;
+      for(const auto& range:writer.physical)intersects|=NativeIndirect::Overlap(range,physical);
+      // A retained completed writer is never a positive pending-producer
+      // witness, even if its epoch notification is not visible yet.
+      if(intersects && !writer_prune.RetainedCompleted(writer.completed,
+          GuestWriterPruneEpoch::Use::GpuWitness))overlap=true;
     }
     return overlap || reject(8);
   }
@@ -1625,6 +1660,7 @@ struct MetalRenderer::Impl {
   }
   StaticSmrd::AddressBlock GuardedDirectSmrd(const Program& vertex,const Program& pixel,
       std::span<const u32,16> prepared,id<MTLBuffer> draw_map,u64 generation,bool ordinary) {
+    StutterTrace::Scope timing("draw_direct_ps_root",frame_count,vertex.hash,pixel.hash);
     StaticSmrd::AddressBlock addresses;
     if(draw_map.length>=sizeof(Shader::GpuMemMap)) {
       const auto* header=static_cast<const Shader::GpuMemMap*>(draw_map.contents);
@@ -1708,6 +1744,7 @@ struct MetalRenderer::Impl {
   }
   StaticSmrd::AddressBlock GuardedVertexRoot(const Program& vertex,const Program* pixel,
       std::span<const u32,16> prepared,id<MTLBuffer> draw_map,u64 generation,bool ordinary) {
+    StutterTrace::Scope timing("draw_direct_vs_root",frame_count,vertex.hash,pixel ? pixel->hash : 0);
     StaticSmrd::AddressBlock addresses;
     const auto* layout=NativeVertexFetch::Layout(vertex.hash);
     DirectRootRead::Request request{DirectRootSpan::SmrdRoot(prepared[2],prepared[3]),
@@ -2675,9 +2712,41 @@ struct MetalRenderer::Impl {
                   std::min(kChunk, size - off));
   }
 
+  // Optional synchronous CPU worker scan. The caller is GetTexture after
+  // ReadyTextureSource has validated the complete source. Renderer ownership
+  // remains held; workers only read source/expected bytes and return counters.
+  bool TextureChangedObserved(TextureEntry& e,u64 addr,u64 size,bool complete) {
+    const u64 before=stat_hashed;
+    const u64 expected_chunks=size/kChunk+(size%kChunk!=0);
+    const bool full=e.hot || complete;
+    const bool eligible=full && size>=(1ull<<20) && native_texture_coherence &&
+        native_indirect_enabled && bool(CurrentCpuReadReady()) &&
+        expected_chunks && expected_chunks==e.chunks.size();
+    bool parallel=false,changed=false;
+    if(eligible && parallel_texture_hash_workers) {
+      const auto result=ParallelChunkHash::Compare(reinterpret_cast<const void*>(addr),
+          size,std::span<const u64>(e.chunks),parallel_texture_hash_workers);
+      // This is the owner thread; no worker accesses renderer statistics.
+      stat_hashed+=result.bytes;parallel=result.parallel;
+      changed=!result.valid || result.changed;
+      if(!result.valid)++parallel_texture_hash_invalid;
+    } else {
+      const u32 n=static_cast<u32>(e.chunks.size());
+      if(full) {
+        for(u32 c=0;c<n;++c)if(ChunkHash(addr,size,c)!=e.chunks[c]) {changed=true;break;}
+      } else {
+        const u32 c=e.next_chunk++%n;changed=ChunkHash(addr,size,c)!=e.chunks[c];
+      }
+    }
+    if(texture_hash_profile_enabled)texture_hash_histogram.Note(size,full,eligible,
+        parallel,changed,stat_hashed-before);
+    return changed;
+  }
+
   // True if the texture memory differs from what was uploaded.
   bool TextureChanged(TextureEntry &e, u64 addr, u64 size,bool complete=false) {
     StutterTrace::Scope timing("texture_change_check",frame_count,addr,size,1);
+    if(texture_hash_profile_enabled)return TextureChangedObserved(e,addr,size,complete);
     const u32 n = static_cast<u32>(e.chunks.size());
     if (e.hot || complete) {
       for (u32 c = 0; c < n; ++c) {
@@ -3691,7 +3760,15 @@ struct MetalRenderer::Impl {
         }
         id<MTLFunction> fn=compiler->Function(key,MslSource(*programs[k],options,key),address);
         NSError* error=nil;
-        stages[k]=fn ? [device newComputePipelineStateWithFunction:fn error:&error] : nil;
+        if(fn) {
+          // These translated LS/HS kernels need the same source-recipe replay
+          // as ordinary compute pipelines. The direct device convenience API
+          // bypassed persistence, repeating first-use compilation each launch.
+          auto descriptor=[MTLComputePipelineDescriptor new];
+          descriptor.computeFunction=fn;
+          StutterTrace::Scope timing("tessellation_pipeline",frame_count,programs[k]->hash,k);
+          stages[k]=compiler->ComputePipeline(descriptor,&error);
+        }
         if (!stages[k]) {
           ReportOnce("tessellation pipeline failed at " + Hex(address) + ": " +
               (error ? error.localizedDescription.UTF8String : "shader compile failed"));
@@ -4715,9 +4792,10 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     static_smrd_eligible=entry->second;
   }
   const bool use_direct_smrd=direct_smrd_enabled && !static_smrd_enabled && static_smrd_eligible;
+  const bool capture_wind=WindCaptureRequested(*vs);
   std::vector<StaticSmrd::Snapshot> static_smrd_sources;
   if(!PatchUserData(std::span<u32* const>(prepared.data(),prepared_count),
-      (inspect_bound_vertex || (static_smrd_enabled && static_smrd_eligible)) ? &static_smrd_sources : nullptr)) return;
+      (capture_wind || inspect_bound_vertex || (static_smrd_enabled && static_smrd_eligible)) ? &static_smrd_sources : nullptr)) return;
   if(inspect_bound_vertex)InspectBoundVertexPrepared(*vs,vud,bound_vertex_source,static_smrd_sources);
   StaticSmrd::Packed static_smrd_packed;
   const bool use_static_smrd=static_smrd_enabled && !direct_smrd_enabled && static_smrd_eligible && StaticSmrd::Pack(ps->hash,std::span<const u32,16>(pud),static_smrd_sources,
@@ -4726,6 +4804,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     if(use_static_smrd) {++static_smrd_draws;static_smrd_bytes+=u64(static_smrd_packed.count)*4;}
     else ++static_smrd_rejects;
   }
+  if(capture_wind)CaptureWindInputs(*vs,vud,static_smrd_sources);
   CaptureFogInputs(ps,pud);
   if(ps && ps->hash==0x33a4610f6f19410dull) CaptureFogInputs(vs,vud,"domain");
   TessBuffers tess;
@@ -5302,6 +5381,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     [enc setFragmentBytes:&addresses length:sizeof(addresses) atIndex:Shader::Binding::StaticSmrd];
   };
   const auto note_stage_draw=[&] {
+    if(capture_wind)MarkWindCaptureDraw();
     if(stage_counter_pass) {
       // debug_fs replaces the translated fragment function without a compiler
       // cache key. Preserve GCN provenance and mark its encoded PS key unknown.
@@ -5943,6 +6023,17 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           stat_depth_copies / double(frames),
           (upload_allocations.load(std::memory_order_relaxed)-stat_upload_base) / double(frames),
           pending.size());
+      if(texture_hash_profile_enabled) {
+        DC_INFO("gpu texture hash workers: requested=%u invalid-scans=%llu (cumulative; synchronous CPU reads only)",
+            parallel_texture_hash_workers,parallel_texture_hash_invalid);
+        for(unsigned k=0;k<texture_hash_histogram.bins.size();++k) {
+          const auto& bin=texture_hash_histogram.bins[k];
+          if(!bin.checks)continue;
+          DC_INFO("gpu texture hash size: bin=%s checks=%llu full=%llu eligible=%llu parallel=%llu changed=%llu actual-bytes=%llu (cumulative; CPU checks only)",
+              ParallelChunkHash::Histogram::Names[k],bin.checks,bin.full,bin.eligible,
+              bin.parallel,bin.changed,bin.bytes);
+        }
+      }
       const auto warm=compiler->GetWarmupStats();
       DC_INFO("gpu prewarm: %llu recipes loaded, %llu ready, %llu pipeline hits",
           warm.loaded,warm.ready,warm.hits);
@@ -5986,6 +6077,13 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           native_indirect_draws,native_indirect_dispatches,indirect_cpu_write_waits,indirect_reads.size());
       if(native_indirect_enabled) DC_INFO("gpu indirect resources: %llu rejected admissions, %llu unknown writer tickets, %zu pending writers (cumulative)",
           indirect_resource_rejects,unknown_guest_writers,guest_writers.size());
+      if(writer_prune.Enabled()) {
+        const auto& prune=writer_prune.Statistics();
+        DC_INFO("gpu writer prune epoch: calls=%llu scans=%llu skipped=%llu examined=%llu removed=%llu published=%llu completion-epoch=%llu conditional-checks=%llu completed-cpu-ignored=%llu completed-unknown-ignored=%llu completed-witness-ignored=%llu (cumulative; compaction only)",
+            prune.calls,prune.scans,prune.skipped,prune.examined,prune.removed,prune.published,
+            writer_prune.CompletionEpoch(),prune.conditional_checks,prune.completed_ignored[0],
+            prune.completed_ignored[1],prune.completed_ignored[2]);
+      }
       if(gpu_written_texture_snapshot)DC_INFO("gpu texture snapshots: %llu GPU-time versions, %llu recovered historical callback uncertainty; source probes rejected [context=%llu missing-guard=%llu cp-overlap=%llu callback-queued-unknown=%llu callback-active-unknown=%llu lease=%llu mapping=%llu unknown-gpu-writer=%llu no-overlap=%llu callback-queued-overlap=%llu callback-active-overlap=%llu callback-queued-remap=%llu callback-active-remap=%llu] (cumulative)",
           texture_gpu_snapshots,texture_gpu_snapshot_history_versions,texture_gpu_snapshot_rejects[0],texture_gpu_snapshot_rejects[1],
           texture_gpu_snapshot_rejects[2],texture_gpu_snapshot_rejects[3],texture_gpu_snapshot_rejects[4],
@@ -6267,6 +6365,14 @@ std::uint64_t MetalRenderer::NativeIndirectDispatchCount() const {
 std::uint64_t MetalRenderer::IndirectCpuWriteWaitCount() const {
   std::scoped_lock lk(impl->lock);return impl->indirect_cpu_write_waits;
 }
+std::uint64_t MetalRenderer::DirectSmrdRootProofCount(std::uint32_t result) const {
+  std::scoped_lock lk(impl->lock);
+  return result<impl->direct_smrd_root_results.size() ? impl->direct_smrd_root_results[result] : 0;
+}
+std::uint64_t MetalRenderer::DirectVertexRootProofCount(std::uint32_t result) const {
+  std::scoped_lock lk(impl->lock);
+  return result<impl->direct_vertex_root_rejects.size() ? impl->direct_vertex_root_rejects[result] : 0;
+}
 std::uint64_t MetalRenderer::TextureGpuSnapshotCount() const {
   std::scoped_lock lk(impl->lock);return impl->texture_gpu_snapshots;
 }
@@ -6275,6 +6381,11 @@ std::uint64_t MetalRenderer::TextureCoherenceWaitCount() const {
 }
 std::uint64_t MetalRenderer::TextureCoherenceRefreshCount() const {
   std::scoped_lock lk(impl->lock);return impl->texture_coherence_refreshes;
+}
+std::uint64_t MetalRenderer::ParallelTextureHashCheckCount() const {
+  std::scoped_lock lk(impl->lock);std::uint64_t checks=0;
+  for(const auto& bin:impl->texture_hash_histogram.bins)checks+=bin.parallel;
+  return checks;
 }
 
 void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {

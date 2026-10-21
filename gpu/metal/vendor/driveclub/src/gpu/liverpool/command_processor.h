@@ -24,6 +24,7 @@
 #include "gpu/liverpool/pm4.h"
 #include "gpu/liverpool/registers.h"
 #include "gpu/metal/gpu_execution.h"
+#include "gpu/metal/cp_fence_map_cache.h"
 
 namespace Gpu {
 class Renderer;
@@ -96,6 +97,9 @@ public:
         std::chrono::steady_clock::time_point deadline,bool fatal_timeout=false);
 
     const Stats& GetStats() const { return stats; }
+    bool FenceMapCacheEnabled() const {return fence_map_cache.Enabled();}
+    bool FenceDestinationIndexEnabled() const {return fence_map_cache.DestinationIndexEnabled();}
+    Metal::CpFenceMapCache::Counters FenceMapCacheStats();
     const RegFile& Regs() const { return regs; }
 
 private:
@@ -196,6 +200,9 @@ private:
     // waits for a value one of these writes will produce only waits for work
     // that is already ahead of it: the wait is satisfied without a round trip.
     std::mutex fence_lock;
+    Metal::CpFenceMapCache fence_map_cache;
+    // This epoch and the table below are protected by fence_lock together.
+    Metal::PendingFenceEpoch pending_fence_epoch;
     struct PendingWrite {u32 value;u64 ticket;u32 ring;bool known=true;};
     std::unordered_map<u64, PendingWrite> pending_fences;
     u64 next_fence_ticket=0;

@@ -81,9 +81,15 @@ public:
     std::uint64_t NativeIndirectDrawCount() const;
     std::uint64_t NativeIndirectDispatchCount() const;
     std::uint64_t IndirectCpuWriteWaitCount() const;
+    // Read-only opt-in diagnostic: DirectRootRead::Reject index, zero if invalid.
+    std::uint64_t DirectSmrdRootProofCount(std::uint32_t result) const;
+    // Existing address-only VS proof counters; zero for an invalid result index.
+    std::uint64_t DirectVertexRootProofCount(std::uint32_t result) const;
     std::uint64_t TextureGpuSnapshotCount() const;
     std::uint64_t TextureCoherenceWaitCount() const;
     std::uint64_t TextureCoherenceRefreshCount() const;
+    // Actual synchronous worker dispatches; first-chunk serial exits excluded.
+    std::uint64_t ParallelTextureHashCheckCount() const;
     // Called on the GPU recording thread after committing a flip. The host
     // queues its presentation before returning, preserving shared-queue order.
     void SetFrameReadyCallback(std::function<void(void*)> callback);

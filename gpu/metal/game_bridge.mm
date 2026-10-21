@@ -15,6 +15,7 @@
 #include "gpu/metal/bbhost/network.h"
 #include "gpu/metal/frame_handoff.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/wind_capture_contract.h"
 #include "hle/video_out/video_out.h"
 #include "gpu/liverpool/command_processor.h"
 #include "core/memory.h"
@@ -295,11 +296,15 @@ extern "C" int bbgpu_init(const BbGpuConfig*) {
             });
         });
         Gpu::Liverpool::Instance().SetRenderer(renderer.get());
-        if(const auto* native=std::getenv("BB_METAL_NATIVE_INDIRECT");native && !std::strcmp(native,"1")) {
+        // The opt-in wind observer has real GPU source read leases even in
+        // the synchronized native=0 comparison. Its leases need the same
+        // remap exclusion; installing hooks does not enable native rendering.
+        if(Gpu::Metal::WindCapture::NeedsMappingHooks(std::getenv("BB_METAL_NATIVE_INDIRECT"),
+                std::getenv("BB_METAL_CAPTURE_WIND_FRAMES"))) {
             if(!runtime_gpu_memory_set_mutation_hooks(renderer.get(),
                 [](void* context)->int {return static_cast<Gpu::Metal::MetalRenderer*>(context)->BeginGuestMemoryMutation();},
                 [](void* context) {static_cast<Gpu::Metal::MetalRenderer*>(context)->EndGuestMemoryMutation();}))
-                throw std::runtime_error("Could not protect native indirect argument mappings.");
+                throw std::runtime_error("Could not protect Metal guest memory read mappings.");
             guest_mapping_hooks.active=true;
         }
         ready.store(true,std::memory_order_release);
@@ -496,6 +501,27 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                         std::fprintf(stderr,"[GPU CPU waits] %llu waits, %.1f ms parked, %llu timeouts (cumulative)\n",
                             (unsigned long long)stats.label_waits.load(),stats.label_parked_us.load()/1000.0,
                             (unsigned long long)stats.label_timeouts.load());
+                        auto& cp=Gpu::Liverpool::Instance();
+                        if(cp.FenceMapCacheEnabled()) {
+                            const auto cache=cp.FenceMapCacheStats();
+                            std::fprintf(stderr,"[CP fence map cache] queries=%llu rebuilds=%llu reused=%llu rows=%llu lookups=%llu probes=%llu generation-rejects=%llu invalid-maps=%llu allocation-failures=%llu zero-bytes=%llu empty-pending=%llu unresolved-spans=%llu snapshot-rows=%llu (cumulative; mapping metadata only)\n",
+                                static_cast<unsigned long long>(cache.queries),static_cast<unsigned long long>(cache.rebuilds),
+                                static_cast<unsigned long long>(cache.reused),static_cast<unsigned long long>(cache.rows),
+                                static_cast<unsigned long long>(cache.lookups),static_cast<unsigned long long>(cache.probes),
+                                static_cast<unsigned long long>(cache.generation_rejects),static_cast<unsigned long long>(cache.invalid_maps),
+                                static_cast<unsigned long long>(cache.allocation_failures),static_cast<unsigned long long>(cache.zero_bytes),
+                                static_cast<unsigned long long>(cache.empty_pending),static_cast<unsigned long long>(cache.unresolved_spans),
+                                static_cast<unsigned long long>(cache.snapshot_rows));
+                            if(cp.FenceDestinationIndexEnabled()) {
+                                const auto& index=cache.destinations;
+                                std::fprintf(stderr,"[CP fence destination index] queries=%llu rebuilds=%llu reused=%llu rows=%llu probes=%llu unresolved=%llu epoch-rejects=%llu size-rejects=%llu allocation-failures=%llu current-rows=%llu (metadata counts cumulative; current-rows gauge)\n",
+                                    static_cast<unsigned long long>(index.queries),static_cast<unsigned long long>(index.rebuilds),
+                                    static_cast<unsigned long long>(index.reused),static_cast<unsigned long long>(index.rows),
+                                    static_cast<unsigned long long>(index.probes),static_cast<unsigned long long>(index.unresolved),
+                                    static_cast<unsigned long long>(index.epoch_rejects),static_cast<unsigned long long>(index.size_rejects),
+                                    static_cast<unsigned long long>(index.allocation_failures),static_cast<unsigned long long>(index.current_rows));
+                            }
+                        }
                     }
                 }
             }
