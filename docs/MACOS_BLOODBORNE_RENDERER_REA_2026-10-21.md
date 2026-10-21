@@ -72,8 +72,8 @@ readiness results. Both map and pending epochs must agree, including a final
 even/equal map check. Private/partial/racing/exhausted/failed proofs remain
 conservative. The full suite with both flags enabled passed 96 tests with two
 expected private-input skips in 113.59 seconds; actual PS/VS alias, remap,
-callback and post-cut consumer fixtures also passed. Live performance remains
-pending. The isolated stable-epoch CPU microbenchmark is not an FPS result.
+callback and post-cut consumer fixtures also passed. The isolated stable-epoch
+CPU microbenchmark is not an FPS result. Live comparisons are recorded below.
 
 ## Foliage input diagnostic
 
@@ -103,7 +103,9 @@ and later actual vertex reads remain unproven. Jitter is not declared fixed.
 
 Captures split passes and are diagnostic only. Identical CPU/GPU copies do
 not prove identical later vertex reads; different bytes do not alone prove
-an invalid writer. TAA and synchronized-path controls are still needed.
+an invalid writer. The synchronized/native-indirect-off control rejected all
+240 observations for pending callback effects, without reading the payload.
+Its video is a visual control only; no phase-speed comparison is supported.
 
 ## CPU work chosen for optimization
 
@@ -122,5 +124,47 @@ and expected chunk hashes, keep private counters and synchronously join before
 CP recording continues. The renderer owner records actual bytes; all existing
 source/mapping/callback/writer checks and immutable upload versions remain.
 Inputs below 1 MiB and the default disabled path remain serial. Public CPU
-fixtures and isolated throughput results are retained under `hash-review/`;
-renderer and clean gameplay validation are pending.
+fixtures and isolated throughput results are retained under `hash-review/`.
+The actual renderer fixture dispatched two worker scans, preserved queued
+old/new texture pixels and covered a changed final partial chunk. Full serial
+CTest passed 98 tests with two expected private-input skips, zero failures,
+in 115.32 seconds.
+
+## CPU candidate gameplay comparisons
+
+One frozen runtime (`e87be18ca92e18e183e5ba6190062c84b4f4f28c26c8d8b3b06c279b2e33f44b`)
+ran 60-second native 1080p stationary Dream comparisons on AC power. Each run
+used the same cloned Dream save and validated the initial map and pose. The
+texture-size histogram was enabled equally; no GPU/CPU timeline, shader dump,
+screen recording or capture was enabled. These runs form their own comparison;
+the earlier 39.8 FPS runs use an older save chronology.
+
+| Candidate | Displayed FPS | Missing presentation timestamps | GPU failures |
+| --- | ---: | ---: | ---: |
+| Control A | 37.2109 | 0 | 0 |
+| Destination index | excluded | 1 | 0 |
+| Four-worker texture hash | 37.3399 | 0 | 0 |
+| Index plus four-worker hash | 37.3170 | 0 | 0 |
+| Both plus direct pixel roots | 31.5413 | 0 | 0 |
+| Control B | excluded | 1 | 0 |
+
+Every run stopped as planned. The clean CPU candidates differ by less than
+0.4 percent from Control A, without a clean closing control. No repeatable
+FPS improvement is established. Both caches and parallel hashing remain off
+by default, as do direct pixel roots, which regressed in this comparison.
+
+## GPU timing coverage
+
+The retained all-passes capture recorded about 155 natural render encoders
+and 101 compute dispatches per complete Dream frame. The old 16-slot pool
+captured at most 16 render encoders per frame and exhausted on approximately
+90 percent of selected encoders. Its vertex/fragment durations cannot explain
+the whole frame. Ordinary compute dispatches were not sampled at all. Stage
+durations include pipeline dependencies and are not exclusive shader ALU time;
+overlapping intervals must not be added into a GPU-utilization percentage.
+
+A bounded diagnostic pool extension is under validation. Its initial approach
+of allocating one counter buffer per slot hit the device's allocation limit
+at 256 buffers; the GPU test correctly failed. The replacement uses separate
+sample ranges within one buffer and retains each range through asynchronous
+resolution. Normal rendering and default diagnostic capacity remain unchanged.

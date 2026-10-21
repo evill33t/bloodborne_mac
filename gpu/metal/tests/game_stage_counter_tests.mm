@@ -33,6 +33,15 @@ static void Invalid(const std::array<U64,4>& raw,Stage::ClockPair begin,Stage::C
     CHECK(!value.valid);CHECK(std::isnan(value.vertex_ms));CHECK(std::isnan(value.fragment_ms));
 }
 static void PureContracts() {
+    CHECK(Stage::ConfiguredPoolSize(nullptr)==16 && Stage::PoolSize==16);
+    for(const auto [value,expected]:std::array<std::pair<const char*,std::size_t>,5>{{
+        {"16",16},{"17",17},{"32",32},{"128",128},{"256",256}}})
+        CHECK(Stage::ConfiguredPoolSize(value)==expected);
+    for(const char* value:{"","0","1","15","257","-16","+16","016"," 32","32 ",
+            "32x","256000000000000000000000000000000000000000000000000000000"})
+        CHECK(!Stage::ConfiguredPoolSize(value));
+    CHECK(Stage::MaximumTimestampPayload==256*4*sizeof(MTLCounterResultTimestamp));
+    CHECK(Stage::Pass{}.slot==Stage::MaximumPoolSize);
     const Stage::ClockPair begin{1000,50},end{3000,1050};
     const std::array<U64,4> samples{100,200,300,700};
     const auto value=Stage::Convert(samples,begin,end);
@@ -90,7 +99,7 @@ struct Environment {
     struct Previous {std::string key;std::optional<std::string> value;};
     std::vector<Previous> saved;
     Environment() {
-        for(const char* key:{"BB_METAL_STAGE_COUNTER_CSV","BB_METAL_STAGE_COUNTER_ALL_PASSES","BB_SOURCE_GAME","BB_GAME_DIR"}) {
+        for(const char* key:{"BB_METAL_STAGE_COUNTER_CSV","BB_METAL_STAGE_COUNTER_ALL_PASSES","BB_METAL_STAGE_COUNTER_SLOTS","BB_SOURCE_GAME","BB_GAME_DIR"}) {
             const char* value=std::getenv(key);
             saved.push_back({key,value ? std::optional<std::string>(value) : std::nullopt});
             CHECK(!::unsetenv(key));
@@ -296,6 +305,7 @@ static void ValidRows(const std::vector<CsvRow>& rows) {
         CHECK(Number(row,"first_pipeline_cache_key")==0x3001 && Number(row,"last_pipeline_cache_key")==0x3001);
         CHECK(!Number(row,"mixed_encoded_vs") && !Number(row,"mixed_encoded_ps") && !Number(row,"unknown_encoded_ps"));
         CHECK(!Number(row,"selection_all_passes"));
+        CHECK(Number(row,"pool_slots")==Stage::PoolSize);
         for(unsigned k=0;k<Targets;++k)CHECK(Number(row,("format"+std::to_string(k)).c_str())==MTLPixelFormatRGBA8Unorm);
         const Stage::ClockPair begin{Number(row,"cpu0_ns"),Number(row,"gpu0_raw")};
         const Stage::ClockPair end{Number(row,"cpu1_ns"),Number(row,"gpu1_raw")};
@@ -366,6 +376,80 @@ static void AllPassSelection(id<MTLDevice> device,const fs::path& root) {
     for(std::size_t k=0;k<pixels.size();++k)CHECK(pixels[k]==expected[k%4]);
     CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_ALL_PASSES"));
 }
+static void ScaledPoolContracts(id<MTLDevice> device,const fs::path& root) {
+    CHECK(!::setenv("BB_METAL_STAGE_COUNTER_ALL_PASSES","1",1));
+    for(const char* invalid:{"15","257","-32","032","32x"}) {
+        const auto path=root/"invalid-slots.csv";
+        Environment::Set("BB_METAL_STAGE_COUNTER_CSV",path);
+        CHECK(!::setenv("BB_METAL_STAGE_COUNTER_SLOTS",invalid,1));
+        CHECK(!Stage::Log::Open(device));CHECK(!fs::exists(path));
+    }
+    auto descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+        width:32 height:32 mipmapped:NO];
+    descriptor.storageMode=MTLStorageModeShared;descriptor.usage=MTLTextureUsageRenderTarget;
+    auto texture=[device newTextureWithDescriptor:descriptor];CHECK(texture);
+    auto pipeline=MakePipeline(device,1,MTLPixelFormatRGBA16Float);
+    auto queue=[device newCommandQueue];CHECK(queue);
+    const auto make_pass=[&] {
+        auto pass=[MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture=texture;
+        pass.colorAttachments[0].loadAction=MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction=MTLStoreActionStore;return pass;
+    };
+    Stage::Pass metadata;metadata.width=metadata.height=32;metadata.colors=1;
+    metadata.formats[0]=MTLPixelFormatRGBA16Float;
+    for(const std::size_t capacity:{32u,256u}) {
+        const auto path=root/("slots-"+std::to_string(capacity)+".csv");
+        Environment::Set("BB_METAL_STAGE_COUNTER_CSV",path);
+        CHECK(!::setenv("BB_METAL_STAGE_COUNTER_SLOTS",std::to_string(capacity).c_str(),1));
+        auto log=Stage::Log::Open(device);CHECK(log && log->PoolCapacity()==capacity);
+        auto command=[queue commandBuffer];CHECK(command);
+        const auto begin=log->Clock();std::vector<Stage::Pass> passes;
+        for(std::size_t k=0;k<capacity;++k) {
+            auto render_pass=make_pass();metadata.frame=1000+k;
+            auto pass=log->Attach(render_pass,metadata);CHECK(pass && pass->slot==k);
+            auto encoder=[command renderCommandEncoderWithDescriptor:render_pass];CHECK(encoder);
+            [encoder setRenderPipelineState:pipeline];
+            Stage::NoteDraw(*pass,0x10,0x20,0x100,0x200,{0x1001,0x2001,0x3001,true,true,true});
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [encoder endEncoding];passes.push_back(*pass);
+        }
+        CHECK(!log->Attach(make_pass(),metadata)); // exact bounded exhaustion before submit
+        const auto complete=std::make_shared<Completion>();
+        ArmCompletion(command,log,begin,std::move(passes),capacity,complete);
+        [command commit];Bounded("scaled pool command",[&]{return complete->done.load();});
+        CHECK(complete->status==MTLCommandBufferStatusCompleted && !complete->error);
+        Bounded("scaled pool rows",[&]{return ReadRows(path).size()==capacity;});
+        for(const auto& row:ReadRows(path)) {
+            CHECK(Number(row,"pool_slots")==capacity && Number(row,"selection_all_passes")==1);
+            CHECK(Number(row,"data_valid")==1 && Number(row,"calibration_valid")==1);
+            CHECK(Number(row,"exhausted")==1 && !Number(row,"attach_errors") && !Number(row,"encode_errors"));
+        }
+        std::array<std::uint16_t,32*32*4> pixels{};
+        [texture getBytes:pixels.data() bytesPerRow:32*8 fromRegion:MTLRegionMake2D(0,0,32,32) mipmapLevel:0];
+        constexpr std::array<std::uint16_t,4> expected{0x3c00,0,0,0x3c00};
+        for(std::size_t k=0;k<pixels.size();++k)CHECK(pixels[k]==expected[k%4]);
+        // Slots have recovered without a production wait. Exercise cancellation
+        // and reuse above16 without ever encoding these reserved-only passes.
+        std::vector<Stage::Pass> reserved;std::vector<MTLRenderPassDescriptor*> descriptors;
+        Bounded("scaled cancellation reservations",[&] {
+            while(reserved.size()<capacity) {
+                auto desc=make_pass();auto pass=log->Attach(desc,metadata);
+                if(!pass)return false; // fixture-only wait for the final row's release
+                CHECK(pass->slot==reserved.size());
+                descriptors.push_back(desc);reserved.push_back(*pass);
+            }
+            return true;
+        });
+        log->Cancel(descriptors.back(),reserved.back());
+        auto replacement_descriptor=make_pass();auto replacement=log->Attach(replacement_descriptor,metadata);
+        CHECK(replacement && replacement->slot==capacity-1);
+        log->Cancel(replacement_descriptor,*replacement);
+        for(std::size_t k=0;k+1<capacity;++k)log->Cancel(descriptors[k],reserved[k]);
+    }
+    CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_SLOTS"));
+    CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_ALL_PASSES"));
+}
 static int GpuContracts() {
     auto device=MTLCreateSystemDefaultDevice();if(!Capable(device))return 77;
     Environment environment;TemporaryDirectory temporary;
@@ -381,7 +465,7 @@ static int GpuContracts() {
         expected=ReadPixels(owner->targets);ExpectedPixels(expected);
     }
     const auto csv=temporary.path/"stage.csv";Environment::Set("BB_METAL_STAGE_COUNTER_CSV",csv);
-    owner->log=Stage::Log::Open(device);CHECK(owner->log);
+    owner->log=Stage::Log::Open(device);CHECK(owner->log && owner->log->PoolCapacity()==Stage::PoolSize);
     @autoreleasepool {
         auto command=[owner->queue commandBuffer];CHECK(command);
         const auto begin=owner->log->Clock();std::vector<Stage::Pass> passes;
@@ -424,6 +508,7 @@ static int GpuContracts() {
     Bounded("recovered asynchronous row and final log release",[&]{return ReadRows(csv).size()==Stage::PoolSize+1 && weak.expired();});
     const auto rows=ReadRows(csv);ValidRows(rows);CHECK(Number(rows.back(),"submission")==2 && Number(rows.back(),"frame")==100);
     AllPassSelection(device,temporary.path);
+    ScaledPoolContracts(device,temporary.path);
     puts("Stage counters GPU: natural passes,16-slot exhaustion/recovery, every MRT pixel, calibrated rows and retained completion lifetime passed");
     return 0;
 }

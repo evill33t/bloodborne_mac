@@ -20,14 +20,29 @@
 
 namespace Gpu::Metal::StageCounterTimeline {
 using U64=std::uint64_t;
-inline constexpr std::size_t PoolSize=16,SampleCount=4;
+inline constexpr std::size_t PoolSize=16,MaximumPoolSize=256,SampleCount=4;
+// Missing option preserves16. Explicit malformed/out-of-range values disable
+// this diagnostic instead of silently allocating a different pool size.
+inline std::size_t ConfiguredPoolSize(const char* value) noexcept {
+    if(!value)return PoolSize;
+    if(!*value || *value=='0')return 0;
+    std::size_t result=0;
+    for(const char* at=value;*at;++at) {
+        if(*at<'0' || *at>'9')return 0;
+        result=result*10+std::size_t(*at-'0');
+        if(result>MaximumPoolSize)return 0;
+    }
+    return result>=PoolSize ? result : 0;
+}
+inline constexpr std::size_t MaximumTimestampPayload=
+    MaximumPoolSize*SampleCount*sizeof(MTLCounterResultTimestamp);
 struct ClockPair {U64 cpu=0,gpu=0;double host_before=0,host_after=0;};
 struct Encoded {
     U64 vs_key=0,ps_key=0,pipeline_key=0;
     bool vs_known=false,ps_known=false,pipeline_known=false;
 };
 struct Pass {
-    std::size_t slot=PoolSize;
+    std::size_t slot=MaximumPoolSize; // invalid for every supported active capacity
     U64 id=0,frame=0,width=0,height=0,colors=0,color0=0,depth=0;
     std::array<U64,8> formats{};
     U64 depth_format=0,draws=0;
@@ -77,6 +92,8 @@ public:
     static std::shared_ptr<Log> Open(id<MTLDevice> device) {
         const char* path=std::getenv("BB_METAL_STAGE_COUNTER_CSV");
         if(!path || !*path)return {};
+        const auto pool_size=ConfiguredPoolSize(std::getenv("BB_METAL_STAGE_COUNTER_SLOTS"));
+        if(!pool_size)return Disabled("invalid stage counter slots; expected canonical decimal16..256");
         if(@available(macOS 11.0,*)) {
             if(![device supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
                 return Disabled("stage-boundary sampling unsupported");
@@ -88,14 +105,15 @@ public:
                 has_timestamp|=[counter.name isEqualToString:MTLCommonCounterTimestamp];
             if(!timestamps || !has_timestamp)return Disabled("timestamp counter set absent");
             const char* all=std::getenv("BB_METAL_STAGE_COUNTER_ALL_PASSES");
-            auto log=std::shared_ptr<Log>(new Log(device,all && !std::strcmp(all,"1")));
-            for(auto& slot:log->pool) {
+            auto log=std::shared_ptr<Log>(new Log(device,all && !std::strcmp(all,"1"),pool_size));
+            for(std::size_t index=0;index<log->pool_size;++index) {
+                auto& slot=log->pool[index];
                 auto descriptor=[MTLCounterSampleBufferDescriptor new];
                 descriptor.counterSet=timestamps;descriptor.storageMode=MTLStorageModeShared;
                 descriptor.sampleCount=SampleCount;descriptor.label=@"Bloodborne stage timestamp diagnostics";
                 NSError* error=nil;
                 slot.buffer=[device newCounterSampleBufferWithDescriptor:descriptor error:&error];
-                if(!slot.buffer)return Disabled("fixed sample-buffer pool allocation failed");
+                if(!slot.buffer)return Disabled("bounded sample-buffer pool allocation failed");
             }
             // Same canonical source-directory exclusions as command_timeline.
             // Also reject nonregular/hardlinked output before writing a header.
@@ -117,14 +135,16 @@ public:
                 ::close(fd);return Disabled("output must be a regular single-link file");
             }
             log->file=::fdopen(fd,"a");if(!log->file){::close(fd);return Disabled("output stream failed");}
-            std::fputs("submission,pass,frame,width,height,colors,format0,format1,format2,format3,format4,format5,format6,format7,depth_format,color0,depth,draws,mixed_gcn_vs,mixed_gcn_ps,first_gcn_vs,last_gcn_vs,first_gcn_ps,last_gcn_ps,first_gcn_vs_hash,last_gcn_vs_hash,first_gcn_ps_hash,last_gcn_ps_hash,first_encoded_vs_key,last_encoded_vs_key,first_encoded_ps_key,last_encoded_ps_key,first_pipeline_cache_key,last_pipeline_cache_key,first_vs_key_known,last_vs_key_known,first_ps_key_known,last_ps_key_known,first_pipeline_key_known,last_pipeline_key_known,mixed_encoded_vs,mixed_encoded_ps,mixed_pipeline_key,unknown_encoded_vs,unknown_encoded_ps,unknown_pipeline_key,vertex_start_raw,vertex_end_raw,fragment_start_raw,fragment_end_raw,cpu0_ns,gpu0_raw,cpu1_ns,gpu1_raw,host0_before_s,host0_after_s,host1_before_s,host1_after_s,vertex_ms,fragment_ms,status,error_code,data_valid,calibration_valid,natural_passes,selected,skipped,exhausted,attach_errors,encode_errors,invalid_results,selection_all_passes\n",log->file);
+            std::fputs("submission,pass,frame,width,height,colors,format0,format1,format2,format3,format4,format5,format6,format7,depth_format,color0,depth,draws,mixed_gcn_vs,mixed_gcn_ps,first_gcn_vs,last_gcn_vs,first_gcn_ps,last_gcn_ps,first_gcn_vs_hash,last_gcn_vs_hash,first_gcn_ps_hash,last_gcn_ps_hash,first_encoded_vs_key,last_encoded_vs_key,first_encoded_ps_key,last_encoded_ps_key,first_pipeline_cache_key,last_pipeline_cache_key,first_vs_key_known,last_vs_key_known,first_ps_key_known,last_ps_key_known,first_pipeline_key_known,last_pipeline_key_known,mixed_encoded_vs,mixed_encoded_ps,mixed_pipeline_key,unknown_encoded_vs,unknown_encoded_ps,unknown_pipeline_key,vertex_start_raw,vertex_end_raw,fragment_start_raw,fragment_end_raw,cpu0_ns,gpu0_raw,cpu1_ns,gpu1_raw,host0_before_s,host0_after_s,host1_before_s,host1_after_s,vertex_ms,fragment_ms,status,error_code,data_valid,calibration_valid,natural_passes,selected,skipped,exhausted,attach_errors,encode_errors,invalid_results,selection_all_passes,pool_slots\n",log->file);
             if(std::fflush(log->file) || std::ferror(log->file))return Disabled("output header write failed");
-            std::fprintf(stderr,"gpu stage counters: enabled timestamp stage boundaries; fixed pool16/samples4; selection=%s\n",
+            std::fprintf(stderr,"gpu stage counters: enabled timestamp stage boundaries; fixed pool%zu/samples4; timestamp payload%zu bytes (driver overhead additional); selection=%s\n",
+                log->pool_size,log->pool_size*SampleCount*sizeof(MTLCounterResultTimestamp),
                 log->all_passes ? "all natural BeginPass encoders" : "natural material MRT >=5 colors and >=960x540");
             return log;
         }
         return Disabled("macOS 11 stage counter API unavailable");
     }
+    std::size_t PoolCapacity() const noexcept {return pool_size;}
     ClockPair Clock() const {
         ClockPair pair;
         MTLTimestamp cpu=0,gpu=0;
@@ -141,11 +161,11 @@ public:
         }
         ++selected;
         std::size_t index=0;
-        for(;index<PoolSize;++index) {
+        for(;index<pool_size;++index) {
             bool available=false;
             if(pool[index].busy.compare_exchange_strong(available,true,std::memory_order_acquire))break;
         }
-        if(index==PoolSize){++exhausted;return {};}
+        if(index==pool_size){++exhausted;return {};}
         metadata.slot=index;metadata.id=++sequence;
         @try {
             auto attachment=descriptor.sampleBufferAttachments[0];
@@ -174,7 +194,8 @@ public:
     }
 private:
     struct Slot {id<MTLCounterSampleBuffer> buffer=nil;std::atomic<bool> busy{false};};
-    explicit Log(id<MTLDevice> device,bool all_passes):device(device),all_passes(all_passes),
+    explicit Log(id<MTLDevice> device,bool all_passes,std::size_t pool_size)
+        :device(device),all_passes(all_passes),pool_size(pool_size),
         resolve_queue(dispatch_queue_create("bloodborne.stage-counter.resolve",DISPATCH_QUEUE_SERIAL)) {}
     static std::shared_ptr<Log> Disabled(const char* why) {
         std::fprintf(stderr,"gpu stage counters disabled: %s\n",why);return {};
@@ -223,15 +244,16 @@ private:
                 status,error,unsigned(valid),unsigned(duration.valid));
             for(auto value:{natural_passes.load(),selected.load(),skipped.load(),exhausted.load(),attach_errors.load(),encode_errors.load(),invalid_results.load()})
                 std::fprintf(file,",%llu",(unsigned long long)value);
-            std::fprintf(file,",%u\n",unsigned(all_passes));
+            std::fprintf(file,",%u,%zu\n",unsigned(all_passes),pool_size);
             if(std::fflush(file) || std::ferror(file))output_failed=true;
         }
         Release(pass.slot);
     }
     id<MTLDevice> device=nil;
     const bool all_passes;
+    const std::size_t pool_size;
     dispatch_queue_t resolve_queue;
-    std::array<Slot,PoolSize> pool;
+    std::array<Slot,MaximumPoolSize> pool;
     U64 sequence=0;
     std::atomic<U64> natural_passes{0},selected{0},skipped{0},exhausted{0},attach_errors{0},encode_errors{0},invalid_results{0};
     std::atomic<bool> output_failed{false};
