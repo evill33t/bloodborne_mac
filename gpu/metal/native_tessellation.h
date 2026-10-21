@@ -1,28 +1,44 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
+#include <array>
 #include <cstdint>
 
 namespace Gpu::Metal {
 struct NativeTessellationConfig {
-    std::uint32_t local_layout=0,outer_factor=0;
-    explicit operator bool() const { return local_layout!=0 && outer_factor!=0; }
+    std::uint32_t local_layout=0,outer_factor=0,inner_factor=1;
+    explicit operator bool() const { return local_layout!=0 && outer_factor!=0 && inner_factor!=0; }
 };
 // Exact original GCN identities observed in Bloodborne's light-volume draws.
 // Unknown programs retain the translated local/hull preparation path.
 inline NativeTessellationConfig NativeTessellation(std::uint64_t local,std::uint64_t hull,
-                                                  std::uint64_t domain) {
+                                                  std::uint64_t domain,bool extended=false,bool inner_two=false) {
+    // Captured one-control-point Dream family: outer1 and inner2 are independent.
+    if(inner_two && local==0x030976bf71b6a530ull && hull==0x2aef5ffb7e95361full &&
+            domain==0x253e07649e3725f3ull)return {128u,1u,2u};
+    // Captured Dream variant: same proved 128-byte LS and factor-one HS.
+    // Keep the additional domain opt-in until full output/gameplay validation.
+    if(extended && local==0x030976bf71b6a530ull && hull==0xf9f5fc457bc359fdull &&
+            domain==0x90b8fb9c35aa6679ull)return {128u,1u};
     if (domain!=0xb9885bd6a84245b4ull && domain!=0x164fc97094ae66d7ull &&
         domain!=0x59911a4cf68be57cull && domain!=0xc4b45ba023e435cfull) return {};
     const auto layout=local==0x030976bf71b6a530ull ? 128u : local==0x53b4731b549fb1f0ull ? 144u : 0u;
     const auto factor=hull==0xf9f5fc457bc359fdull ? 1u : hull==0xf916abafa71dddf5ull ? 3u : 0u;
     return {layout,factor};
 }
+// Exact hardware half-word record shared by renderer creation and the original
+// HS differential fixture. Only the hash-gated constant families call this.
+inline constexpr std::array<std::uint16_t,6> NativeTessellationFactorRecord(
+        const NativeTessellationConfig& config) {
+    const std::uint16_t outer=config.outer_factor==1 ? 0x3c00u : config.outer_factor==3 ? 0x4200u : 0u;
+    const std::uint16_t inner=config.inner_factor==1 ? 0x3c00u : config.inner_factor==2 ? 0x4000u : 0u;
+    return {outer,outer,outer,outer,inner,inner};
+}
 inline const char* NativeTessellationMsl() {
     return R"MSL(
 // Sparse equivalent of the checked local/hull shaders' zeroed per-patch LDS.
 // Preparation stays in the domain invocation: no compute encoder or render-pass
 // break, and no CPU read of live guest geometry or reordered game commands.
-struct DcNativeTess { uint words[36]; uint hull_base; uint outer_factor; };
+struct DcNativeTess { uint words[36]; uint hull_base; uint outer_factor; uint inner_factor; };
 static inline uint4 dc_native_tess_fetch(thread const DcMem& mem,ulong table,uint slot,uint vertex_index) {
     device uint* p=dc_ptr_n(mem,(table+ulong(slot)*16ul)&~3ul,16u);
     uint4 d=p ? uint4(p[0],p[1],p[2],p[3]) : uint4(0u);
@@ -36,7 +52,7 @@ static inline void dc_native_tess_put(thread DcNativeTess& out,uint at,uint4 val
 }
 static inline void dc_native_tess_init(thread DcNativeTess& out,thread const DcMem& mem,
         constant uint* local_ud,constant uint* hull_ud,constant DcTess& params,
-        uint patch,uint layout,uint outer_factor) {
+        uint patch,uint layout,uint outer_factor,uint inner_factor) {
     for(uint i=0;i<36;++i)out.words[i]=0u;
     uint vertex_index=patch;
     if(params.index_size) {
@@ -71,13 +87,14 @@ static inline void dc_native_tess_init(thread DcNativeTess& out,thread const DcM
     // Signed 24-bit MAD from the original hull shader, modulo uint32.
     out.hull_base=uint(int(x<<8)>>8)*uint(int(z<<8)>>8);
     out.outer_factor=as_type<uint>(float(outer_factor));
+    out.inner_factor=as_type<uint>(float(inner_factor));
 }
 static inline uint dc_native_tess_load(thread const DcNativeTess& data,uint byte_address) {
     uint word=byte_address>>2;
     uint result=word<36u ? data.words[word] : 0u;
     for(uint i=0;i<6;++i) {
         if(word==((data.hull_base+i*16u)>>2))
-            result=i<4u ? data.outer_factor : 0x3f800000u;
+            result=i<4u ? data.outer_factor : data.inner_factor;
     }
     return result;
 }

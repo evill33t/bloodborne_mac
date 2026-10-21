@@ -167,4 +167,74 @@ A bounded diagnostic pool extension is under validation. Its initial approach
 of allocating one counter buffer per slot hit the device's allocation limit
 at 256 buffers; the GPU test correctly failed. The replacement uses separate
 sample ranges within one buffer and retains each range through asynchronous
-resolution. Normal rendering and default diagnostic capacity remain unchanged.
+resolution. Its CPU/GPU tests passed (including 256 distinct ranges, bounded
+exhaustion/recovery, cancellation and HDR pixels), in 0.56 seconds. Normal
+rendering and default diagnostic capacity remain unchanged.
+
+The expanded capture used frozen runtime
+`4d597aea84f25faa6df33c4a83f671f171985fe0a079d40f818ad68e105ed233`.
+It retained 195,640 valid render-stage rows over 1,258 measured frame labels,
+about 155.52 rows/frame. The asynchronous counter endpoints record only 61
+exhaustions (under 0.1 percent), no attachment/encoding/invalid-result errors,
+and no GPU failures. This establishes much wider render coverage, while
+ordinary compute, tessellation preparation, adapters, uploader, blits and
+presentation still have no stage samples in this capture. An unused requested
+compute-counter environment option in the manifest does not imply support.
+
+The calibrated union of sampled render stages is 20.137 ms/frame; the union
+of command GPU intervals is 23.068 ms/frame. Neither is exclusive ALU time.
+The inclusive CPU frame wall is 26.724 ms/frame, draw recording 18.491 ms and
+texture checks 7.355 ms (nested values, not additive). Mixed six-MRT geometry
+and material passes account for a substantial part of sampled stage time;
+their first shader identity cannot stand in for every shader in the pass.
+These instrumented values identify work to investigate, not clean FPS.
+
+An independent retained-state/GCN/MSL screen found no justified forced early-Z
+change: the current opaque-export proof already removes artificial kills in
+observed depth-tested non-KILL shaders, and none of 691 traced draws sets the
+original forced depth-before-shader flag. Generic writable parameter spelling
+alone does not prove that Metal disabled early depth testing.
+
+## Native tessellation coverage
+
+The new strict opt-in `BB_METAL_NATIVE_TESSELLATION_EXTENDED=1` admits only
+LS `030976bf71b6a530` / HS `f9f5fc457bc359fd` / DS `90b8fb9c35aa6679`.
+The original DS has 14 read-only LDS pairs (28 offsets through byte 116),
+compatible with the existing 128-byte sparse LS reconstruction and factor-one
+HS. Current-attachment feedback still forces translated preparation. In the
+retained traced frame, the new gate covers at most five additional draws
+before runtime alias checks. The frequently seen `f916abafa71dddf5` hull is
+already supported; another missing hull requires inner factor two and stays
+excluded.
+
+The private original-shader GPU differential passed 1,440 preparation cases
+and 189 domain cases, comparing 339,552 output components. Finite/infinite
+outputs match bit for bit; paired NaN payloads are ignored. The admitted
+128-byte/factor-one DS90 cases independently produce finite nonzero-w clip
+positions and meaningful parameters for every index mode, with numerical UV,
+patch and camera/fade variation. This is shader-equivalence evidence, not
+gameplay performance or complete renderer admission proof.
+
+## Rejected exact-byte texture comparison
+
+A private prototype replaced repeated full CRC scans with `memcmp` against
+a bounded private copy, seeded only from immutable uploader provenance and
+copy-then-hash verification. Independent source review found no readiness,
+mapping/version, lifetime or 256 MiB payload-budget blocker. Its CPU fixture
+passed protected tails, mutation/identity rejection and budget lifetime cases.
+
+Realistic mixed working sets rejected its performance: with production
+`ROSETTA_ADVERTISE_AVX=1`, the captured-bin 186.11 MiB unchanged warm pass
+cost 6.24 ms for CRC versus 9.73 ms for byte comparison; after a 320 MiB
+eviction read, 6.47 versus 9.79 ms. A 190 MiB distribution spanning 1 KiB to
+16 MiB and first/last edits also regressed. These are CPU microbenchmarks,
+not game FPS. The unbuilt renderer integration and header were removed from
+main; prototype, fixtures and evidence remain isolated in `out/`. No gameplay
+benefit is claimed and no live test of this rejected candidate was needed.
+
+An independent protection audit also rejected skipping checks on presumed
+CPU-read-only textures. The exported direct-map inventory drops protection
+metadata, the bridge fabricates `prot=3`, GPU-write mappings grant host CPU
+write, and a permanent writable physical-pool alias is not in that inventory.
+Internal requested permissions do not prove absence of effective writable
+aliases. No texture content/readiness checks were relaxed.

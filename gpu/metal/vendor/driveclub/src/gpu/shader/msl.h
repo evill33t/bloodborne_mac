@@ -110,6 +110,7 @@ struct MslOptions {
     TessStage tess_stage = TessStage::None;
     u32 native_tess_layout = 0; // checked Bloodborne LS layouts: 128 or 144
     u32 native_tess_factor = 0; // checked constant outer factors: 1 or 3
+    u32 native_tess_inner_factor = 1; // independent checked inner factors: 1 or 2
     // Vertex.
     bool rect_list = false; // expand RECTLIST: 3 vertices -> 2 triangles
     bool debug_capture = false; // write positions to buffer(6) (debugging)

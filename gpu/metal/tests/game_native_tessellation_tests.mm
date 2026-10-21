@@ -34,7 +34,7 @@ constexpr u32 kCanary = 0xdecafbad;
 constexpr u32 kMemoryBytes = 1u << 20;
 constexpr u32 kLocalTable = 0x1000, kHullTable = 0x2000, kHullUnused = 0x3000;
 constexpr u32 kIndexBase = 0x4000;
-struct Params { u32 layout, outer_factor, query_count, pad; };
+struct Params { u32 layout, outer_factor, query_count, inner_factor; };
 struct Mapping {
     Shader::GpuMemMap header;
     std::array<std::int32_t, kMemoryBytes / 16384> pages;
@@ -228,11 +228,12 @@ void InitializeGuarded(id<MTLBuffer> buffer) {
 // sparse initialization and LDS-load indirection as the shipping patch entry.
 // This deliberately retains all generated arithmetic and output parameters.
 id<MTLComputePipelineState> DomainPipeline(id<MTLDevice> device,
-        const Shader::Program& program,u32 layout,u32 outer_factor) {
+        const Shader::Program& program,u32 layout,u32 outer_factor,u32 inner_factor=1) {
     Shader::MslOptions options;
     options.tess_stage=Shader::TessStage::Domain;
     options.native_tess_layout=layout;
     options.native_tess_factor=outer_factor;
+    options.native_tess_inner_factor=inner_factor;
     std::vector<std::string> unsupported;
     auto source=Shader::GenerateMsl(program,options,&unsupported);
     Require(unsupported.empty(),"Unsupported instruction in captured domain");
@@ -253,7 +254,8 @@ kernel void main0(constant uint* ud [[buffer(0)]], device uint* lo [[buffer(1)]]
 )MSL";
     if (layout) {
         source+="    DcNativeTess data; dc_native_tess_init(data,mem,local,hull,params,patch,"+
-            std::to_string(layout)+"u,"+std::to_string(outer_factor)+"u);\n";
+            std::to_string(layout)+"u,"+std::to_string(outer_factor)+"u,"+
+            std::to_string(inner_factor)+"u);\n";
         source+="    VsOut value=dc_run(0u,0u,ud,mem,uv,patch,data);\n";
     } else source+="    VsOut value=dc_run(0u,0u,ud,mem,uv,patch,dense+patch*16384u);\n";
     const u32 fields=1+std::popcount(program.param_mask);
@@ -268,7 +270,7 @@ kernel void main0(constant uint* ud [[buffer(0)]], device uint* lo [[buffer(1)]]
     return Compile(device,source,"captured domain output equivalence");
 }
 
-void DomainUniforms(id<MTLBuffer> memory,u32 lds_base,std::array<u32,16>& user) {
+void DomainUniforms(id<MTLBuffer> memory,u32 lds_base,std::array<u32,16>& user,u32 profile=0) {
     constexpr u32 constants=0x5000,metadata=0x6000;
     auto* bytes=static_cast<std::uint8_t*>(memory.contents);
     auto* values=reinterpret_cast<float*>(bytes+constants);
@@ -280,6 +282,15 @@ void DomainUniforms(id<MTLBuffer> memory,u32 lds_base,std::array<u32,16>& user) 
     const std::array<float,4> camera{0,0,0,1},fade{50,40,2,3};
     std::memcpy(bytes+constants+0x160,camera.data(),sizeof(camera));
     std::memcpy(bytes+constants+0x170,fade.data(),sizeof(fade));
+    if(profile) {
+        // A second finite camera/fade profile must change the admitted domain's
+        // output. This prevents an inert uniform binding from proving equality.
+        values[0]=1.125f; values[5]=0.875f; values[10]=1.0625f;
+        values[3]=0.125f; values[7]=-0.0625f; values[12]=0.02f;
+        const std::array<float,4> camera2{0.125f,-0.25f,0.375f,1},fade2{60,32,1.5f,4};
+        std::memcpy(bytes+constants+0x160,camera2.data(),sizeof(camera2));
+        std::memcpy(bytes+constants+0x170,fade2.data(),sizeof(fade2));
+    }
     auto* meta=reinterpret_cast<u32*>(bytes+metadata);
     std::fill(meta,meta+16,0u);
     meta[3]=lds_base; meta[6]=144;
@@ -312,10 +323,13 @@ void BindDomain(id<MTLComputeCommandEncoder> encoder,id<MTLComputePipelineState>
 void CheckDomainOutputs(id<MTLDevice> device,id<MTLCommandQueue> queue,
         const std::filesystem::path& directory,
         const std::array<id<MTLComputePipelineState>,2>& local_pipelines,
-        const std::array<id<MTLComputePipelineState>,2>& hull_pipelines,
-        id<MTLBuffer> memory,const Mapping& mapping,id<MTLBuffer> lds,id<MTLBuffer> factors) {
-    const std::array<u64,4> hashes{0xb9885bd6a84245b4ull,0x164fc97094ae66d7ull,
+        const std::array<id<MTLComputePipelineState>,3>& hull_pipelines,
+        id<MTLBuffer> memory,const Mapping& mapping,id<MTLBuffer> lds,id<MTLBuffer> factors,
+        bool extended=false,bool inner_two=false) {
+    std::vector<u64> hashes{0xb9885bd6a84245b4ull,0x164fc97094ae66d7ull,
         0x59911a4cf68be57cull,0xc4b45ba023e435cfull};
+    if(extended)hashes.push_back(0x90b8fb9c35aa6679ull);
+    if(inner_two)hashes.push_back(0x253e07649e3725f3ull);
     const std::array<float,18> uv{0,0, 1,0, 0,1, 1,1, .5f,.5f, .25f,.75f,
         .75f,.25f, .1f,.3f, .9f,.8f};
     auto coordinates=[device newBufferWithBytes:uv.data() length:sizeof(uv)
@@ -332,17 +346,42 @@ void CheckDomainOutputs(id<MTLDevice> device,id<MTLCommandQueue> queue,
         auto dense_pipeline=DomainPipeline(device,*program,0,0);
         const u32 words=(1+std::popcount(program->param_mask))*4;
         u64 meaningful_positions=0;
-        for(u32 layout=0;layout<2;++layout) for(u32 hull=0;hull<2;++hull) {
-            auto fused_pipeline=DomainPipeline(device,*program,layout ? 144 : 128,hull ? 3 : 1);
-            for(u32 index=0;index<3;++index) for(u32 domain_base:{0u,4u,128u}) {
+        const bool inner_two_domain=hash==0x253e07649e3725f3ull;
+        const bool exact_domain=hash==0x90b8fb9c35aa6679ull || inner_two_domain;
+        const u32 admitted_hull=inner_two_domain ? 2u : 0u;
+        const char* exact_name=inner_two_domain ? "DS253 layout128/outer1/inner2" : "DS90 layout128/outer1/inner1";
+        struct Coverage {u64 comparisons=0,positions=0,parameters=0,uv=0,patch=0,uniform=0;};
+        std::array<Coverage,3> exact_coverage{};
+        std::array<std::vector<u32>,3> uniform_baseline;
+        const auto meaningful_position=[](const u32* value) {
+            bool nonzero=false;
+            for(u32 c=0;c<4;++c) {
+                const float f=std::bit_cast<float>(value[c]);
+                if(!std::isfinite(f))return false;
+                if(c<3 && f!=0)nonzero=true;
+            }
+            return nonzero && std::bit_cast<float>(value[3])!=0;
+        };
+        const auto different_position=[](const u32* a,const u32* b) {
+            for(u32 c=0;c<4;++c)
+                if(std::bit_cast<float>(a[c])!=std::bit_cast<float>(b[c]))return true;
+            return false;
+        };
+        for(u32 layout=0;layout<2;++layout) for(u32 hull=0;hull<(inner_two ? 3u : 2u);++hull) {
+            auto fused_pipeline=DomainPipeline(device,*program,layout ? 144 : 128,hull==1 ? 3 : 1,hull==2 ? 2 : 1);
+            for(u32 index=0;index<3;++index) for(u32 domain_base:{0u,4u,128u})
+            for(u32 storage=0;storage<(inner_two_domain ? 4u : 1u);++storage)
+            for(u32 uniform=0;uniform<(exact_domain && layout==0 && hull==admitted_hull ? 2u : 1u);++uniform) {
                 @autoreleasepool {
                     InitializeGuarded(lds); InitializeGuarded(factors);
                     Shader::GpuTessConsts tess{index ? 2u : 0u,kPatches,0,0,0};
                     std::array<u32,16> local_user,hull_user,domain_user;
-                    // Positive finite float vertex streams and a nonoverlapping
-                    // hull range isolate domain math from preparation edge cases.
-                    FillMemory(memory,0,index,1,256,local_user,hull_user,tess);
-                    DomainUniforms(memory,domain_base,domain_user);
+                    // The default nonoverlapping range isolates domain math;
+                    // DS253 also consumes actual overlapping inner-two stores.
+                    constexpr u32 hull_bases[]{256u,0u,16u,64u};
+                    const u32 hull_base=hull_bases[storage];
+                    FillMemory(memory,0,index,1,hull_base,local_user,hull_user,tess);
+                    DomainUniforms(memory,domain_base,domain_user,uniform);
                     std::memset(reference.contents,0xcd,reference.length);
                     std::memset(native.contents,0xab,native.length);
                     auto command=[queue commandBuffer];
@@ -371,8 +410,8 @@ void CheckDomainOutputs(id<MTLDevice> device,id<MTLCommandQueue> queue,
                             const float af=std::bit_cast<float>(a),bf=std::bit_cast<float>(b);
                             const bool both_nan=std::isnan(af) && std::isnan(bf);
                             if(a!=b && !both_nan) {
-                                std::fprintf(stderr,"Domain mismatch hash=%016llx layout=%u hull=%u index=%u ldsbase=%u sample=%u component=%u expected=%#x actual=%#x\n",
-                                    (unsigned long long)hash,layout ? 144u : 128u,hull,index,domain_base,
+                                std::fprintf(stderr,"Domain mismatch hash=%016llx layout=%u hull=%u index=%u ldsbase=%u hullbase=%u sample=%u component=%u expected=%#x actual=%#x\n",
+                                    (unsigned long long)hash,layout ? 144u : 128u,hull,index,domain_base,hull_base,
                                     sample,component,a,b);
                                 throw std::runtime_error("Captured domain output changed");
                             }
@@ -386,9 +425,49 @@ void CheckDomainOutputs(id<MTLDevice> device,id<MTLCommandQueue> queue,
                         }
                         if(finite_position && nonzero_position)++meaningful_positions;
                     }
+                    if(exact_domain && layout==0 && hull==admitted_hull && domain_base==0) {
+                        auto& coverage=exact_coverage[index];
+                        for(u32 sample=0;sample<kPatches*9;++sample) {
+                            const auto* value=expected+sample*words;
+                            coverage.comparisons+=words;
+                            if(!meaningful_position(value))continue;
+                            ++coverage.positions;
+                            bool finite_params=true,nonzero_params=false;
+                            for(u32 c=4;c<words;++c) {
+                                const float f=std::bit_cast<float>(value[c]);
+                                finite_params=finite_params && std::isfinite(f);
+                                nonzero_params=nonzero_params || (std::isfinite(f) && f!=0);
+                            }
+                            if(finite_params && nonzero_params)++coverage.parameters;
+                            const auto* first_uv=expected+(sample/9u)*9u*words;
+                            if(sample%9u && meaningful_position(first_uv) &&
+                                    different_position(value,first_uv))++coverage.uv;
+                            if(sample>=9u && meaningful_position(value-9u*words) &&
+                                    different_position(value,value-9u*words))++coverage.patch;
+                            if(uniform && !uniform_baseline[index].empty()) {
+                                const auto* before=uniform_baseline[index].data()+sample*words;
+                                if(meaningful_position(before))for(u32 c=0;c<words;++c)
+                                    if(std::isfinite(std::bit_cast<float>(before[c])) &&
+                                            std::isfinite(std::bit_cast<float>(value[c])) &&
+                                            std::bit_cast<float>(before[c])!=std::bit_cast<float>(value[c]))
+                                        ++coverage.uniform;
+                            }
+                        }
+                        if(!uniform)uniform_baseline[index].assign(expected,expected+kPatches*9u*words);
+                    }
                     ++cases;
                 }
             }
+        }
+        if(exact_domain)for(u32 index=0;index<3;++index) {
+            const auto& coverage=exact_coverage[index];
+            Require(coverage.comparisons && coverage.positions && coverage.parameters &&
+                coverage.uv && coverage.patch && coverage.uniform,
+                std::string("Admitted ")+exact_name+" lacks meaningful position/parameter/UV/patch/uniform coverage for index mode "+std::to_string(index));
+            std::printf("Admitted %s index=%u: %llu components, %llu finite nonzero-w positions, %llu finite meaningful parameter sets, UV/patch/uniform variation %llu/%llu/%llu\n",
+                exact_name,index,(unsigned long long)coverage.comparisons,(unsigned long long)coverage.positions,
+                (unsigned long long)coverage.parameters,(unsigned long long)coverage.uv,
+                (unsigned long long)coverage.patch,(unsigned long long)coverage.uniform);
         }
         Require(meaningful_positions>0,"Domain fixture produced no finite nonzero positions");
         std::printf("Domain %016llx: %llu finite nonzero clip positions compared\n",
@@ -401,6 +480,9 @@ void CheckDomainOutputs(id<MTLDevice> device,id<MTLCommandQueue> queue,
 } // namespace
 
 int main(int argc,char** argv) {
+    const bool inner_two=argc==3 && !std::strcmp(argv[2],"--inner-two");
+    const bool extended=inner_two || (argc==3 && !std::strcmp(argv[2],"--extended"));
+    if(argc>3 || (argc==3 && !extended))return 2;
     if (argc<2) {
         std::puts("Native tessellation equivalence requires an original shader capture directory");
         return 77;
@@ -409,20 +491,47 @@ int main(int argc,char** argv) {
         try {
             const std::filesystem::path directory=argv[1];
             Require(std::filesystem::is_directory(directory),"Shader capture directory does not exist");
+            if(extended) {
+                const auto admitted=Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0xf9f5fc457bc359fdull,0x90b8fb9c35aa6679ull,true);
+                Require(admitted.local_layout==128 && admitted.outer_factor==1,"Extended exact tuple did not match");
+                Require(!Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0xf9f5fc457bc359fdull,0x90b8fb9c35aa6679ull),"Default unexpectedly admits extended tuple");
+                Require(!Gpu::Metal::NativeTessellation(0x53b4731b549fb1f0ull,
+                    0xf9f5fc457bc359fdull,0x90b8fb9c35aa6679ull,true),"Unproved local pairing admitted");
+                Require(!Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0xf916abafa71dddf5ull,0x90b8fb9c35aa6679ull,true),"Unproved hull pairing admitted");
+            }
+            if(inner_two) {
+                const auto admitted=Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0x2aef5ffb7e95361full,0x253e07649e3725f3ull,false,true);
+                Require(admitted.local_layout==128 && admitted.outer_factor==1 && admitted.inner_factor==2,
+                    "Inner-two exact tuple did not match independent factor contract");
+                Require(!Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0x2aef5ffb7e95361full,0x253e07649e3725f3ull,true),"DS90 option unexpectedly admits inner-two tuple");
+                Require(!Gpu::Metal::NativeTessellation(0x53b4731b549fb1f0ull,
+                    0x2aef5ffb7e95361full,0x253e07649e3725f3ull,true,true),"Unproved inner-two local pairing admitted");
+                Require(!Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0xf9f5fc457bc359fdull,0x253e07649e3725f3ull,true,true),"Unproved inner-two hull pairing admitted");
+                Require(!Gpu::Metal::NativeTessellation(0x030976bf71b6a530ull,
+                    0x2aef5ffb7e95361full,0x90b8fb9c35aa6679ull,true,true),"Unproved inner-two domain pairing admitted");
+            }
             auto device=MTLCreateSystemDefaultDevice();
             if (!device) return 77;
             auto queue=[device newCommandQueue]; Require(bool(queue),"Metal queue unavailable");
             const std::array<u64,2> local_hashes{0x030976bf71b6a530ull,0x53b4731b549fb1f0ull};
-            const std::array<u64,2> hull_hashes{0xf9f5fc457bc359fdull,0xf916abafa71dddf5ull};
-            std::array<id<MTLComputePipelineState>,2> local_pipelines,hull_pipelines;
+            const std::array<u64,3> hull_hashes{0xf9f5fc457bc359fdull,0xf916abafa71dddf5ull,0x2aef5ffb7e95361full};
+            std::array<id<MTLComputePipelineState>,2> local_pipelines;
+            std::array<id<MTLComputePipelineState>,3> hull_pipelines{};
             for (u32 i=0;i<2;++i) {
                 local_pipelines[i]=CapturedPipeline(device,directory,local_hashes[i],6,Shader::TessStage::Local);
                 hull_pipelines[i]=CapturedPipeline(device,directory,hull_hashes[i],8,Shader::TessStage::Hull);
             }
+            if(inner_two)hull_pipelines[2]=CapturedPipeline(device,directory,hull_hashes[2],8,Shader::TessStage::Hull);
             std::string source=Shader::kMslPrelude;
             source+=Gpu::Metal::NativeTessellationMsl();
             source+=R"MSL(
-struct TestParams { uint layout, outer_factor, query_count, pad; };
+struct TestParams { uint layout, outer_factor, query_count, inner_factor; };
 kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1)]],
     device uint* hi [[buffer(2)]], device const DcMap& map [[buffer(3)]],
     constant uint* hull [[buffer(4)]], constant TestParams& p [[buffer(5)]],
@@ -431,7 +540,7 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
     if (patch>=tess.patch_count) return;
     DcMem memory={lo,hi,&map};
     DcNativeTess data;
-    dc_native_tess_init(data,memory,local,hull,tess,patch,p.layout,p.outer_factor);
+    dc_native_tess_init(data,memory,local,hull,tess,patch,p.layout,p.outer_factor,p.inner_factor);
     for (uint i=0;i<p.query_count;++i)
         output[patch*p.query_count+i]=dc_native_tess_load(data,queries[i]);
 }
@@ -451,7 +560,7 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
                 {0,1},{1,4},{1,16},{0xffffffu,0xffff80u},
                 {0x800000u,0x800000u},{1,256},{1,65440},{0xffffffu,16}}};
             unsigned cases=0,full_reference=0,sparse_reference=0;
-            for (u32 layout=0;layout<2;++layout) for (u32 hull=0;hull<2;++hull)
+            for (u32 layout=0;layout<2;++layout) for (u32 hull=0;hull<(inner_two ? 3u : 2u);++hull)
             for (u32 index=0;index<3;++index) for (u32 base : {0u,5u,0xfffffffcu})
             for (u32 profile=0;profile<5;++profile) for (const auto& product:hull_products) {
                 @autoreleasepool {
@@ -468,7 +577,9 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
                     Shader::GpuTessConsts tess{base,kPatches,0,0,0};
                     std::array<u32,16> local_user,hull_user;
                     FillMemory(memory,profile,index,product[0],product[1],local_user,hull_user,tess);
-                    const Params params{layout ? 144u : 128u,hull ? 3u : 1u,u32(addresses.size()),0};
+                    const Params params{layout ? 144u : 128u,hull==1 ? 3u : 1u,u32(addresses.size()),hull==2 ? 2u : 1u};
+                    const auto hardware_record=Gpu::Metal::NativeTessellationFactorRecord(
+                        {params.layout,params.outer_factor,params.inner_factor});
                     auto command=[queue commandBuffer];
                     auto encoder=[command computeCommandEncoder];
                     BindReference(encoder,local_pipelines[layout],local_user,memory,mapping,lds,factors,tess);
@@ -499,7 +610,7 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
                     if (safe_hull) {
                         const auto* halfs=reinterpret_cast<const std::uint16_t*>(static_cast<const std::uint8_t*>(factors.contents)+kGuardBytes);
                         for (u32 patch=0;patch<kPatches;++patch) for (u32 factor=0;factor<6;++factor)
-                            Require(halfs[patch*6+factor]==(hull && factor<4 ? 0x4200u : 0x3c00u),
+                            Require(halfs[patch*6+factor]==hardware_record[factor],
                                 "Original hull factors differ from the fixed-factor contract");
                     }
                     for (u32 patch=0;patch<kPatches;++patch) for (u32 q=0;q<addresses.size();++q) {
@@ -507,7 +618,7 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
                         u32 expected=word<kWords ? reference[patch*kWords+word] : 0;
                         if (!safe_hull) for (u32 factor=0;factor<6;++factor)
                             if (word==(u32(hull_base+factor*16)>>2))
-                                expected=hull && factor<4 ? 0x40400000u : 0x3f800000u;
+                                expected=std::bit_cast<u32>(float(factor<4 ? params.outer_factor : params.inner_factor));
                         if (actual[patch*addresses.size()+q]!=expected) {
                             std::fprintf(stderr,"Mismatch layout=%u hull=%u index=%u base=%#x profile=%u hullbase=%#x patch=%u address=%#x expected=%#x actual=%#x\n",
                                 params.layout,hull,index,base,profile,hull_base,patch,addresses[q],expected,
@@ -521,7 +632,7 @@ kernel void main0(constant uint* local [[buffer(0)]], device uint* lo [[buffer(1
             std::printf("Native tessellation: %u cases, %u original LS+HS GPU comparisons, %u original LS plus sparse hull oracles; indexed16/32, signed/overflow bases, formats/swizzles/OOB and allocation canaries passed\n",
                 cases,full_reference,sparse_reference);
             CheckDomainOutputs(device,queue,directory,local_pipelines,hull_pipelines,
-                memory,mapping,lds,factors);
+                memory,mapping,lds,factors,extended,inner_two);
             return 0;
         } catch (const std::exception& error) {
             std::fprintf(stderr,"Native tessellation fixture: %s\n",error.what());

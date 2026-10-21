@@ -663,6 +663,14 @@ struct MetalRenderer::Impl {
   bool Profiling() const { return profile && (!profile_trace_only || trace); }
   bool fast_typed_fills = true;
   bool native_tessellation = true;
+  bool native_tessellation_extended=[] {
+    const char* value=std::getenv("BB_METAL_NATIVE_TESSELLATION_EXTENDED");
+    return value && !std::strcmp(value,"1");
+  }();
+  bool native_tessellation_inner_two=[] {
+    const char* value=std::getenv("BB_METAL_NATIVE_TESSELLATION_INNER_TWO");
+    return value && !std::strcmp(value,"1");
+  }();
   bool opaque_exports = true;
   std::unique_ptr<GpuTextureUploader> texture_uploader;
   u64 gpu_texture_uploads=0,gpu_texture_upload_bytes=0;
@@ -772,7 +780,7 @@ struct MetalRenderer::Impl {
   std::array<u64,unsigned(PsRootRead::Reject::Count)> direct_smrd_root_results{};
   std::array<u64,13> direct_smrd_callback_rejects{};
   u64 native_tess_draws=0,translated_tess_draws=0;
-  id<MTLBuffer> native_tess_factors[2]{};
+  id<MTLBuffer> native_tess_factors[3]{};
   struct ProfileEntry {
     double seconds = 0;
     u64 calls = 0;
@@ -3721,14 +3729,17 @@ struct MetalRenderer::Impl {
     }
     if(domain_hash==0xc4b45ba023e435cfull) CaptureFogInputs(programs[0],user[0],"local");
     const auto native=native_tessellation && allow_native
-        ? NativeTessellation(programs[0]->hash,programs[1]->hash,domain_hash) : NativeTessellationConfig{};
+        ? NativeTessellation(programs[0]->hash,programs[1]->hash,domain_hash,
+            native_tessellation_extended,native_tessellation_inner_two)
+        : NativeTessellationConfig{};
     if (native && programs[0]->num_user_sgprs==6 && programs[1]->num_user_sgprs==8) {
-      const u32 slot=native.outer_factor==3 ? 1 : 0;
+      const u32 slot=native.inner_factor==2 ? 2 : native.outer_factor==3 ? 1 : 0;
       if (!native_tess_factors[slot]) {
         // One immutable factor record for all patches. Hardware tessellation,
         // winding and partitioning are retained exactly; no readback or compute.
         std::array<std::uint16_t,128> factors{};
-        for (u32 k=0;k<6;++k) factors[k]=k<4 && slot ? 0x4200 : 0x3c00;
+        const auto record=NativeTessellationFactorRecord(native);
+        std::copy(record.begin(),record.end(),factors.begin());
         native_tess_factors[slot]=[device newBufferWithBytes:factors.data() length:sizeof(factors)
             options:MTLResourceStorageModeShared];
       }
@@ -4887,6 +4898,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   vo.tess_stage = tessellated ? Shader::TessStage::Domain : Shader::TessStage::None;
   vo.native_tess_layout=tess.native.local_layout;
   vo.native_tess_factor=tess.native.outer_factor;
+  vo.native_tess_inner_factor=tess.native.inner_factor;
   vo.rect_list = rect;
   vo.points = prim == PrimType::PointList;
   vo.vtx_point_size = vo.points && (r[Reg::PA_CL_VS_OUT_CNTL] & 1);
@@ -4922,6 +4934,9 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   vs_key = Hash(vo.tess_stage, vs_key);
   vs_key = Hash(vo.native_tess_layout,vs_key);
   vs_key = Hash(vo.native_tess_factor,vs_key);
+  // Retain existing inner1 keys; inner2 must never share that source variant.
+  if(vo.native_tess_layout && vo.native_tess_inner_factor!=1)
+    vs_key=Hash(vo.native_tess_inner_factor,vs_key);
   vs_key = Hash(rect, vs_key);
   vs_key = Hash(u32(vo.points) | (u32(vo.vtx_point_size) << 1), vs_key);
   vs_key = Hash(capture, vs_key);
@@ -5888,7 +5903,25 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   if(!PatchUserData(prepared)) return;
   EnsureCommandBuffer();
   UpdateMemMap();
-  id<MTLComputeCommandEncoder> e = [cmd computeCommandEncoder];
+  id<MTLComputeCommandEncoder> e=nil;
+  std::optional<StageCounterTimeline::Pass> compute_counter;
+  if(stage_counter_log && stage_counter_log->ComputeEnabled()) {
+    auto descriptor=[MTLComputePassDescriptor computePassDescriptor];
+    descriptor.dispatchType=MTLDispatchTypeSerial;
+    StageCounterTimeline::Pass metadata;metadata.frame=frame_count;
+    metadata.compute={addr,cs->hash,key,pkey,bool(indirect),!indirect,
+        {indirect ? u64(0) : u64(gx),indirect ? u64(0) : u64(gy),indirect ? u64(0) : u64(gz)},
+        {tx,ty,tz}};
+    compute_counter=stage_counter_log->AttachCompute(descriptor,std::move(metadata));
+    if(compute_counter) {
+      @try {e=[cmd computeCommandEncoderWithDescriptor:descriptor];}
+      @catch(NSException* exception) {(void)exception;e=nil;}
+      if(!e) {stage_counter_log->CancelCompute(descriptor,*compute_counter);compute_counter.reset();}
+    }
+  }
+  // Disabled, unsupported, exhausted or failed sampling preserves the exact
+  // original encoder route; it adds no encoder/cut/commit or readiness change.
+  if(!e)e=[cmd computeCommandEncoder];
   if(!e) {execution->Fail("Metal could not encode a compute dispatch.");return;}
   [e setComputePipelineState:pso];
   [e setBytes:cud length:64 atIndex:Shader::Binding::UserData];
@@ -5921,6 +5954,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
         threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
   }
   [e endEncoding];
+  if(compute_counter)stage_counter_passes.push_back(std::move(*compute_counter));
   if (dump_passes && trace && dump_frames) {
     u32 n = 0;
     for (u32 k = 0; k < res.tex.size() && n < 8; ++k) {

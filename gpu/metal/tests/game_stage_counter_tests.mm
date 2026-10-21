@@ -33,6 +33,24 @@ static void Invalid(const std::array<U64,4>& raw,Stage::ClockPair begin,Stage::C
     CHECK(!value.valid);CHECK(std::isnan(value.vertex_ms));CHECK(std::isnan(value.fragment_ms));
 }
 static void PureContracts() {
+    CHECK(Stage::ConfiguredCompute("1"));
+    for(const char* value:{"","0","01","1 ","true","-1"})CHECK(!Stage::ConfiguredCompute(value));
+    CHECK(!Stage::ConfiguredCompute(nullptr));
+    CHECK(Stage::Pass{}.kind==Stage::Kind::Render);
+    const auto compute=Stage::ConvertCompute({100,300},{1000,50},{3000,1050});
+    CHECK(compute.valid);Near(compute.milliseconds,.0004);
+    const U64 compute_origin=~U64(0)-20000;
+    const auto compute_large=Stage::ConvertCompute({compute_origin+100,compute_origin+150},
+        {compute_origin,compute_origin},{compute_origin+2000,compute_origin+1000});
+    CHECK(compute_large.valid);Near(compute_large.milliseconds,.0001);
+    for(const auto raw:std::array<std::array<U64,2>,4>{{{300,100},{49,300},{100,1051},{100,MTLCounterErrorValue}}}) {
+        const auto invalid=Stage::ConvertCompute(raw,{1000,50},{3000,1050});
+        CHECK(!invalid.valid && std::isnan(invalid.milliseconds));
+    }
+    CHECK(!Stage::ConvertCompute({100,300},{1000,50},{1000,1050}).valid);
+    CHECK(!Stage::ConvertCompute({100,300},{1000,50},{3000,50}).valid);
+    const auto compute_zero=Stage::ConvertCompute({100,100},{1000,50},{3000,1050});
+    CHECK(compute_zero.valid);Near(compute_zero.milliseconds,0);
     CHECK(Stage::ConfiguredPoolSize(nullptr)==16 && Stage::PoolSize==16);
     for(const auto [value,expected]:std::array<std::pair<const char*,std::size_t>,5>{{
         {"16",16},{"17",17},{"32",32},{"128",128},{"256",256}}})
@@ -40,7 +58,14 @@ static void PureContracts() {
     for(const char* value:{"","0","1","15","257","-16","+16","016"," 32","32 ",
             "32x","256000000000000000000000000000000000000000000000000000000"})
         CHECK(!Stage::ConfiguredPoolSize(value));
+    CHECK(Stage::MaximumSampleCount==1024);
     CHECK(Stage::MaximumTimestampPayload==256*4*sizeof(MTLCounterResultTimestamp));
+    for(std::size_t slot=0;slot<Stage::MaximumPoolSize;++slot) {
+        CHECK(Stage::SampleBase(slot)==slot*4);
+        CHECK(Stage::SampleBase(slot)+Stage::SampleCount<=Stage::MaximumSampleCount);
+        CHECK(Stage::SampleBase(slot)+Stage::ComputeSampleCount<=Stage::SampleBase(slot)+Stage::SampleCount);
+        if(slot)CHECK(Stage::SampleBase(slot-1)+Stage::SampleCount==Stage::SampleBase(slot));
+    }
     CHECK(Stage::Pass{}.slot==Stage::MaximumPoolSize);
     const Stage::ClockPair begin{1000,50},end{3000,1050};
     const std::array<U64,4> samples{100,200,300,700};
@@ -99,7 +124,7 @@ struct Environment {
     struct Previous {std::string key;std::optional<std::string> value;};
     std::vector<Previous> saved;
     Environment() {
-        for(const char* key:{"BB_METAL_STAGE_COUNTER_CSV","BB_METAL_STAGE_COUNTER_ALL_PASSES","BB_METAL_STAGE_COUNTER_SLOTS","BB_SOURCE_GAME","BB_GAME_DIR"}) {
+        for(const char* key:{"BB_METAL_STAGE_COUNTER_CSV","BB_METAL_STAGE_COUNTER_ALL_PASSES","BB_METAL_STAGE_COUNTER_SLOTS","BB_METAL_STAGE_COUNTER_COMPUTE","BB_SOURCE_GAME","BB_GAME_DIR"}) {
             const char* value=std::getenv(key);
             saved.push_back({key,value ? std::optional<std::string>(value) : std::nullopt});
             CHECK(!::unsetenv(key));
@@ -306,6 +331,8 @@ static void ValidRows(const std::vector<CsvRow>& rows) {
         CHECK(!Number(row,"mixed_encoded_vs") && !Number(row,"mixed_encoded_ps") && !Number(row,"unknown_encoded_ps"));
         CHECK(!Number(row,"selection_all_passes"));
         CHECK(Number(row,"pool_slots")==Stage::PoolSize);
+        CHECK(row.at("pass_kind")=="render" && row.at("compute_start_raw").empty() && row.at("compute_end_raw").empty());
+        CHECK(Number(row,"counter_schema")==2);
         for(unsigned k=0;k<Targets;++k)CHECK(Number(row,("format"+std::to_string(k)).c_str())==MTLPixelFormatRGBA8Unorm);
         const Stage::ClockPair begin{Number(row,"cpu0_ns"),Number(row,"gpu0_raw")};
         const Stage::ClockPair end{Number(row,"cpu1_ns"),Number(row,"gpu1_raw")};
@@ -405,9 +432,18 @@ static void ScaledPoolContracts(id<MTLDevice> device,const fs::path& root) {
         auto log=Stage::Log::Open(device);CHECK(log && log->PoolCapacity()==capacity);
         auto command=[queue commandBuffer];CHECK(command);
         const auto begin=log->Clock();std::vector<Stage::Pass> passes;
+        id<MTLCounterSampleBuffer> shared_buffer=nil;
         for(std::size_t k=0;k<capacity;++k) {
             auto render_pass=make_pass();metadata.frame=1000+k;
             auto pass=log->Attach(render_pass,metadata);CHECK(pass && pass->slot==k);
+            const auto attachment=render_pass.sampleBufferAttachments[0];
+            CHECK(attachment.sampleBuffer && attachment.sampleBuffer.sampleCount==capacity*Stage::SampleCount);
+            if(!k)shared_buffer=attachment.sampleBuffer;
+            CHECK(attachment.sampleBuffer==shared_buffer);
+            CHECK(attachment.startOfVertexSampleIndex==Stage::SampleBase(k));
+            CHECK(attachment.endOfVertexSampleIndex==Stage::SampleBase(k)+1);
+            CHECK(attachment.startOfFragmentSampleIndex==Stage::SampleBase(k)+2);
+            CHECK(attachment.endOfFragmentSampleIndex==Stage::SampleBase(k)+3);
             auto encoder=[command renderCommandEncoderWithDescriptor:render_pass];CHECK(encoder);
             [encoder setRenderPipelineState:pipeline];
             Stage::NoteDraw(*pass,0x10,0x20,0x100,0x200,{0x1001,0x2001,0x3001,true,true,true});
@@ -420,11 +456,16 @@ static void ScaledPoolContracts(id<MTLDevice> device,const fs::path& root) {
         [command commit];Bounded("scaled pool command",[&]{return complete->done.load();});
         CHECK(complete->status==MTLCommandBufferStatusCompleted && !complete->error);
         Bounded("scaled pool rows",[&]{return ReadRows(path).size()==capacity;});
+        std::optional<std::array<U64,4>> first_raw;bool distinct_slots=false;
         for(const auto& row:ReadRows(path)) {
+            const std::array<U64,4> raw{Number(row,"vertex_start_raw"),Number(row,"vertex_end_raw"),
+                Number(row,"fragment_start_raw"),Number(row,"fragment_end_raw")};
+            if(first_raw)distinct_slots|=raw!=*first_raw;else first_raw=raw;
             CHECK(Number(row,"pool_slots")==capacity && Number(row,"selection_all_passes")==1);
             CHECK(Number(row,"data_valid")==1 && Number(row,"calibration_valid")==1);
             CHECK(Number(row,"exhausted")==1 && !Number(row,"attach_errors") && !Number(row,"encode_errors"));
         }
+        CHECK(distinct_slots); // resolving every row from sample range0 would fail
         std::array<std::uint16_t,32*32*4> pixels{};
         [texture getBytes:pixels.data() bytesPerRow:32*8 fromRegion:MTLRegionMake2D(0,0,32,32) mipmapLevel:0];
         constexpr std::array<std::uint16_t,4> expected{0x3c00,0,0,0x3c00};
@@ -441,12 +482,128 @@ static void ScaledPoolContracts(id<MTLDevice> device,const fs::path& root) {
             }
             return true;
         });
+        CHECK(descriptors.back().sampleBufferAttachments[0].startOfVertexSampleIndex==Stage::SampleBase(capacity-1));
         log->Cancel(descriptors.back(),reserved.back());
         auto replacement_descriptor=make_pass();auto replacement=log->Attach(replacement_descriptor,metadata);
         CHECK(replacement && replacement->slot==capacity-1);
+        CHECK(replacement_descriptor.sampleBufferAttachments[0].sampleBuffer==shared_buffer);
+        CHECK(replacement_descriptor.sampleBufferAttachments[0].startOfVertexSampleIndex==Stage::SampleBase(capacity-1));
         log->Cancel(replacement_descriptor,*replacement);
         for(std::size_t k=0;k+1<capacity;++k)log->Cancel(descriptors[k],reserved[k]);
     }
+    CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_SLOTS"));
+    CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_ALL_PASSES"));
+}
+static void ComputePassContracts(id<MTLDevice> device,const fs::path& root) {
+    const auto csv=root/"compute-natural.csv";
+    Environment::Set("BB_METAL_STAGE_COUNTER_CSV",csv);
+    CHECK(!::setenv("BB_METAL_STAGE_COUNTER_SLOTS","32",1));
+    CHECK(!::setenv("BB_METAL_STAGE_COUNTER_ALL_PASSES","1",1));
+    for(const char* value:{"0","01","1 ","true",""}) {
+        CHECK(!::setenv("BB_METAL_STAGE_COUNTER_COMPUTE",value,1));
+        auto disabled=Stage::Log::Open(device);CHECK(disabled && !disabled->ComputeEnabled());
+        auto descriptor=[MTLComputePassDescriptor computePassDescriptor];
+        CHECK(!disabled->AttachCompute(descriptor,Stage::Pass{}));
+    }
+    CHECK(!::setenv("BB_METAL_STAGE_COUNTER_COMPUTE","1",1));
+    auto log=Stage::Log::Open(device);CHECK(log && log->ComputeEnabled());
+    auto queue=[device newCommandQueue];CHECK(queue);
+    NSString* source=@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void counter_compute(device uint* out [[buffer(0)]],constant uint& seed [[buffer(1)]],uint i [[thread_position_in_grid]]){out[i]=seed^(i*17u+3u);}";
+    NSError* error=nil;auto library=[device newLibraryWithSource:source options:nil error:&error];CHECK(library);
+    auto pipeline=[device newComputePipelineStateWithFunction:[library newFunctionWithName:@"counter_compute"] error:&error];CHECK(pipeline);
+    constexpr unsigned elements=256;
+    auto output=[device newBufferWithLength:elements*4 options:MTLResourceStorageModeShared];CHECK(output);
+    const std::array<std::uint32_t,4> arguments{4,1,1,0};
+    auto indirect=[device newBufferWithBytes:arguments.data() length:sizeof(arguments) options:MTLResourceStorageModeShared];CHECK(indirect);
+    auto texture_descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float width:32 height:32 mipmapped:NO];
+    texture_descriptor.storageMode=MTLStorageModeShared;texture_descriptor.usage=MTLTextureUsageRenderTarget;
+    auto texture=[device newTextureWithDescriptor:texture_descriptor];CHECK(texture);
+    auto render_pipeline=MakePipeline(device,1,MTLPixelFormatRGBA16Float);
+    auto command=[queue commandBuffer];CHECK(command);const auto begin=log->Clock();
+    std::vector<Stage::Pass> passes;
+    auto render_descriptor=[MTLRenderPassDescriptor renderPassDescriptor];
+    render_descriptor.colorAttachments[0].texture=texture;
+    render_descriptor.colorAttachments[0].loadAction=MTLLoadActionClear;
+    render_descriptor.colorAttachments[0].storeAction=MTLStoreActionStore;
+    Stage::Pass render_metadata;render_metadata.frame=2000;render_metadata.width=render_metadata.height=32;render_metadata.colors=1;
+    auto render=log->Attach(render_descriptor,render_metadata);CHECK(render && render->slot==0);
+    auto render_encoder=[command renderCommandEncoderWithDescriptor:render_descriptor];CHECK(render_encoder);
+    [render_encoder setRenderPipelineState:render_pipeline];
+    [render_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[render_encoder endEncoding];passes.push_back(*render);
+    const auto shared=render_descriptor.sampleBufferAttachments[0].sampleBuffer;
+    for(unsigned kind=0;kind<2;++kind) {
+        auto descriptor=[MTLComputePassDescriptor computePassDescriptor];descriptor.dispatchType=MTLDispatchTypeSerial;
+        Stage::Pass metadata;metadata.frame=2001+kind;
+        metadata.compute={0x123400,0xabcd,0x55,0x66,bool(kind),!kind,
+            {kind ? 0ull : 4ull,kind ? 0ull : 1ull,kind ? 0ull : 1ull},{64,1,1}};
+        auto pass=log->AttachCompute(descriptor,metadata);CHECK(pass && pass->kind==Stage::Kind::Compute && pass->slot==kind+1);
+        CHECK(descriptor.sampleBufferAttachments[0].sampleBuffer==shared);
+        CHECK(descriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex==Stage::SampleBase(pass->slot));
+        CHECK(descriptor.sampleBufferAttachments[0].endOfEncoderSampleIndex==Stage::SampleBase(pass->slot)+1);
+        auto encoder=[command computeCommandEncoderWithDescriptor:descriptor];CHECK(encoder);
+        [encoder setComputePipelineState:pipeline];[encoder setBuffer:output offset:0 atIndex:0];
+        const std::uint32_t seed=kind ? 29 : 11;[encoder setBytes:&seed length:4 atIndex:1];
+        if(kind)[encoder dispatchThreadgroupsWithIndirectBuffer:indirect indirectBufferOffset:0 threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        else [encoder dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        [encoder endEncoding];passes.push_back(*pass);
+    }
+    const auto complete=std::make_shared<Completion>();ArmCompletion(command,log,begin,std::move(passes),700,complete);
+    [command commit];Bounded("mixed render/compute completion",[&]{return complete->done.load();});
+    CHECK(complete->status==MTLCommandBufferStatusCompleted && !complete->error);
+    // Strict-flag opens wrote only repeated headers; exactly3 actual rows result.
+    Bounded("mixed render/compute rows",[&]{return ReadRows(csv).size()==3;});
+    unsigned render_rows=0,compute_rows=0;
+    for(const auto& row:ReadRows(csv)) {
+        CHECK(Number(row,"counter_schema")==2 && Number(row,"pool_slots")==32);
+        CHECK(Number(row,"data_valid")==1 && Number(row,"calibration_valid")==1);
+        if(row.at("pass_kind")=="render") {++render_rows;CHECK(row.at("compute_start_raw").empty());continue;}
+        ++compute_rows;CHECK(row.at("pass_kind")=="compute");
+        for(const char* key:{"vertex_start_raw","vertex_end_raw","fragment_start_raw","fragment_end_raw"})CHECK(row.at(key).empty());
+        CHECK(std::isnan(std::stod(row.at("vertex_ms"))) && std::isnan(std::stod(row.at("fragment_ms"))));
+        CHECK(Number(row,"compute_program")==0x123400 && Number(row,"compute_gcn_hash")==0xabcd);
+        CHECK(Number(row,"compute_encoded_key")==0x55 && Number(row,"compute_pipeline_key")==0x66);
+        const bool indirect_row=Number(row,"compute_indirect");
+        CHECK(bool(Number(row,"compute_groups_known"))==!indirect_row);
+        CHECK(Number(row,"compute_groups_x")==unsigned(indirect_row ? 0 : 4));
+        CHECK(Number(row,"compute_groups_y")==unsigned(indirect_row ? 0 : 1));
+        CHECK(Number(row,"compute_groups_z")==unsigned(indirect_row ? 0 : 1));
+        CHECK(Number(row,"compute_threads_x")==64 && Number(row,"compute_threads_y")==1 && Number(row,"compute_threads_z")==1);
+        const auto duration=Stage::ConvertCompute({Number(row,"compute_start_raw"),Number(row,"compute_end_raw")},
+            {Number(row,"cpu0_ns"),Number(row,"gpu0_raw")},{Number(row,"cpu1_ns"),Number(row,"gpu1_raw")});
+        CHECK(duration.valid);Near(std::stod(row.at("compute_ms")),duration.milliseconds,5.1e-10);
+        CHECK(Number(row,"compute_natural_passes")==2 && Number(row,"compute_selected")==2);
+        CHECK(!Number(row,"compute_exhausted") && !Number(row,"compute_attach_errors") && !Number(row,"compute_encode_errors") && !Number(row,"compute_invalid_results"));
+    }
+    CHECK(render_rows==1 && compute_rows==2);
+    const auto* values=static_cast<const std::uint32_t*>(output.contents);
+    for(unsigned i=0;i<elements;++i)CHECK(values[i]==(29u^(i*17u+3u)));
+    std::array<std::uint16_t,32*32*4> pixels{};
+    [texture getBytes:pixels.data() bytesPerRow:32*8 fromRegion:MTLRegionMake2D(0,0,32,32) mipmapLevel:0];
+    constexpr std::array<std::uint16_t,4> expected{0x3c00,0,0,0x3c00};
+    for(std::size_t i=0;i<pixels.size();++i)CHECK(pixels[i]==expected[i%4]);
+    // Exhaust and recover the shared pool with compute reservations. These
+    // fixture-only reservations never become encoders or extra GPU commands.
+    std::vector<Stage::Pass> reserved;std::vector<MTLComputePassDescriptor*> descriptors;
+    Bounded("compute cancellation reservations",[&] {
+        while(reserved.size()<log->PoolCapacity()) {
+            auto descriptor=[MTLComputePassDescriptor computePassDescriptor];
+            auto pass=log->AttachCompute(descriptor,Stage::Pass{});
+            if(!pass)return false; // final asynchronous row may not yet have released
+            CHECK(pass->slot==reserved.size());descriptors.push_back(descriptor);reserved.push_back(*pass);
+        }
+        return true;
+    });
+    auto exhausted=[MTLComputePassDescriptor computePassDescriptor];
+    CHECK(!log->AttachCompute(exhausted,Stage::Pass{}) && !exhausted.sampleBufferAttachments[0].sampleBuffer);
+    log->CancelCompute(descriptors.back(),reserved.back());CHECK(!descriptors.back().sampleBufferAttachments[0].sampleBuffer);
+    auto recovered_descriptor=[MTLComputePassDescriptor computePassDescriptor];
+    auto recovered=log->AttachCompute(recovered_descriptor,Stage::Pass{});CHECK(recovered && recovered->slot==log->PoolCapacity()-1);
+    CHECK(recovered_descriptor.sampleBufferAttachments[0].sampleBuffer==shared);
+    CHECK(recovered_descriptor.sampleBufferAttachments[0].startOfEncoderSampleIndex==Stage::SampleBase(recovered->slot));
+    log->CancelCompute(recovered_descriptor,*recovered);
+    for(std::size_t k=0;k+1<reserved.size();++k)log->CancelCompute(descriptors[k],reserved[k]);
+    CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_COMPUTE"));
     CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_SLOTS"));
     CHECK(!::unsetenv("BB_METAL_STAGE_COUNTER_ALL_PASSES"));
 }
@@ -509,6 +666,7 @@ static int GpuContracts() {
     const auto rows=ReadRows(csv);ValidRows(rows);CHECK(Number(rows.back(),"submission")==2 && Number(rows.back(),"frame")==100);
     AllPassSelection(device,temporary.path);
     ScaledPoolContracts(device,temporary.path);
+    ComputePassContracts(device,temporary.path);
     puts("Stage counters GPU: natural passes,16-slot exhaustion/recovery, every MRT pixel, calibrated rows and retained completion lifetime passed");
     return 0;
 }

@@ -2451,7 +2451,8 @@ std::string Emitter::Run() {
         if (domain) {
             if (o.native_tess_layout) {
                 src += "    DcNativeTess dc_local;\n    dc_native_tess_init(dc_local, mem, dc_lud, dc_hud, dc_tp, dc_patch, " +
-                    N(o.native_tess_layout) + "u, " + N(o.native_tess_factor) + "u);\n";
+                    N(o.native_tess_layout) + "u, " + N(o.native_tess_factor) + "u, " +
+                    N(o.native_tess_inner_factor) + "u);\n";
                 src += "    o = dc_run(0u, 0u, ud, mem, dc_uv, dc_patch, dc_local" + TexArgs() + ");\n";
             } else src += "    o = dc_run(0u, 0u, ud, mem, dc_uv, dc_patch, dc_lds + dc_patch * " +
                 N(kTessLdsWords) + "u" + TexArgs() + ");\n";
