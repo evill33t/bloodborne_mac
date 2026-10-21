@@ -213,6 +213,8 @@ unsigned check_steps() {
             for (int k = 0; k < fps * 10; ++k) {
                 const auto step = MacTimingVerify::Step(target, target, scale);
                 if (step.seconds != expected) throw std::runtime_error("Production task step differs from frame-time contract");
+                if (step.wind_seconds != expected * 0.5f)
+                    throw std::runtime_error("Wind no longer preserves the original 1/60 step at 30 fps");
                 milliseconds += step.play_ms;
             }
             if (std::abs(milliseconds - std::int64_t(double(expected) * fps * 10000)) > 1)
@@ -224,6 +226,8 @@ unsigned check_steps() {
             const auto step = MacTimingVerify::Step(measured, 1.f / fps);
             if (step.seconds != std::min(std::max(measured, 1.f / fps), 1.f / 30))
                 throw std::runtime_error("Task delta clamp differs from FPS++ contract");
+            if (step.wind_seconds != step.seconds * 0.5f)
+                throw std::runtime_error("Wind does not follow the clamped task delta");
             ++checks;
         }
         // An independent libm oracle for bbhost's camera decay/retention.

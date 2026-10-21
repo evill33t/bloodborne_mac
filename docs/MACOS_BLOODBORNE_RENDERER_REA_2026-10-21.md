@@ -24,14 +24,12 @@ The owned REA target was closed after export.
 All four observed timing loads are already covered by runtime frame-time
 redirects: original RVAs `0x2313d8d`, `0x2313dad`, `0x2313db7`, `0x2315d71`.
 They cover the device-mode and object-presence branches. No missing fixed
-1/60 load was found in this procedure. Its interaction clocks have not yet
-been linked to fields of the wind shader's constant buffer, so this is not
-proof of correct displayed foliage motion or original PS4 sway speed.
+load was found. A later original-30 timing control did reveal an incorrect
+scale in these redirects; see the original-speed comparison below.
 
 The earlier shader fix remains present: the sixteen modified `V_CNDMASK_B32`
 selections in Dream wind VS `e4abfca709b00ef3` preserve ABS/NEG operand bits.
-Changing the authored wind speed without a reproduced timing defect would
-hide rather than explain the remaining jitter.
+The shader selection fix alone does not correct a wrongly converted clock.
 
 ## Fence mapping metadata cache
 
@@ -97,15 +95,37 @@ descriptor/wind/view input pairs in each run, no denied proofs and no CPU/GPU
 mismatches. The active phase field at byte 140 progressed monotonically at
 0.993524 and 0.993334 raw units per host second respectively, without resets,
 reversals or repeated per-frame values. Other seven phase drivers were zero.
-No source aliases were found. This does not reproduce a doubled wind clock
-or mutable-input corruption in the sampled view. The original writer's units
-and later actual vertex reads remain unproven. Jitter is not declared fixed.
+No source aliases were found. These observations did not reproduce mutable
+inputs, but did not establish the original animation rate: the initial
+inference that a near-one raw phase rate excluded doubled wind was too strong.
+Later actual vertex reads remain unproven. Jitter is not declared fixed.
 
 Captures split passes and are diagnostic only. Identical CPU/GPU copies do
 not prove identical later vertex reads; different bytes do not alone prove
 an invalid writer. The synchronized/native-indirect-off control rejected all
 240 observations for pending callback effects, without reading the payload.
 Its video is a visual control only; no phase-speed comparison is supported.
+
+The original-30 control `rea21-wind30-original` leaves the wind instructions
+unconverted. Its 240 complete observations and 720 matching CPU/GPU input
+pairs show the active phase advancing exactly 1/60 each frame. It advanced
+0.474871 raw units per host second at approximately 28.5 actual FPS, versus
+0.9935 in the converted run. Original bytes confirm mode one's load is 1/60
+and the alternate mode's is 1/30. Redirecting both to a full frame step had
+doubled the authored sway speed.
+
+The correction validates all four complete original instructions before the
+FPS++ group is applied, and redirects them to a dedicated aligned word in
+the existing owned timing-tail block. The default native frame manager writes
+half its clamped, time-scaled task step there. The original 30 mode and
+guest/compare reference modes retain their existing instructions. Production
+timing fixtures, including 82 step checks, the original read-only limiter
+differential and required negative control, pass. The corrected live capture
+`rea21-wind-fixed120` has 240 complete observations and 720 identical input
+pairs, with no GPU errors. Its active phase advances 0.496705 raw units per
+host second (previously 0.993524), without reversals or repeated frames. This
+confirms the doubled clock is corrected. Later vertex reads and the remaining
+visual jitter still require separate assessment.
 
 ## CPU work chosen for optimization
 
@@ -204,8 +224,8 @@ compatible with the existing 128-byte sparse LS reconstruction and factor-one
 HS. Current-attachment feedback still forces translated preparation. In the
 retained traced frame, the new gate covers at most five additional draws
 before runtime alias checks. The frequently seen `f916abafa71dddf5` hull is
-already supported; another missing hull requires inner factor two and stays
-excluded.
+already supported. The separately guarded inner-factor-two extension below
+now covers the other exact family.
 
 The private original-shader GPU differential passed 1,440 preparation cases
 and 189 domain cases, comparing 339,552 output components. Finite/infinite
@@ -238,3 +258,80 @@ metadata, the bridge fabricates `prot=3`, GPU-write mappings grant host CPU
 write, and a permanent writable physical-pool alias is not in that inventory.
 Internal requested permissions do not prove absence of effective writable
 aliases. No texture content/readiness checks were relaxed.
+
+## Inner-factor-two native tessellation
+
+`BB_METAL_NATIVE_TESSELLATION_INNER_TWO=1` admits only
+LS `030976bf71b6a530` / HS `2aef5ffb7e95361f` / DS `253e07649e3725f3`.
+Original HS instructions write four outer half factors of one and two inner
+factors of two. Sparse LDS reconstruction preserves the six stores, signed
+24-bit address math, word aliases and hull-over-local precedence. A separate
+immutable Metal factor record carries inner two; existing inner-one records
+and shader keys retain their previous semantics. Unknown pairings and
+attachment feedback retain translated preparation.
+
+The expanded original-shader GPU differential passed 2,160 preparation cases
+(1,890 original LS+HS comparisons and 270 sparse-oracle cases), plus 531 domain
+cases / 1,008,288 components. All finite/infinite bits matched; only paired
+NaN payloads were ignored. The admitted inner-two tuple independently
+produced finite meaningful positions and parameters with UV, patch and
+camera/fade variation in all three index modes. This proves the tested shader
+outputs, not whole-game raster equivalence or a gameplay FPS improvement.
+
+## Ordinary compute profiling
+
+The opt-in profiler now supports ordinary `Impl::Dispatch` compute encoders
+with dedicated start/end samples in the shared timestamp buffer. Schema two
+separates render and compute rows, raw samples, durations and error counters.
+CPU and actual Metal fixtures check direct/indirect dispatch output, rendered
+pixels, disjoint slots, invalid results, exhaustion and reuse after completion.
+No command split, drain or wait is added. Coverage excludes uploader/adapters,
+translated LS/HS, special helpers, blits and presentation.
+
+The 25-second Dream diagnostic captured 850 measured frame labels, 64,737
+compute and 10,200 selected material-render rows. Ordinary compute's leading
+programs cost approximately 0.228, 0.194 and 0.115 ms aggregate per frame; no
+single dominant compute stall appeared. Two invalid timestamp results in the
+whole startup-plus-game capture are excluded; no GPU command failed. Stage
+intervals describe sampled elapsed execution, not utilization or ALU occupancy.
+
+## Native expansion gameplay decision
+
+The four-run 60-second OFF/ON/ON/OFF comparison used one corrected-clock
+runtime (`f406da4cab8da0cb89e1aa6e2d77a19ae7d9d66729e2a66686be1adb9db9fc43`),
+the same validated Dream map/pose, native 1080p and AC power. Both new
+tessellation options were toggled together; extended native vertex fetch and
+read-only/direct root experiments were off.
+
+| Run | Displayed FPS usable for selection | Missing presentation timestamps | GPU failures |
+| --- | ---: | ---: | ---: |
+| Control A | excluded | 1 | 0 |
+| Both native A | 22.9260 | 0 | 0 |
+| Both native B | excluded | 1 | 0 |
+| Control B | excluded | 108 | 0 |
+
+Both native runs eliminated translated preparation in this scene, but there
+is no clean matched control pair and no repeatable FPS improvement. Control B
+had a 3.79-second presentation gap; that is excluded from the optimization
+comparison, not counted as a GPU crash. Both additions remain off by default.
+The earlier DS90-only 37.6059 versus 28.8279 comparison also had substantial
+control drift and is insufficient to promote that option independently.
+
+## Final regression checks
+
+The complete build and serial CPU/Metal suite after the wind-clock correction,
+shared render/compute profiler and both exact tessellation additions passed:
+98 tests passed, two expected private-input skips, zero failures, 117.16 s.
+The separately supplied original-shader tessellation differential passed the
+private-input coverage described above; the default CTest skip is not counted
+as that private test. The original-limiter differential and timing mutation
+control also passed. Longer movement/transition testing and final source/save
+integrity checks are pending.
+
+A fresh five-second Rosetta sample during the longer Dream gameplay run
+recorded 1,057 graphics-command-thread samples: 701 under draw recording and
+319 under `TextureChanged` (approximately 30.2 percent of that thread's
+samples), predominantly the chunk-hash loop. Sampling perturbs execution and
+partially unsymbolized Rosetta stacks limit precision; these are not exclusive
+CPU cycles. This independently confirms texture validation remains a major
+CPU cost. No readiness, alias or writer proof was relaxed to skip it.

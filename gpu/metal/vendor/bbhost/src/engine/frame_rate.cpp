@@ -435,6 +435,17 @@ constexpr Site kFrameTimeSites[] = {
     {0x02713d8d, "c5fa1025db606102", "c5fa1025736b0403"},
 };
 
+// The original 30 fps wind advances by 1/60 per frame, not 1/30. The
+// converted mode selects the alternate 1/30 loads, so redirect all four
+// loads to a separate half-step instead of the task's full frame time.
+// Check complete instructions before the FPS++ displacement edits run.
+constexpr Site kWindStepLoads[] = {
+    {0x02713d8d, "c5fa1025db606102", ""},
+    {0x02713dad, "c5fa1005bb606102", ""},
+    {0x02713db7, "c5fa1005b5606102", ""},
+    {0x02715d71, "c5fa1025fb406102", ""},
+};
+
 // The play time (GameDataMan+0x94, milliseconds: the save list's clock and
 // the play log's): NS_SPRJ::MoveMapStep::InGameUpdate adds the frame's step
 // to it in whole milliseconds, truncated - (int)(dt * 1000) - so a 16.7 ms
@@ -686,6 +697,7 @@ double g_play_ms_carry = 0.0;
 // The task step the cave loads (kStepLoad); while it is ours a plugin's time
 // scale scales the step, not the frames' pace.
 std::uint64_t g_step_va = 0;
+std::uint64_t g_wind_step_va = 0;
 std::atomic<bool> g_scale_by_step{false};
 // The redirected loads' slots (kDtLoads): one per constant, kind and width,
 // 16 bytes each in the image's tail, rewritten every frame from the constant
@@ -1249,6 +1261,7 @@ void each_frame(const SprjFlipper* f) {
     if (step > 0.0f) {  // also NaN: the cave keeps the last step
         frame_tick_frame(step);  // the fixed ticks' count for this frame (engine/frame_tick.h)
         if (g_step_va) put<float>(g_step_va, step);
+        if (g_wind_step_va) put<float>(g_wind_step_va, step * 0.5f);
         if (g_play_ms_va) {
             // The step in whole milliseconds, the rest carried to the next frame.
             g_play_ms_carry += static_cast<double>(step) * 1000.0;
@@ -1415,7 +1428,8 @@ int apply_rate(ElfImage* image, int want) {
     }();
     if (!sites_on) host_log("frame rate: BBHOST_SIXTY_SITES=0, the 60 FPS++ code rewrites left out");
     const bool sixty_ok = sites_on && sites_hold(image, kSixtySites, "the 60 FPS++ list") &&
-                          sites_hold(image, kFrameTimeSites, "the frame-time sites");
+                          sites_hold(image, kFrameTimeSites, "the frame-time sites") &&
+                          sites_hold(image, kWindStepLoads, "the original wind-step loads");
     int mode = want;
     if (mode != 60) {
         const bool cloth_ok = sixty_ok && sites_hold(image, kClothSites, "the cloth caves") &&
@@ -1487,7 +1501,7 @@ int apply_rate(ElfImage* image, int want) {
         // (with the guest's, BBHOST_FRAME_SOURCE=0 or 2 at 60, the cave and
         // the game's add stay).
         const std::uint64_t block = image->tail_va + image->tail_used + kPreferredGuestSlide;  // as a BN address
-        const std::uint64_t step_bn = block, play_bn = block + 8;
+        const std::uint64_t step_bn = block, wind_bn = block + 4, play_bn = block + 8;
         const std::int64_t step_disp = static_cast<std::int64_t>(step_bn) - static_cast<std::int64_t>(kStepLoad + 8);
         const std::int64_t play_disp = static_cast<std::int64_t>(play_bn) - static_cast<std::int64_t>(kPlayTimeAdd + 6);
         const auto holds = [&](std::uint32_t at, const char* hex) {
@@ -1495,9 +1509,13 @@ int apply_rate(ElfImage* image, int want) {
             return std::memcmp(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(va(at))), was.data(), was.size()) == 0;
         };
         const auto rel32 = [](std::int64_t d) { return d >= INT32_MIN && d <= INT32_MAX; };
+        const bool wind_reachable = std::all_of(std::begin(kWindStepLoads), std::end(kWindStepLoads),
+            [&](const Site& load) {
+                return rel32(static_cast<std::int64_t>(wind_bn) - (static_cast<std::int64_t>(load.at) + 8));
+            });
         if (g_source != Source::Ours) {
             host_log("frame rate: the guest's SprjFlipper::Update runs; the task step and the play time stay the game's");
-        } else if (image->tail_used + 16 > image->tail_size || !rel32(step_disp) || !rel32(play_disp)) {
+        } else if (image->tail_used + 16 > image->tail_size || !rel32(step_disp) || !rel32(play_disp) || !wind_reachable) {
             host_log("frame rate: no room in the image's tail; the task step and the play time stay the game's");
         } else {
             image->tail_used += 16;
@@ -1514,6 +1532,18 @@ int apply_rate(ElfImage* image, int want) {
                 le(step_disp, now + 4);
                 write(kStepLoad, now, sizeof(now));
                 g_scale_by_step.store(true, std::memory_order_relaxed);
+
+                // The spare aligned word in this owned tail block carries
+                // the authored wind clock. All original instructions were
+                // checked with sixty_ok before any list was written.
+                g_wind_step_va = va(static_cast<std::uint32_t>(wind_bn));
+                put<float>(g_wind_step_va, 0.5f / static_cast<float>(fps));
+                for (const Site& load : kWindStepLoads) {
+                    const auto displacement = static_cast<std::int32_t>(
+                        static_cast<std::int64_t>(wind_bn) - (static_cast<std::int64_t>(load.at) + 8));
+                    write(load.at + 4, &displacement, sizeof(displacement));
+                }
+                host_log("frame rate: wind follows half the task step (the original 30 fps sway speed)");
             } else {
                 host_log("frame rate: 0x%x does not hold the 60 FPS++ cave's step; the cave keeps computing it", kStepLoad);
             }
@@ -1797,8 +1827,10 @@ StepResult Step(float measured_seconds, float target_seconds, float scale) {
     if (!std::isfinite(measured_seconds) || measured_seconds < 0 || !std::isfinite(target_seconds) || target_seconds < 0 ||
         !std::isfinite(scale) || scale < 0.1f || scale > 4) throw std::invalid_argument("Invalid timing fixture");
     float step = 0;
+    float wind_step = 0;
     std::int32_t milliseconds = 0;
     g_step_va = reinterpret_cast<std::uint64_t>(&step);
+    g_wind_step_va = reinterpret_cast<std::uint64_t>(&wind_step);
     g_play_ms_va = reinterpret_cast<std::uint64_t>(&milliseconds);
     g_scale_by_step.store(true);
     g_time_scale.store(scale);
@@ -1806,9 +1838,9 @@ StepResult Step(float measured_seconds, float target_seconds, float scale) {
     state.measured_frame_seconds = measured_seconds;
     state.target_frame_seconds = target_seconds;
     each_frame(&state);
-    g_step_va = g_play_ms_va = 0;
+    g_step_va = g_wind_step_va = g_play_ms_va = 0;
     g_time_scale.store(1);
     g_scale_by_step.store(false);
-    return {step, milliseconds};
+    return {step, milliseconds, wind_step};
 }
 }
