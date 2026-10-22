@@ -123,36 +123,7 @@ foreach(test IN ITEMS runtime sema)
     add_test(NAME darwin-checkpoint-${test}-contracts COMMAND bb-macos-${test}-tests)
     set_tests_properties(darwin-checkpoint-${test}-contracts PROPERTIES TIMEOUT 30 ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1;BB_CHECKPOINT_ENABLE=1")
 endforeach()
-set(BB_PS4_METAL "${BB_ROOT}/gpu/metal/vendor/driveclub/src")
-add_subdirectory("${BB_ROOT}/gpu/metal/bbhost" bbhost-features)
-add_library(bb-ps4-metal STATIC
-    "${BB_PS4_METAL}/gpu/liverpool/command_processor.cpp"
-    "${BB_PS4_METAL}/gpu/liverpool/tiling.cpp"
-    "${BB_PS4_METAL}/gpu/shader/gcn_decode.cpp"
-    "${BB_PS4_METAL}/gpu/shader/program.cpp"
-    "${BB_PS4_METAL}/gpu/shader/msl.cpp"
-    "${BB_PS4_METAL}/gpu/metal/mtl_device.mm"
-    "${BB_PS4_METAL}/gpu/metal/mtl_compiler.mm"
-    "${BB_PS4_METAL}/gpu/metal/mtl_renderer.mm"
-    "${BB_PS4_METAL}/gpu/metal/mtl_presenter.mm"
-    "${BB_PS4_METAL}/hle/gnmdriver/gnmdriver.cpp"
-    "${BB_PS4_METAL}/hle/video_out/video_out.cpp"
-    "${BB_PS4_METAL}/hle/kernel/sync.cpp"
-    "${BB_ROOT}/gpu/metal/game_settings.cpp"
-    "${BB_ROOT}/gpu/metal/game_overlay.mm"
-    "${BB_ROOT}/gpu/metal/game_achievements.mm"
-    "${BB_ROOT}/gpu/metal/game_input.mm"
-    "${BB_ROOT}/gpu/metal/spatial_upscaler.mm"
-    "${BB_ROOT}/gpu/metal/temporal_aa.mm"
-    "${BB_ROOT}/gpu/metal/vendor/bbport/cp/cp_decoder.cpp"
-    "${BB_ROOT}/gpu/metal/raw_texture_snapshot.mm"
-    "${BB_ROOT}/gpu/metal/gpu_texture_upload.mm"
-    "${BB_ROOT}/gpu/metal/frontend_snapshot.cpp"
-    "${BB_ROOT}/gpu/metal/game_bridge.mm")
-target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
-target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
-target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features
-    "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../metal-runtime.cmake")
 foreach(fixture IN ITEMS pipeline_cache temporal_aa native_motion native_tessellation input worklist)
     add_executable(bb-metal-${fixture}-tests "${BB_ROOT}/gpu/metal/tests/game_${fixture}_tests.mm")
     target_include_directories(bb-metal-${fixture}-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
@@ -319,6 +290,13 @@ add_library(bb-game-entry OBJECT "${BB_ROOT}/src/probe.c")
 target_compile_definitions(bb-game-entry PRIVATE main=bb_guest_main)
 target_link_libraries(bb-game-entry PRIVATE bbruntime)
 add_executable(bb-macos-game "${BB_ROOT}/gpu/metal/game_main.mm" $<TARGET_OBJECTS:bb-game-entry>)
+add_executable(bb-macos-precompile-shaders "${BB_ROOT}/gpu/metal/precompile_main.mm")
+target_include_directories(bb-macos-precompile-shaders PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-macos-precompile-shaders PRIVATE -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-macos-precompile-shaders PRIVATE bb-ps4-metal bbruntime)
+target_link_options(bb-macos-precompile-shaders PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-precompile-help COMMAND bb-macos-precompile-shaders --help)
 add_dependencies(bb-macos-game bb-plugin-randomizer bb-plugin-boss_rush bb-plugin-mutators bb-plugin-debug_menu)
 target_compile_options(bb-macos-game PRIVATE -fobjc-arc)
 target_link_libraries(bb-macos-game PRIVATE bbruntime bb-ps4-metal)
@@ -429,6 +407,16 @@ target_link_options(bb-metal-raster-tests PRIVATE
     -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
 add_test(NAME darwin-metal-raster COMMAND bb-metal-raster-tests)
 set_tests_properties(darwin-metal-raster PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(bb-metal-command-budget-tests "${BB_ROOT}/gpu/metal/tests/game_command_budget_tests.mm")
+target_include_directories(bb-metal-command-budget-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-metal-command-budget-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-metal-command-budget-tests PRIVATE bbruntime bb-ps4-metal)
+target_link_options(bb-metal-command-budget-tests PRIVATE
+    -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+add_test(NAME darwin-metal-command-budget-cpu COMMAND bb-metal-command-budget-tests)
+add_test(NAME darwin-metal-command-budget-gpu COMMAND bb-metal-command-budget-tests --gpu)
+set_tests_properties(darwin-metal-command-budget-cpu PROPERTIES TIMEOUT 10)
+set_tests_properties(darwin-metal-command-budget-gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30 LABELS gpu)
 add_executable(bb-metal-shadow-tests "${BB_ROOT}/gpu/metal/tests/game_shadow_tests.mm")
 target_include_directories(bb-metal-shadow-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-metal-shadow-tests PRIVATE -UNDEBUG -fobjc-arc)

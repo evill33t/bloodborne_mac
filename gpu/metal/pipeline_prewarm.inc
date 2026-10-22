@@ -133,7 +133,11 @@ ShaderCompiler::WarmupStats ShaderCompiler::GetWarmupStats() {
     result.pending_touches=recipe_touches.size();
     return result;
 }
-void ShaderCompiler::EnablePrewarming() {
+void ShaderCompiler::EnablePrewarming(bool parallel) {
+    if(parallel) {
+        {std::lock_guard guard(lock);parallel_prewarming=true;}
+        cv.notify_all();
+    }
     if(warm_root) return;
     const char* enabled=std::getenv("BB_METAL_SHADER_PREWARM");const char* data=std::getenv("BB_DATA_DIR");
     if(archive || !data || !*data || (enabled && !std::strcmp(enabled,"0"))) return;
@@ -432,13 +436,22 @@ void ShaderCompiler::Prewarm(NSDictionary* r) {
         if(!RecipeSchema(r))return;
         WarmPipeline pipeline;
         if([r[@"kind"] isEqual:@"compute"]) {
-            auto d=[MTLComputePipelineDescriptor new];d.computeFunction=Function(0,[r[@"source"] UTF8String],0);
+            auto function=Function(0,[r[@"source"] UTF8String],0);
+            if(!function || function.functionType!=MTLFunctionTypeKernel)return;
+            auto d=[MTLComputePipelineDescriptor new];d.computeFunction=function;
             d.maxTotalThreadsPerThreadgroup=[r[@"group"] unsignedIntValue];
             d.threadGroupSizeIsMultipleOfThreadExecutionWidth=[r[@"multiple"] boolValue];
             if(d.computeFunction) pipeline.compute=NewComputePipeline(d,nil);
         } else if([r[@"kind"] isEqual:@"render"]) {
             NSArray* s=r[@"state"];NSArray* colors=r[@"colors"];
             if(![device supportsTextureSampleCount:[s[2] unsignedIntValue]]) return;
+            auto vertex=Function(0,[r[@"vertex"] UTF8String],0);
+            if(!vertex || vertex.functionType!=MTLFunctionTypeVertex)return;
+            id<MTLFunction> fragment=nil;
+            if([r[@"fragment"] length]) {
+                fragment=Function(0,[r[@"fragment"] UTF8String],0);
+                if(!fragment || fragment.functionType!=MTLFunctionTypeFragment)return;
+            }
             auto d=[MTLRenderPipelineDescriptor new];
             for(unsigned k=0;k<8;++k) {
                 NSArray* c=colors[k];
@@ -453,9 +466,9 @@ void ShaderCompiler::Prewarm(NSDictionary* r) {
             d.maxTessellationFactor=[s[8] unsignedIntValue];d.tessellationFactorFormat=MTLTessellationFactorFormat([s[9] unsignedIntValue]);
             d.tessellationFactorStepFunction=MTLTessellationFactorStepFunction([s[10] unsignedIntValue]);d.tessellationOutputWindingOrder=MTLWinding([s[11] unsignedIntValue]);
             d.tessellationControlPointIndexType=MTLTessellationControlPointIndexType([s[12] unsignedIntValue]);
-            d.vertexFunction=Function(0,[r[@"vertex"] UTF8String],0);
-            if([r[@"fragment"] length]) d.fragmentFunction=Function(0,[r[@"fragment"] UTF8String],0);
-            if(d.vertexFunction && (![r[@"fragment"] length] || d.fragmentFunction)) pipeline.render=NewRenderPipeline(d,nil);
+            d.vertexFunction=vertex;
+            if(fragment)d.fragmentFunction=fragment;
+            pipeline.render=NewRenderPipeline(d,nil);
         }
         if(pipeline.render || pipeline.compute) {std::lock_guard guard(warm_lock);
             const auto key=RecipeKey(r);

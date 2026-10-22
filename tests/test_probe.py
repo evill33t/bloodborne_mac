@@ -5,8 +5,9 @@ import struct
 import subprocess
 import tempfile
 import unittest
+import os
 
-EXE = ROOT / 'out/bb-probe'
+EXE = Path(os.environ.get('BB_PROBE', str(ROOT / 'out/bb-probe')))
 
 
 def package(code, relocs=(), names=(), capabilities=None):
@@ -115,6 +116,10 @@ class LoaderTests(unittest.TestCase):
 
     def test_illegal_instruction_reports_guest_offset(self):
         r = self.run_image(package(b'\x0f\x0b'))
+        if os.environ.get('BB_PROBE_TRANSLATOR') == '1':
+            self.assertEqual(r.returncode, 30)
+            self.assertIn('STOP: bbcpu:', r.stderr)
+            return
         self.assertEqual(r.returncode, 132)
         self.assertIn('at guest offset 0x0,', r.stderr)
 

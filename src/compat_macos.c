@@ -3,8 +3,13 @@
  * Darwin guest TLS follows shadPS4's src/core/tls.cpp LDT approach.
  * The remaining helpers adapt host APIs without changing guest layouts. */
 #include "compat_macos.h"
+#if defined(__x86_64__)
 #include <architecture/i386/table.h>
 #include <i386/user_ldt.h>
+#endif
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#endif
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +22,7 @@
 
 /* The Mach-O segment reserves these low addresses. Its 32-bit segment bases
  * allow FS guest accesses while Darwin continues using GS for host pthreads. */
+#if defined(__x86_64__)
 __asm__(".zerofill TCB_SPACE,TCB_SPACE,__tcb_space,0x3fc000");
 #define LDT_BASE UINT32_C(0x4000)
 #define LDT_BYTES UINT32_C(0x3fc000)
@@ -78,6 +84,11 @@ void bb_macos_set_guest_tls(void *tcb) {
     __asm__ volatile("mov %%fs:0,%0":"=r"(observed));
     if (observed!=*(void **)tcb) tls_fail("self-pointer validation failed");
 }
+#elif defined(BB_CPU_TRANSLATOR)
+void bb_macos_set_guest_tls(void *tcb) { bbcpu_set_thread_pointer((uintptr_t)tcb); }
+#else
+#error Native guest TLS requires BB_CPU_TRANSLATOR
+#endif
 
 static int pause_until(const struct timespec *deadline) {
     if (!deadline || deadline->tv_nsec<0 || deadline->tv_nsec>=1000000000) return EINVAL;

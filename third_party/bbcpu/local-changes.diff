@@ -1,0 +1,60 @@
+--- a/src/cpu/bbcpu.h
++++ b/src/cpu/bbcpu.h
+@@ -26,6 +26,9 @@
+  * rax, rdx and xmm0, xmm1 back. */
+ void bbcpu_call_full(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16], uint64_t out_gpr[2],
+                      uint8_t out_xmm[2][16]);
++/* Local integration: full register bridge plus four PS4 stack arguments. */
++void bbcpu_call_frame(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16],
++                      const uint64_t stack[4], uint64_t out_gpr[2], uint8_t out_xmm[2][16]);
+ /* Native versions of game functions (docs/RECOMPILATION.md): a call of guest `address` runs host
+  * function `fn` (SysV arguments bridged, like a host import). Set before guest code runs. */
+ void bbcpu_set_native(uint64_t address, const void *fn);
+--- a/src/cpu/cpu.c
++++ b/src/cpu/cpu.c
+@@ -212,6 +212,33 @@
+     memcpy(out_xmm[1], cpu->v[1].b, 16);
+ }
+ 
++/* Local integration with bbhost's GuestCallRegs, including stack-passed args.
++ * Keep all outer CPU state across nested guest -> host -> guest callbacks. */
++void bbcpu_call_frame(uintptr_t fn, const uint64_t gpr[6], const uint8_t xmm[8][16],
++                      const uint64_t stack[4], uint64_t out_gpr[2], uint8_t out_xmm[2][16]) {
++    BbCpu *cpu=current_cpu(), saved=*cpu;
++    if (!bbcpu_is_guest_code(fn)) abort();
++    uint64_t rsp;
++    if (cpu->depth) rsp=(cpu->r[RSP]-RED_ZONE-128)&~UINT64_C(15);
++    else {
++        static _Thread_local uint8_t *memory;
++        if (!memory) memory=runtime_low_map(GUEST_STACK,PROT_READ|PROT_WRITE);
++        if (!memory) abort();
++        cpu->stack_top=(uintptr_t)memory+GUEST_STACK;
++        rsp=(cpu->stack_top-128)&~UINT64_C(15);
++    }
++    for (int i=0;i<8;++i) memcpy(cpu->v[i].b,xmm[i],16);
++    memcpy((void *)(uintptr_t)rsp,stack,4*sizeof(*stack));
++    cpu->r[RAX]=8; /* SysV variadic vector-argument count, like GuestCallRegs. */
++    ++cpu->depth;
++    out_gpr[0]=run_call(cpu,fn,6,gpr,rsp);
++    --cpu->depth;
++    out_gpr[1]=cpu->r[RDX];
++    memcpy(out_xmm[0],cpu->v[0].b,16);memcpy(out_xmm[1],cpu->v[1].b,16);
++    const uint64_t instructions=cpu->instructions;
++    *cpu=saved;cpu->instructions=instructions;
++}
++
+ uint64_t bbcpu_call_on_stack(uintptr_t fn, int count, const uint64_t *args, void *stack, size_t size) {
+     BbCpu *cpu = current_cpu();
+     ++cpu->depth;
+--- a/src/cpu/decode.c
++++ b/src/cpu/decode.c
+@@ -5,7 +5,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+-enum { BUCKETS = 1 << 20, MAX_BLOCK = 64, MAX_RANGES = 16 };
++/* Local loader accepts 64 ELF segments, plus traps and generated hook storage. */
++enum { BUCKETS = 1 << 20, MAX_BLOCK = 64, MAX_RANGES = 128 };
+ static BbBlock *buckets[BUCKETS];
+ static pthread_mutex_t insert_lock = PTHREAD_MUTEX_INITIALIZER;
+ static struct { uint64_t start, end; } ranges[MAX_RANGES];

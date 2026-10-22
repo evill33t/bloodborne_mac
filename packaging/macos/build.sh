@@ -21,4 +21,8 @@ if [[ ${1:-} == --test ]]; then
     echo 'A skipped metal-gpu test means GPU execution was not verified in this environment.'
 fi
 echo "Built native Metal development targets in $build_dir/gpu/metal."
-bash packaging/macos/build-runtime.sh "$@"
+case ${BB_MAC_CPU:-rosetta} in
+    rosetta) bash packaging/macos/build-runtime.sh "$@" ;;
+    bbcpu) bash packaging/macos/build-native-runtime.sh "$@" ;;
+    *) echo 'BB_MAC_CPU must be rosetta or bbcpu.' >&2; exit 2 ;;
+esac

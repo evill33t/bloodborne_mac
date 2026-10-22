@@ -219,8 +219,8 @@ int main() {
             regs[Reg::VGT_INDX_OFFSET]=index_size==4 ? 1 : 0;
             const uint64_t target=address+(index_size==2 ? 57344 : 61440);
             regs[Reg::CB_COLOR0_BASE+Reg::CB_BASE]=uint32_t(target>>8);
-            renderer.Draw(regs,Gpu::DrawCall{.count=2,.indexed=true,.index_base=address+512,
-                .index_size=index_size,.index_offset=1});
+            renderer.Draw(regs,Gpu::DrawCall{.indexed=true,.count=2,.index_base=address+512,
+                .index_offset=1,.index_size=index_size});
             renderer.Flip(Gpu::FlipInfo{.address=target,.width=8,.height=8,.pitch=8});
             renderer.WaitIdle();
             frame=(__bridge id<MTLTexture>)renderer.LatestFrame(); assert(frame);

@@ -7,6 +7,9 @@
  * the same 9-byte instruction with another displacement. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +51,10 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+#ifdef BB_CPU_TRANSLATOR
+    void *translated_stack;
+    size_t translated_stack_size;
+#endif
 #ifdef BB_CHECKPOINT_RUNTIME
     void *guest_stack;
     size_t guest_stack_size;
@@ -330,7 +337,16 @@ static void *host_start(void *p) {
                 runtime_thread_run_guest((void *)t->entry,t->argument,NULL,t->attr.stack+STACK_MARGIN));
         else
 #endif
+        {
+#ifdef BB_CPU_TRANSLATOR
+            uint64_t argument=(uintptr_t)t->argument;
+            bbcpu_set_thread_label(t->name);
+            t->result=(void *)(uintptr_t)bbcpu_call_on_stack((uintptr_t)t->entry,1,&argument,
+                t->translated_stack,t->translated_stack_size);
+#else
             t->result=t->entry(t->argument);
+#endif
+        }
     }
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited;
@@ -354,6 +370,12 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     uint64_t stack=t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack;
     /* Stacks below 1 TiB as on PS4; guest code may pack stack addresses. */
     size_t stack_bytes=(size_t)stack+STACK_MARGIN;
+#ifdef BB_CPU_TRANSLATOR
+    t->translated_stack=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
+    if (!t->translated_stack) { pthread_attr_destroy(&host); return ERR(12); }
+    t->translated_stack_size=stack_bytes;
+    pthread_attr_setstacksize(&host,stack_bytes);
+#else
 #ifdef _WIN32
     /* Windows places the stack itself (low: no high-entropy ASLR) and commits all of it:
      * guest code has no stack probes and would step over the guard page. */
@@ -368,6 +390,7 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
         if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
         else pthread_attr_setstacksize(&host,stack_bytes);
     }
+#endif
 #endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */

@@ -211,10 +211,13 @@ class ModTests(unittest.TestCase):
         env = dict(os.environ, BB_PREBUILT='1', BB_PROBE=str(probe), PYTHON=str(python),
             BB_DATA_DIR=str(self.root), BB_GAME_DIR=str(self.game),
             BB_MODS_DIR=str(self.moddir), BB_MODS_ENABLED='1', BB_MODS_CONFIG=str(self.root/'mods.json'),
-            BB_MAC_RUNTIME_DIR=str(self.root))
-        result = subprocess.run(['bash', 'run.sh'], cwd=ROOT, env=env, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 7, result.stderr)
-        mounted = json.loads((self.root / 'mounted.json').read_text())
-        self.assertEqual(mounted['content'], 'mod')
-        self.assertFalse(Path(mounted['path']).exists())
-        self.assertEqual((self.assets/'a.dcx').read_bytes(), b'original')
+            BB_MAC_RUNTIME_DIR=str(self.root), BB_MAC_NATIVE_RUNTIME_DIR=str(self.root), BB_DLC_DIR='')
+        for cpu in ('rosetta', 'bbcpu'):
+            with self.subTest(cpu=cpu):
+                result = subprocess.run(['bash', 'run.sh'], cwd=ROOT,
+                    env=dict(env, BB_MAC_CPU=cpu), capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                mounted = json.loads((self.root / 'mounted.json').read_text())
+                self.assertEqual(mounted['content'], 'mod')
+                self.assertFalse(Path(mounted['path']).exists())
+                self.assertEqual((self.assets/'a.dcx').read_bytes(), b'original')

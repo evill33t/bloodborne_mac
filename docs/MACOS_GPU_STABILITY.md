@@ -101,7 +101,7 @@ The live shader compiler records exact generated MSL and pipeline descriptor
 recipes under:
 
 ```text
-$BB_DATA_DIR/metal-cache/prewarm-v1/<device-registry-id>-<OS-version>/
+$BB_DATA_DIR/metal-cache/prewarm-v2/<device-architecture-OS-identity>/
 ```
 
 Recipes warm on one compiler worker at the next launch. All workers prefer
@@ -112,7 +112,7 @@ Cold first-use draws are preserved. A pipeline is reused only when its current
 source and serialized descriptor match exactly; function caching uses the MSL
 source hash rather than a reusable guest address/key.
 
-The cache retains up to 512 pipelines with at most 128 MiB of serialized
+The cache retains up to 1,024 pipelines with at most 128 MiB of serialized
 recipes; each JSON recipe is at most 1 MiB. Startup inputs and pending writes
 share the same count/byte limits. Recently used areas warm first, and oldest
 generated entries are evicted so the cache can learn later areas after filling.
@@ -121,6 +121,21 @@ can replace a corrupt recipe atomically. Unrelated files are never evicted.
 Cache roots resolving inside `BB_GAME_DIR` or `BB_SOURCE_GAME` are refused.
 Set `BB_METAL_SHADER_PREWARM=0` to disable recording and prewarming.
 `DC_GPU_STATS=1` reports recipe loads, ready pipelines and warm pipeline hits.
+
+Recorded variants can also be compiled before gameplay:
+
+```sh
+bash packaging/macos/precompile-shaders.sh --data-dir out/macos-data --threads 4
+```
+
+This standalone process lets all compiler workers consume background recipes,
+without changing the live renderer's foreground worker reservation. It reports
+progress and exits unsuccessfully if any admitted recipe fails compilation.
+It uses Metal's managed compiler cache, not explicit binary archives. The game
+still prewarms and retains its own exact pipeline objects at launch; the
+standalone process cannot transfer live pipeline objects between processes or
+discover variants that have never been recorded. The command neither boots the
+game nor reads its saves, and refuses data directories inside the game dump.
 
 Production Metal binary-archive creation/serialization remains disabled because
 that path previously crashed inside Metal under Rosetta. Existing `.metalarc`

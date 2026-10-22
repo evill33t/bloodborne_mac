@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "features.h"
+#ifdef BB_CPU_TRANSLATOR
+#include "command_guards.h"
+#endif
 #include "fog_draw_capture.h"
 #include "transient_gpu_budget.h"
 #include "core/elf.h"
@@ -50,6 +53,9 @@ void Install() {
     if (!engine_eboot_supported(game_image.sha256)) {
         host_log("Mac engine features: unsupported ELF hash %s; address-based features disabled",game_image.sha256.c_str()); return;
     }
+#ifdef BB_CPU_TRANSLATOR
+    MacCommandGuards::Install(&game_image);
+#endif
     auto tail=static_cast<unsigned char*>(game_image.mem.base)+game_image.tail_va;
     if (mprotect(tail,ImageTailSize,PROT_READ|PROT_WRITE)) throw std::runtime_error("Cannot prepare the engine's data tail");
     params_install(&game_image); event_flags_install(&game_image); player_data_install(&game_image);

@@ -13,7 +13,7 @@
 #include <iomanip>
 
 #include <pthread.h>
-#include <x86intrin.h>
+#include "gpu/metal/guest_clock.h"
 
 #include "common/log.h"
 #include "core/memory.h"
@@ -592,7 +592,7 @@ void CommandProcessor::FenceWrite(u32 data_sel, u64 addr, u32 lo, u32 hi, u32 ir
     AfterGpu([=, this] {
         u64 value=u64(lo)|(u64(hi)<<32);
         if(data_sel==kGpuClock) value=GpuClock();
-        if(data_sel==kPerfCounter) value=__rdtsc();
+        if(data_sel==kPerfCounter) value=MacGuestClock::ReadTsc();
         if(bytes && !destination.Store(value)) {Fail("GPU fence destination was unmapped or reused at "+std::to_string(addr));return;}
         if (bytes) {
             std::scoped_lock lk(fence_lock);

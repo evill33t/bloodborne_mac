@@ -29,14 +29,15 @@ void runtime_restart(void);
 void runtime_quit_on_open(const char *guest);
 void runtime_quit_on_save_done(void);
 int runtime_savedata_mounted(void);
-/* ARM64 builds currently compile host components only. Executing the original
- * x86-64 image still requires an x86-64 process (enforced by probe.c). */
+/* Native arm64 uses bbcpu to bridge the PS4 SysV ABI. */
 #if defined(__x86_64__) || defined(_M_X64)
 #define ABI __attribute__((sysv_abi))
 #else
 #define ABI
 #endif
 typedef void (ABI *GuestCallback)(void);
+/* Host callbacks must enter guest code through this bridge on arm64. */
+uint64_t runtime_guest_call(const void *fn, int count, const uint64_t *args);
 void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);

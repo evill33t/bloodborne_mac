@@ -330,6 +330,61 @@ static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* pat
     return 0;
 }
 
+static void InvalidSourceRecipes(id<MTLDevice> device) {
+    using Compiler=Gpu::Metal::ShaderCompiler;
+    char directory[]="/tmp/bb-metal-invalid-source-XXXXXX";assert(mkdtemp(directory));
+    unsetenv("BB_GAME_DIR");unsetenv("BB_SOURCE_GAME");unsetenv("BB_METAL_SHADER_PREWARM");
+    setenv("BB_DATA_DIR",directory,1);
+    constexpr const char* vertex="#include <metal_stdlib>\nusing namespace metal; vertex float4 main0(uint i [[vertex_id]]) { return float4(float(i),0,0,1); }";
+    {
+        Compiler compiler(device,2);compiler.EnablePrewarming();AreaPipeline(compiler,64);
+        auto render=[MTLRenderPipelineDescriptor new];
+        render.vertexFunction=compiler.Function(1,vertex,0);
+        render.fragmentFunction=compiler.Function(2,"#include <metal_stdlib>\nusing namespace metal; fragment float4 main0() { return float4(1); }",0);
+        render.colorAttachments[0].pixelFormat=MTLPixelFormatBGRA8Unorm;
+        assert(compiler.RenderPipeline(render,nil));
+    }
+    NSDictionary *compute=nil,*render=nil;
+    for(const auto& path:Recipes(directory)) {
+        NSData* bytes=[NSData dataWithContentsOfFile:@(path.c_str())];
+        NSDictionary* recipe=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+        if([recipe[@"kind"] isEqual:@"compute"])compute=recipe;else render=recipe;
+    }
+    assert(compute && render);
+    NSMutableArray<NSDictionary*>* recipes=[NSMutableArray arrayWithObject:compute];
+    // Hash-valid schemas can still contain compiler errors or a valid main0
+    // of the wrong stage. Neither may reach Metal's descriptor assertions.
+    NSString* invalid=@"#error intentionally invalid cached shader\n";
+    for(NSString* source in @[invalid,@(vertex)]) {
+        NSMutableDictionary* recipe=[compute mutableCopy];recipe[@"source"]=source;[recipes addObject:recipe];
+    }
+    for(NSArray* change in @[@[@"vertex",invalid],@[@"fragment",invalid],
+                            @[@"vertex",@(kAreaCompute)],@[@"fragment",@(vertex)]]) {
+        NSMutableDictionary* recipe=[render mutableCopy];recipe[change[0]]=change[1];[recipes addObject:recipe];
+    }
+    for(bool parallel:{false,true}) {
+        const auto data=std::filesystem::path(directory)/(parallel ? "offline" : "live");
+        const auto root=RecipeRoot(data,device);std::filesystem::create_directories(root);
+        for(NSDictionary* recipe in recipes) {
+            NSData* bytes=[NSJSONSerialization dataWithJSONObject:recipe options:NSJSONWritingSortedKeys error:nil];
+            const auto path=root/(Digest(bytes.bytes,bytes.length)+".json");
+            assert([bytes writeToFile:@(path.c_str()) atomically:YES]);
+        }
+        setenv("BB_DATA_DIR",data.c_str(),1);
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.captureDescriptors=YES;
+        Compiler compiler((id<MTLDevice>)spy,parallel ? 1 : 2);compiler.EnablePrewarming(parallel);
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+        while(compiler.GetWarmupStats().queued && std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        const auto stats=compiler.GetWarmupStats();
+        assert(stats.loaded==7 && stats.ready==1 && !stats.queued);
+        assert(spy.computeDescriptors.count==1 && !spy.renderDescriptors.count && !spy.archiveCalls);
+        AreaPipeline(compiler,64);assert(compiler.GetWarmupStats().hits==1);
+    }
+    std::filesystem::remove_all(directory);unsetenv("BB_DATA_DIR");
+    puts("Invalid cached shader source/stage rejected before Metal descriptors; live/offline queues complete and valid recipe remains usable");
+}
+
 int main(int argc,const char** argv) {
     @autoreleasepool {
         if(argc==2 && !std::strcmp(argv[1],"--metadata-only"))return MetadataIdentityTests();
@@ -337,6 +392,7 @@ int main(int argc,const char** argv) {
         auto device=MTLCreateSystemDefaultDevice(); if (!device) return 77;
         if(argc>=3 && !std::strcmp(argv[1],"--recipes"))return CapturedRecipes(device,argc-2,argv+2);
         if(argc!=1)return 2;
+        InvalidSourceRecipes(device);
         char directory[]="/tmp/bb-metal-cache-XXXXXX"; assert(mkdtemp(directory));
         setenv("BB_METAL_CACHE_DIR",directory,1); unsetenv("BB_METAL_PIPELINE_CACHE");
         using Compiler=Gpu::Metal::ShaderCompiler;

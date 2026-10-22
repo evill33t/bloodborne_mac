@@ -3,6 +3,9 @@
 #include "core/thunk.h"
 #include "src/checkpoint/runtime.h"
 #include <cstring>
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#endif
 std::uint8_t* thunk_emit_prologue_stub(std::uint8_t* c, std::uint64_t id, void* host, std::uint64_t resume,
                                       const std::uint8_t* displaced, std::size_t n, bool keep_rax) {
     // Below the six registers: a return slot (zeroed; what a skipped call
@@ -107,14 +110,29 @@ void* thunk_wrap(void* p) { return p; }
 void* hle_wrap_fn(void* p) { return p; }
 namespace {
 struct GuestCallbackScope {
+#ifndef BB_CPU_TRANSLATOR
     GuestCallbackScope() {bb_checkpoint_runtime_enter_callback();}
     ~GuestCallbackScope() {bb_checkpoint_runtime_leave_callback();}
+#endif
 };
 }
 extern "C" std::int64_t hle_call_guest6(void* f,std::int64_t a,std::int64_t b,std::int64_t c,std::int64_t d,std::int64_t e,std::int64_t g) {
     GuestCallbackScope scope;
+#ifdef BB_CPU_TRANSLATOR
+    const std::uint64_t args[]{std::uint64_t(a),std::uint64_t(b),std::uint64_t(c),std::uint64_t(d),std::uint64_t(e),std::uint64_t(g)};
+    return std::int64_t(bbcpu_call(reinterpret_cast<std::uintptr_t>(f),6,args));
+#else
     return reinterpret_cast<std::int64_t(*)(std::int64_t,std::int64_t,std::int64_t,std::int64_t,std::int64_t,std::int64_t)>(f)(a,b,c,d,e,g);
+#endif
 }
+#ifdef BB_CPU_TRANSLATOR
+extern "C" void hle_call_guest_regs(GuestCallRegs* regs) {
+    std::uint8_t xmm[8][16]{},out_xmm[2][16]{};std::uint64_t out[2]{};
+    for (unsigned i=0;i<8;++i) std::memcpy(xmm[i],&regs->xmm[i],8);
+    bbcpu_call_frame(reinterpret_cast<std::uintptr_t>(regs->fn),regs->ints,xmm,regs->stack,out,out_xmm);
+    regs->ret=out[0];std::memcpy(&regs->ret_xmm0,out_xmm[0],8);
+}
+#else
 extern "C" void hle_call_guest_regs_raw(GuestCallRegs*);
 extern "C" void hle_call_guest_regs(GuestCallRegs* regs) {GuestCallbackScope scope;hle_call_guest_regs_raw(regs);}
 asm(R"(
@@ -167,3 +185,4 @@ _hle_call_guest_regs_raw:
     ret
     .cfi_endproc
 )");
+#endif

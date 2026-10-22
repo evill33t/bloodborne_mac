@@ -12,7 +12,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#else
 #include <x86intrin.h>
+#endif
 #ifndef _WIN32
 #ifndef __APPLE__
 #include <sys/random.h>
@@ -93,6 +97,10 @@ static ABI uint64_t process_time_counter(void) {
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
 }
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
+#ifdef BB_CPU_TRANSLATOR
+static ABI uint64_t read_tsc(void) { return bbcpu_tsc(); }
+static ABI uint64_t tsc_frequency(void) { return BBCPU_TSC_HZ; }
+#else
 static ABI uint64_t read_tsc(void) { return __rdtsc(); }
 static uint64_t tsc_hz;
 static ABI uint64_t tsc_frequency(void) {
@@ -110,6 +118,7 @@ static ABI uint64_t tsc_frequency(void) {
     }
     return tsc_hz;
 }
+#endif
 /* Shared with the GPU library so flip/label timestamps use the guest's clock. */
 uint64_t runtime_process_time_us(void) { return process_time(); }
 uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
@@ -260,7 +269,7 @@ static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
         int32_t state=__atomic_load_n(once,__ATOMIC_ACQUIRE);
         if (state==1) return 0;
         if (state==0 && __atomic_compare_exchange_n(once,&state,2,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
-            routine();
+            runtime_guest_call((const void *)routine,0,NULL);
             __atomic_store_n(once,1,__ATOMIC_RELEASE);
             return 0;
         }
@@ -316,7 +325,8 @@ void runtime_thread_keys_cleanup(void) {
             void *value=key_value(i);
             if (!value || !keys[i].used || !keys[i].destructor) continue;
             key_store(i,NULL); any=1;
-            keys[i].destructor(value);
+            uint64_t argument=(uintptr_t)value;
+            runtime_guest_call((const void *)keys[i].destructor,1,&argument);
         }
         if (!any) break;
     }

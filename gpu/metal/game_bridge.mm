@@ -61,7 +61,9 @@ struct GuestMappingHooks {
     ~GuestMappingHooks() {Remove();}
 } guest_mapping_hooks; // removed before the renderer's static destruction
 std::atomic<bool> ready{false};
+#ifndef BB_CPU_TRANSLATOR
 #include "gpu/metal/game_checkpoint.inc"
+#endif
 std::atomic<float> display_refresh{60};
 Gpu::Metal::FrameHandoff frame_handoff;
 Uint32 frame_event=0;
@@ -308,8 +310,10 @@ extern "C" int bbgpu_init(const BbGpuConfig*) {
             guest_mapping_hooks.active=true;
         }
         ready.store(true,std::memory_order_release);
+#ifndef BB_CPU_TRANSLATOR
         if(bb_checkpoint_runtime_enabled() && !bb_checkpoint_runtime_graphics_hooks(&graphics_hooks))
             throw std::runtime_error("Could not register the Metal checkpoint provider.");
+#endif
         return 0;
     } catch (const std::exception& error) {
         guest_mapping_hooks.Remove();

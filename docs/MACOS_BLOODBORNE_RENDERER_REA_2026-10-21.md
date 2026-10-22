@@ -325,8 +325,22 @@ shared render/compute profiler and both exact tessellation additions passed:
 The separately supplied original-shader tessellation differential passed the
 private-input coverage described above; the default CTest skip is not counted
 as that private test. The original-limiter differential and timing mutation
-control also passed. Longer movement/transition testing and final source/save
-integrity checks are pending.
+control also passed.
+
+A six-minute production-default run exercised movement, camera rotation,
+attacks and three area transitions on cloned saves. Loaded worlds progressed
+through `18010000`, `15000000`, `18010000` and `18000000`. There were no GPU
+failures or unplanned process exits. An eight-second recording and a five-second
+CPU sample make this a stability diagnostic, not a clean FPS comparison.
+Its largest first-use shader compilation took 161.526 ms, nested inside a
+164.961 ms draw-recording scope. Four newly observed pipeline recipes were
+recorded during the run; those can be warmed on later launches.
+
+The subsequent 90-second stationary default run also had no GPU failures, but
+119 missing presentation timestamps and a 4.56-second presentation gap invalidate
+its whole-run FPS figure. One uninterrupted 80.746-second block delivered
+34.788 displayed FPS at native 1080p. That is a descriptive interval, not a
+matched optimization result: 60 FPS remains unmet.
 
 A fresh five-second Rosetta sample during the longer Dream gameplay run
 recorded 1,057 graphics-command-thread samples: 701 under draw recording and
@@ -335,3 +349,62 @@ samples), predominantly the chunk-hash loop. Sampling perturbs execution and
 partially unsymbolized Rosetta stacks limit precision; these are not exclusive
 CPU cycles. This independently confirms texture validation remains a major
 CPU cost. No readiness, alias or writer proof was relaxed to skip it.
+
+## Standalone shader precompilation
+
+`bb-macos-precompile-shaders`, exposed through
+`bash packaging/macos/precompile-shaders.sh`, compiles recorded MSL and exact
+pipeline descriptors without launching the game. Its `--threads 1..8` option
+defaults to four workers; only this standalone process lets all workers consume
+prewarm jobs. The live renderer keeps its existing foreground-worker reservation.
+The command refuses cache locations inside an original dump, reports progress,
+returns three for no recorded inputs and one for a partial compilation failure.
+It always uses the managed Metal cache, including when an archive environment
+variable is present. No explicit binary archive is created or serialized.
+
+An audit found that the 945 current recipes existed only in the test data tree.
+Their verified source/descriptor JSON was copied into the regular
+`out/macos-data` cache without overwriting existing files or sharing writable
+inodes with the source. The inventory contains 914 render and 31 compute
+recipes, totaling 63,461,726 bytes. All 945 compiled successfully on the M4 Max.
+A subsequent final regular-cache check completed in 1.16 seconds with the driver
+cache already warm; this is not a cold-cache compilation measurement.
+
+This covers observed variants, not every shader or descriptor combination in
+the game. New variants may still compile on first use. Metal pipeline objects
+remain process-local: the live game still prewarms and retains its own objects,
+while the standalone command exercises the driver's managed compilation cache.
+Precompilation targets first-use hitches, not the steady GPU frame time.
+
+The CLI failure test exposed an existing prewarm abort: assigning a failed
+compute function to a Metal descriptor triggers a driver assertion before the
+old null check. Prewarming now checks successful function creation and the
+expected kernel/vertex/fragment stage before assigning descriptor functions.
+Permanent actual-Metal coverage mixes a valid recipe with six hash-valid
+recipes containing compiler errors or wrong-stage functions. It verifies that
+both the reserved live worker and standalone worker mode finish their queues,
+retain the valid pipeline and send no invalid descriptor to Metal. CLI checks
+also passed help, invalid worker counts, original-dump refusal, empty input and
+a partial compilation failure with the expected nonzero status.
+
+The final full runtime build and serial CTest run after these changes passed
+99 tests, with two expected private-input skips and zero failures (117.60 s).
+Those skips remain separate from the original-shader differentials run with
+private inputs earlier in this report.
+
+The final 75.13-second warm movement replay used a new cloned save and runtime
+`c3714a79c73284d37063509ec229e8a900659ded9f2fd0b8a1210bb277b7a72e`.
+All 945 recipes became ready; the last statistics reported 315 pipeline hits.
+Movement, camera rotation and attacks passed the earlier first-use-stall point
+with no shader-library, shader-function or shader-cache-wait scope reaching
+10 ms. There were zero missing presentation timestamps, zero GPU failures and
+a planned shutdown. Native 1920×1080 on AC delivered 30.546 displayed FPS,
+49.9999 ms p99 and 50.0001 ms maximum presentation interval. This is a warm
+replay, not a controlled cold-cache FPS comparison, and does not establish that
+the standalone process alone caused the result. It confirms the recorded hitch
+did not recur with complete prewarm coverage. The 60 FPS goal remains unmet.
+
+Final integrity verification after all gameplay and compiler tests passed:
+the 28,779-file original dump size/mtime inventory, original `eboot.bin` hash,
+prepared original ELF hash and all 16 master-save hashes were unchanged.
+Runtime tests used external caches and cloned save directories.

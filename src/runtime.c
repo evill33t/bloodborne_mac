@@ -1,6 +1,11 @@
 /* Narrow, explicit PS4 libc contracts. No automatic success stubs. */
 #define _CRT_RAND_S
 #include "runtime.h"
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#include <sys/mman.h>
+uint64_t bb_image_base; /* bbcpu fault diagnostics and optional record offsets */
+#endif
 #include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,11 +75,15 @@ static ABI void *guest_tls_get_addr(const uint64_t *index) {
     }
 #endif
     if (!*block) {
+#ifdef BB_CPU_TRANSLATOR
+        *block=runtime_low_map(tls_modules[index[0]].memsz,PROT_READ|PROT_WRITE);
+#else
 #ifdef BB_CHECKPOINT_RUNTIME
         if (local) *block=runtime_low_map(tls_modules[index[0]].memsz,PROT_READ|PROT_WRITE);
         else
 #endif
         *block=calloc(1,tls_modules[index[0]].memsz);
+#endif
         if (!*block) { fputs("Cannot allocate module TLS\n",stderr); exit(1); }
         memcpy(*block,tls_modules[index[0]].data,tls_modules[index[0]].filesz);
 #ifdef BB_CHECKPOINT_RUNTIME
@@ -144,6 +153,16 @@ static int register_handler(ExitHandler value) {
     pthread_mutex_unlock(&handler_lock);
     return 0;
 }
+uint64_t runtime_guest_call(const void *fn,int count,const uint64_t *args) {
+    if (!fn || count<0 || count>6 || (count && !args)) abort();
+#ifdef BB_CPU_TRANSLATOR
+    if (bbcpu_is_guest((uintptr_t)fn)) return bbcpu_call((uintptr_t)fn,count,args);
+#endif
+    uint64_t a[6]={0};
+    if (count) memcpy(a,args,(size_t)count*sizeof(*a));
+    return ((uint64_t (ABI *)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t))fn)
+        (a[0],a[1],a[2],a[3],a[4],a[5]);
+}
 static ABI int guest_atexit(GuestCallback callback) {
     if (!callback) return -1;
     ++calls_atexit;
@@ -164,8 +183,9 @@ void runtime_finalize(void *dso) {
         if (!i) { pthread_mutex_unlock(&handler_lock); return; }
         ExitHandler handler = handlers[i-1]; handlers[i-1].active = 0;
         pthread_mutex_unlock(&handler_lock);
-        if (handler.with_arg) handler.callback.with_arg(handler.argument);
-        else handler.callback.plain();
+        uint64_t argument=(uintptr_t)handler.argument;
+        if (handler.with_arg) runtime_guest_call((const void *)handler.callback.with_arg,1,&argument);
+        else runtime_guest_call((const void *)handler.callback.plain,0,NULL);
     }
 }
 static ABI void guest_finalize(void *dso) { runtime_finalize(dso); }

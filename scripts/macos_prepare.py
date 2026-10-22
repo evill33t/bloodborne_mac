@@ -22,6 +22,15 @@ ENGINE_ELF_HASHES = {'941f887a562aae054fac35af8cc8f27cf075f3d4cc2e029fb5ae2a663a
                      'cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86'}
 
 
+def direct_memory_mb(size):
+    # bloodborne-native/bloodborne-runtime run.sh (6228f43): target storage
+    # grows with scene pixels, not the display size. Round extra storage to
+    # 64 MiB; keep the PS4's base pool for scenes at or below 1080p.
+    extra = max(0, size[0] * size[1] - 1920 * 1080) * 448
+    step = 64 * 1024 * 1024
+    return 5056 + (extra + step - 1) // step * 64
+
+
 def settings_patches(settings, segments, profile='original', *, engine_timing=False):
     # The engine adapter writes its timing sites after import/TLS linking. Keep the
     # legacy XML path available to callers that explicitly prepare without it.
@@ -101,7 +110,7 @@ def main():
     (out / 'patches.bin').write_bytes(blob)
     (out / 'macos-runtime-options.json').write_text(json.dumps({
         'render_width': size[0], 'render_height': size[1],
-        'direct_memory_mb': 12288 if size[0] > 1920 else 5056,
+        'direct_memory_mb': direct_memory_mb(size),
         'variable_timestep': True, 'settings': str(settings_path.resolve()),
         'engine_timing': engine_timing, 'elf_sha256': report['elf_sha256'],
     }, indent=2) + '\n')

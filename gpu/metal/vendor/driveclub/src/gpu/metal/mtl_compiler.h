@@ -58,7 +58,9 @@ public:
     CacheStats GetCacheStats();
     void FlushCache();
     // Plain source/descriptor recipes only. No Metal binary archive APIs.
-    void EnablePrewarming();
+    // parallel is for the standalone precompiler, before gameplay. Live
+    // rendering reserves its foreground workers for newly requested shaders.
+    void EnablePrewarming(bool parallel=false);
     struct WarmupStats {
         u64 hits=0,loaded=0,ready=0;
         u64 retained=0,retained_bytes=0,pending=0,pending_bytes=0,queued=0,queued_bytes=0;
@@ -76,6 +78,7 @@ private:
     std::deque<std::function<void()>> background_jobs;
     std::vector<std::thread> threads;
     bool stop = false;
+    bool parallel_prewarming = false; // lock held
 
     std::mutex fn_lock;
     std::condition_variable fn_changed;

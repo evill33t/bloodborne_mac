@@ -8,9 +8,13 @@ game=${BB_SOURCE_GAME:-${BB_GAME_DIR:-${1:-}}}
 if [[ -z $game || ! -f $game/eboot.bin ]]; then
     echo 'Usage: BB_GAME_DIR=/path/to/CUSA00900 bash run.sh' >&2; exit 2
 fi
-runtime=${BB_MAC_RUNTIME_DIR:-out/macos-runtime}/bb-macos-game
+case ${BB_MAC_CPU:-rosetta} in
+    rosetta) runtime=${BB_MAC_RUNTIME_DIR:-out/macos-runtime}/bb-macos-game; builder=packaging/macos/build-runtime.sh ;;
+    bbcpu) runtime=${BB_MAC_NATIVE_RUNTIME_DIR:-out/macos-native-runtime}/bb-macos-game; builder=packaging/macos/build-native-runtime.sh ;;
+    *) echo 'BB_MAC_CPU must be rosetta or bbcpu.' >&2; exit 2 ;;
+esac
 if [[ ! -x $runtime ]]; then
-    bash packaging/macos/build-runtime.sh
+    bash "$builder"
 fi
 python=${PYTHON:-python3}
 game=$("$python" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve(strict=True))' "$game")
@@ -77,7 +81,7 @@ if [[ -z ${BB_DMEM_MB:-} || ${BB_MAC_AUTO_DMEM_MB:-} == "$BB_DMEM_MB" ]]; then
     export BB_MAC_AUTO_DMEM_MB="$BB_DMEM_MB"
 fi
 # Command-scoped Rosetta feature advertisement; no persistent OS settings.
-export ROSETTA_ADVERTISE_AVX=1
+if [[ ${BB_MAC_CPU:-rosetta} == rosetta ]]; then export ROSETTA_ADVERTISE_AVX=1; fi
 export BB_MAC_TIMESTEP=1
 export BB_MAC_EBOOT_SHA256=$("$python" -c 'import json,sys; print(json.load(open(sys.argv[1]))["elf_sha256"])' "$prepared/macos-runtime-options.json")
 export BB_SOUND_HACK=${BB_SOUND_HACK:-0}

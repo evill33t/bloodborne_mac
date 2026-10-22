@@ -85,3 +85,14 @@ This code was developed for another game. With the local runtime integration,
 Bloodborne reaches the starting clinic with movement, audio and controller input.
 Unsupported shaders and PM4 paths still need validation and fixes; this is not
 whole-game compatibility.
+
+The optional arm64/bbcpu runtime shares these production sources. VideoOut and
+CP performance-counter timestamps use its virtual 1.6 GHz guest TSC; x86 builds
+retain the original host counter. Source provenance and native validation are in
+[the integration report](../../../../docs/MACOS_NATIVE_UPSTREAM_2026-10-22.md).
+
+The port also provides an opt-in elapsed command-recording budget at existing
+encoder boundaries. It retains nonblocking commit, fence and snapshot lifetime
+paths. Native-1080p comparisons did not establish a repeatable FPS gain, so
+it remains disabled by default. See
+[the scheduling report](../../../../docs/MACOS_PIPELINE_SCHEDULING_2026-10-22.md).

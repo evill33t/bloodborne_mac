@@ -1,11 +1,23 @@
 from paths import ROOT
 import unittest
-from macos_prepare import settings_patches, RESOLUTIONS
+from macos_prepare import settings_patches, RESOLUTIONS, direct_memory_mb
 from patches import SCENE_WIDTH, SCENE_HEIGHT, UI_WIDTH, UI_HEIGHT
 from test_patches import immediate, SEGMENTS
 
 
 class MacSettingsTests(unittest.TestCase):
+    def test_direct_memory_tracks_scene_area_in_bounded_steps(self):
+        for size in RESOLUTIONS:
+            mb = direct_memory_mb(size)
+            self.assertGreaterEqual(mb, 5056)
+            self.assertLessEqual(mb, 16384)
+            extra = max(0, size[0] * size[1] - 1920 * 1080) * 448
+            self.assertGreaterEqual((mb - 5056) * 1024 * 1024, extra)
+            self.assertLess((mb - 5056) * 1024 * 1024 - extra, 64 * 1024 * 1024)
+        self.assertEqual(direct_memory_mb((1920, 1080)), 5056)
+        self.assertEqual(direct_memory_mb((2560, 1440)), 5760)
+        self.assertEqual(direct_memory_mb((3840, 2160)), 7744)
+
     def test_engine_timing_does_not_overlay_the_legacy_uncap_patch(self):
         writes, names, _ = settings_patches({}, SEGMENTS, engine_timing=True)
         self.assertEqual(names, ['Skip Intro'])

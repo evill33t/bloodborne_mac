@@ -30,8 +30,8 @@
 #include <mach/mach_vm.h>
 #endif
 #endif
-/* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it (the resolution
- * patches above 1080p need about 4 GiB more; run.sh sets it). */
+/* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it
+ * for resolution-dependent targets; the macOS launcher sizes it from scene pixels. */
 static uint64_t pool_size_bytes(void) {
     static uint64_t size;
     if (!size) {

@@ -32,6 +32,12 @@ The Mac path in `patch_manifest.cpp` refuses a whole manifest before writing whe
 it overlaps an installed timing range. Paleblood provenance and its separate
 GPL-2.0-or-later reference sources are in `../paleblood/UPSTREAM.md`.
 
+For the optional arm64/bbcpu runtime, the frame-rate compare continuation is
+emitted as x86 guest bytes in registered hook storage. Darwin thunks bridge
+integer, vector and stack arguments through bbcpu. Native command-writer guards
+adapt bloodborne-native's separate runtime; provenance and local CPU changes are
+recorded in [bbcpu provenance](../../../../third_party/bbcpu/UPSTREAM.md).
+
 Additional dependencies:
 
 - Monocypher and its Ed25519 module: copied from this bbhost commit, with

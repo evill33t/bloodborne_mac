@@ -136,7 +136,9 @@ void ShaderCompiler::Worker(bool background) {
         std::function<void()> job;
         {
             std::unique_lock lk(lock);
-            cv.wait(lk, [this,background] { return stop || !jobs.empty() || (background && !background_jobs.empty()); });
+            cv.wait(lk, [this,background] {
+                return stop || !jobs.empty() || ((background || parallel_prewarming) && !background_jobs.empty());
+            });
             if (stop) {
                 return;
             }

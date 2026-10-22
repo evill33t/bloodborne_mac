@@ -35,6 +35,7 @@ extern "C" void bbmac_gpu_flush_clock();
 extern "C" void bbmac_gpu_counter_clock();
 // These replace a no-argument clock CALL, not a function entry. All supplied
 // registers/stack slots were verified in the original instruction trace.
+#ifndef BB_CPU_TRANSLATOR
 asm(R"(
 .text
 .globl _bbmac_gpu_flush_clock
@@ -50,6 +51,7 @@ _bbmac_gpu_counter_clock:
     mov -0x40(%rbp),%rcx
     jmp _bbmac_gpu_counter_clock_impl
 )");
+#endif
 namespace MacFeatures {
 void InstallGpuFenceWaits(ElfImage* image) {
     const char* enabled=std::getenv("BB_METAL_PARK_FENCES");
@@ -57,14 +59,35 @@ void InstallGpuFenceWaits(ElfImage* image) {
     struct Site {std::uint64_t rva;const unsigned char* bytes;std::size_t size,call;void* replacement;};
     static constexpr unsigned char flush[]{0x49,0x8b,0x06,0x48,0x83,0xf8,0x01,0x74,0x15,0xe8,0x2a,0x21,0x88,0x02,0x44,0x29,0xf8};
     static constexpr unsigned char counter[]{0x41,0xb5,0x01,0x41,0x81,0xfe,0x0f,0x27,0,0,0x77,0x40,0xe8,0xd5,0xd1,0x81,0x02};
-    const Site sites[]{{0x33c960,flush,sizeof(flush),9,reinterpret_cast<void*>(&bbmac_gpu_flush_clock)},
-        {0x3a18b2,counter,sizeof(counter),12,reinterpret_cast<void*>(&bbmac_gpu_counter_clock)}};
+    Site sites[]{{0x33c960,flush,sizeof(flush),9,nullptr},
+        {0x3a18b2,counter,sizeof(counter),12,nullptr}};
     for(const auto& site:sites) {
         if(site.rva>image->mem.size || site.size>image->mem.size-site.rva ||
             std::memcmp(static_cast<unsigned char*>(image->mem.base)+site.rva,site.bytes,site.size)) {
             host_log("Mac GPU fence parking refused: instructions differ at RVA %#llx",(unsigned long long)site.rva);return;
         }
     }
+#ifdef BB_CPU_TRANSLATOR
+    // Recreate the x86 register adapters inside the registered guest arena.
+    const unsigned char flush_args[]{0x4c,0x89,0xf7,0x4c,0x89,0xfe};
+    const unsigned char counter_args[]{0x48,0x89,0xdf,0x48,0x8b,0x75,0xc8,
+        0x4c,0x89,0xfa,0x48,0x8b,0x4d,0xc0};
+    const unsigned char* args[]{flush_args,counter_args};
+    const std::size_t lengths[]{sizeof(flush_args),sizeof(counter_args)};
+    const std::uint64_t targets[]{reinterpret_cast<std::uint64_t>(&bbmac_gpu_flush_clock_impl),
+        reinterpret_cast<std::uint64_t>(&bbmac_gpu_counter_clock_impl)};
+    for (unsigned i=0;i<2;++i) {
+        auto* stub=static_cast<unsigned char*>(host_page_alloc(4096,true));
+        if (!stub) return;
+        std::memcpy(stub,args[i],lengths[i]);
+        auto* end=stub+lengths[i];end[0]=0x48;end[1]=0xb8;
+        std::memcpy(end+2,&targets[i],8);end[10]=0xff;end[11]=0xe0;
+        sites[i].replacement=stub;
+    }
+#else
+    sites[0].replacement=reinterpret_cast<void*>(&bbmac_gpu_flush_clock);
+    sites[1].replacement=reinterpret_cast<void*>(&bbmac_gpu_counter_clock);
+#endif
     for(const auto& site:sites) {
         const bool installed=RedirectCheckedCall(image,image->mem.slide+site.rva+site.call,
             image->mem.slide+0x2bbea98,site.replacement);

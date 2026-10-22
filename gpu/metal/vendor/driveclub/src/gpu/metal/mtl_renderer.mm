@@ -44,6 +44,7 @@
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/command_timeline.h"
+#include "gpu/metal/command_budget.h"
 #include "gpu/metal/stage_counter_timeline.h"
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/snapshot_arena.h"
@@ -350,7 +351,8 @@ struct MetalRenderer::Impl {
   u64 submission_id=0,last_vs=0,last_ps=0,last_cs=0;
   u64 chunk_off = 0;
   u32 work_since_commit = 0; // draws + dispatches in the open command buffer
-  static constexpr u32 kCommitEvery = 400;
+  const u32 command_budget_us=CommandBudget::Parse(std::getenv("BB_METAL_COMMAND_BUDGET_US"));
+  u64 command_budget_commits=0;
 
   // Signals: an event value encoded between passes, so fences do not cut
   // command buffers. Callbacks run in order on the listener's queue.
@@ -1967,7 +1969,7 @@ struct MetalRenderer::Impl {
     if (!cmd) {
       StutterTrace::Scope timing("command_buffer_create",frame_count,last_vs,last_ps,1);
       cmd = [queue commandBuffer];
-      if(command_timeline)command_created=StutterTrace::Now();
+      if(command_timeline || command_budget_us)command_created=StutterTrace::Now();
       if(stage_counter_log)stage_counter_clock=stage_counter_log->Clock();
     }
   }
@@ -2128,6 +2130,15 @@ struct MetalRenderer::Impl {
       }
     }
     pass_dumps.clear();
+  }
+
+  void CommitAtEncoderBoundary() {
+    if(!cmd)return;
+    const auto reason=CommandBudget::Due(work_since_commit,command_budget_us,
+        command_created,command_budget_us ? StutterTrace::Now() : 0);
+    if(reason==CommandBudget::Reason::None)return;
+    if(reason==CommandBudget::Reason::ElapsedTime)++command_budget_commits;
+    Commit(false);
   }
 
   void Commit(bool wait) {
@@ -3584,9 +3595,7 @@ struct MetalRenderer::Impl {
                  u32 stencil_value = 0) {
     EndPass();
     StutterTrace::Scope timing("render_pass_begin",frame_count,last_vs,last_ps,1);
-    if (work_since_commit >= kCommitEvery) {
-      Commit(false); // keep the host GPU busy while the rest is recorded
-    }
+    CommitAtEncoderBoundary(); // publish ready work before more CPU recording
     EnsureCommandBuffer();
     MTLRenderPassDescriptor *rp =
         [MTLRenderPassDescriptor renderPassDescriptor];
@@ -5893,9 +5902,8 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   }
 
   EndPass();
-  if (++work_since_commit >= kCommitEvery) {
-    Commit(false);
-  }
+  ++work_since_commit;
+  CommitAtEncoderBoundary();
   u32 cud[16];
   std::memcpy(cud, ud, sizeof(cud));
   u32* prepared[]{cud};
@@ -6069,6 +6077,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
         }
       }
       const auto warm=compiler->GetWarmupStats();
+      if(command_budget_us)DC_INFO("gpu command budget: %u us, %llu elapsed-time commits at natural encoder boundaries (cumulative)",
+          command_budget_us,command_budget_commits);
       DC_INFO("gpu prewarm: %llu recipes loaded, %llu ready, %llu pipeline hits",
           warm.loaded,warm.ready,warm.hits);
       if(temporal) DC_INFO("gpu temporal: %llu resolved frames, %llu native velocity inputs",
@@ -6623,6 +6633,10 @@ std::uint64_t MetalRenderer::DepthBoundsCopyCount() const {
 }
 std::uint64_t MetalRenderer::UploadBufferAllocationCount() const {
   return impl->upload_allocations.load(std::memory_order_relaxed);
+}
+std::uint64_t MetalRenderer::CommandBudgetCommitCount() const {
+  std::scoped_lock lock(impl->lock);
+  return impl->command_budget_commits;
 }
 
 

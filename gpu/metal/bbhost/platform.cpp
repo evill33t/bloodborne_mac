@@ -23,6 +23,9 @@
 #include <cstring>
 #include <utility>
 #include <SDL3/SDL.h>
+#ifdef BB_CPU_TRANSLATOR
+#include "cpu/bbcpu.h"
+#endif
 
 extern "C" void* runtime_low_map(std::size_t,int);
 extern "C" void runtime_file_set_overlay(int (*)(const char*,char*,std::size_t));
@@ -38,6 +41,25 @@ bool settings_pending=false;
 bool restart_requested=false;
 std::string pending_message;
 std::set<std::uint64_t> writable_code;
+#ifdef BB_CPU_TRANSLATOR
+// One registered guest range for all generated x86 hooks. This is data to
+// the arm64 host; only bbcpu's separate MAP_JIT pages are executable.
+std::mutex hook_arena_mutex;
+unsigned char* hook_arena=nullptr;
+std::size_t hook_used=0;
+void* guest_hook_alloc(std::size_t bytes) {
+    constexpr std::size_t capacity=16*1024*1024;
+    std::scoped_lock lock(hook_arena_mutex);
+    bytes=(bytes+16383)&~std::size_t(16383);
+    if (!bytes || bytes>capacity-hook_used) return nullptr;
+    if (!hook_arena) {
+        hook_arena=static_cast<unsigned char*>(runtime_low_map(capacity,PROT_READ|PROT_WRITE));
+        if (!hook_arena) return nullptr;
+        bbcpu_add_guest_code(reinterpret_cast<std::uintptr_t>(hook_arena),capacity);
+    }
+    auto* result=hook_arena+hook_used;hook_used+=bytes;return result;
+}
+#endif
 std::string env(const char* key,const char* fallback="") {
     const char* value=std::getenv(key); return value ? value : fallback;
 }
@@ -83,11 +105,21 @@ bool protect(GuestMemory* mem,std::uint64_t at,std::size_t size,int prot) {
     const auto lo=at&~(page-1),hi=(at+size+page-1)&~(page-1);
     for (auto p=lo;p<hi;p+=page) {
         const int actual=writable_code.contains(p) ? PROT_READ|PROT_WRITE|PROT_EXEC : prot;
-        if (mprotect(reinterpret_cast<void*>(p),page,actual)) return false;
+        int mode=actual;
+#ifdef BB_CPU_TRANSLATOR
+        mode=(mode&~PROT_EXEC)|PROT_READ;
+#endif
+        if (mprotect(reinterpret_cast<void*>(p),page,mode)) return false;
     }
     return true;
 }
 void* exec_near(std::uint64_t at) {
+#ifdef BB_CPU_TRANSLATOR
+    auto* code=guest_hook_alloc(4096);
+    if (!code) return nullptr;
+    const auto delta=reinterpret_cast<std::int64_t>(code)-std::int64_t(at)-5;
+    return delta>=INT32_MIN && delta<=INT32_MAX ? code : nullptr;
+#else
     for (std::uint64_t delta=0x10000;delta<0x70000000;delta+=0x10000) {
         mach_vm_address_t address=(at&~0xffffull)+delta;
         if (mach_vm_allocate(mach_task_self(),&address,0x1000,VM_FLAGS_FIXED)!=KERN_SUCCESS) continue;
@@ -96,6 +128,7 @@ void* exec_near(std::uint64_t at) {
         mach_vm_deallocate(mach_task_self(),address,0x1000);
     }
     return nullptr;
+#endif
 }
 }
 
@@ -186,8 +219,18 @@ bool guest_protect_rwx(GuestMemory* m,std::uint64_t a,std::size_t n) { return pr
 void guest_keep_writable(GuestMemory* m,std::uint64_t a) {
     writable_code.insert(a&~std::uint64_t(getpagesize()-1)); guest_protect_rwx(m,a,1);
 }
-void* host_page_alloc(std::size_t n,bool exec) { return runtime_low_map(n,PROT_READ|PROT_WRITE|(exec ? PROT_EXEC : 0)); }
-void host_page_free(void* p,std::size_t n) { munmap(p,n); }
+void* host_page_alloc(std::size_t n,bool exec) {
+#ifdef BB_CPU_TRANSLATOR
+    if (exec) return guest_hook_alloc(n);
+#endif
+    return runtime_low_map(n,PROT_READ|PROT_WRITE|(exec ? PROT_EXEC : 0));
+}
+void host_page_free(void* p,std::size_t n) {
+#ifdef BB_CPU_TRANSLATOR
+    if (hook_arena && reinterpret_cast<std::uintptr_t>(p)-reinterpret_cast<std::uintptr_t>(hook_arena)<16*1024*1024) return;
+#endif
+    munmap(p,n);
+}
 void host_sleep_us(std::uint64_t us) { std::this_thread::sleep_for(std::chrono::microseconds(us)); }
 void host_sleep_until(std::chrono::steady_clock::time_point t) { std::this_thread::sleep_until(t); }
 std::uint64_t host_clock_monotonic_ns() { return SDL_GetTicksNS(); }

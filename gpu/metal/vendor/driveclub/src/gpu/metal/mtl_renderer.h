@@ -78,6 +78,7 @@ public:
     std::uint64_t DepthBoundsCopyCount() const;
     // Diagnostic counter: new transient upload buffers, excluding safe reuse.
     std::uint64_t UploadBufferAllocationCount() const;
+    std::uint64_t CommandBudgetCommitCount() const;
     std::uint64_t NativeIndirectDrawCount() const;
     std::uint64_t NativeIndirectDispatchCount() const;
     std::uint64_t IndirectCpuWriteWaitCount() const;

@@ -4,7 +4,7 @@
 #include <cstring>
 #include <mutex>
 #include <new>
-#include <x86intrin.h>
+#include "gpu/metal/guest_clock.h"
 extern "C" void* bbmetal_guest_allocate(size_t size);
 
 #include "common/log.h"
@@ -169,7 +169,7 @@ void Driver::MarkFlipPending(s32 handle, u32 buf_idx) {
     if (handle <= 0 || static_cast<size_t>(handle) >= ports.size() || !ports[handle].open) return;
     auto& status = ports[handle].flip_status;
     ++status.flip_pending_num;
-    status.submit_tsc = __rdtsc();
+    status.submit_tsc = MacGuestClock::ReadTsc();
 }
 
 void Driver::OnFlipDone(s32 handle, u32 buf_idx, s64 flip_arg) {
@@ -195,7 +195,7 @@ void Driver::OnFlipDone(s32 handle, u32 buf_idx, s64 flip_arg) {
         status.count = p.flip_count;
         status.process_time = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        status.tsc = __rdtsc();
+        status.tsc = MacGuestClock::ReadTsc();
         status.flip_arg = flip_arg;
         status.current_buffer = static_cast<s32>(buf_idx);
         status.flip_pending_num = std::max(0, status.flip_pending_num - 1);

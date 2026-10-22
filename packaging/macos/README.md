@@ -31,6 +31,23 @@ x86-64 runtime in `out/macos-runtime/`. For runtime-only development:
 bash packaging/macos/build-runtime.sh --test
 ```
 
+An optional native arm64 runtime now uses bbcpu in place of Rosetta, retaining
+the same direct Metal renderer, settings, mods and native plugins:
+
+```sh
+bash packaging/macos/build-native-runtime.sh --test
+BB_MAC_CPU=bbcpu BB_DATA_DIR=out/macos-native-data \
+    BB_GAME_DIR=/path/to/GAMES/CUSA00900 bash run.sh
+```
+
+The example uses separate player data. `BB_MAC_NATIVE_RUNTIME_DIR` overrides
+`out/macos-native-runtime`. The native executable needs no Rosetta; only its
+synthetic differential CPU test uses Rosetta for reference answers. Native
+gameplay is unverified, and the x86 checkpoint continuation provider remains
+specific to the Rosetta build. `BB_MAC_CPU=rosetta` selects the existing default.
+The [upstream integration report](../../docs/MACOS_NATIVE_UPSTREAM_2026-10-22.md)
+records the imported sources, command-writer guards, tests and remaining limits.
+
 The runtime build downloads pinned SDL 3.4.16 and LibAtrac9 source archives with
 SHA-256 verification. Native shader tools use pinned glslang and SPIRV-Cross.
 The selected direct Metal PS4 renderer is vendored under
@@ -54,6 +71,11 @@ parallel compilation. `BB_TIMEOUT=120` enables a bounded diagnostic session.
 The launcher's default has no timeout. Offline remains the default. The Mac
 settings panel now includes The Hunter's Dream server selection and device-link
 sign-in; live multiplayer validation is pending.
+
+Automatic direct-memory sizing now follows the actual scene pixel count:
+5056 MiB through 1080p, 5760 MiB at 1440p and 7744 MiB at 4K. An explicit
+`BB_DMEM_MB` still overrides this value. Reservation size is not a measured
+physical-memory or frame-rate improvement.
 
 DualSense, keyboard and configured mouse input use the existing SDL runtime. Keyboard defaults:
 Space = Cross, Shift = Circle, I/J/K/L = d-pad, WASD = movement, arrows = camera,
@@ -137,6 +159,12 @@ the [bbhost integration guide](../../docs/BBHOST_MAC_INTEGRATION.md#patch-analys
 
 ### Pipeline caching and command validation
 
+Experimental `BB_METAL_COMMAND_BUDGET_US=2000` submits aged recorded work at
+existing encoder boundaries. It adds no render-pass breaks or GPU waits and is
+off by default: native-1080p gameplay comparisons at 2,000 and 8,000 us did
+not establish a repeatable FPS gain. See the
+[scheduling investigation](../../docs/MACOS_PIPELINE_SCHEDULING_2026-10-22.md).
+
 The game uses Metal's driver-managed pipeline cache, preserving cold first-use
 draws. Explicit binary-archive collection and serialization are disabled in the
 live renderer: serializing real game compute pipelines crashed inside Metal
@@ -146,7 +174,18 @@ Binary-archive persistence is restricted to the isolated development fixture.
 
 The renderer also records plain MSL/pipeline recipes outside the game dump and
 prewarms exact matches on a background compiler worker at the next launch.
-`BB_METAL_SHADER_PREWARM=0` disables this path. GPU label waits now park on
+To finish recorded shader and pipeline compilation before launching the game:
+
+```sh
+bash packaging/macos/precompile-shaders.sh --data-dir out/macos-data --threads 4
+```
+
+This separate process uses all four workers and reports its progress. It does
+not launch the game or modify its dump or saves. It compiles previously observed
+variants using Metal's managed cache; new variants can still compile on first
+encounter. The live renderer retains its background worker policy.
+
+`BB_METAL_SHADER_PREWARM=0` disables automatic in-game prewarming. GPU label waits now park on
 completion notifications, detect invalid mappings and report failures. Supported
 1.09 native fence-loop hooks preserve guest comparisons and timeout budgets;
 `BB_METAL_PARK_FENCES=0` retains the original polling. See the

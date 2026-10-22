@@ -1115,7 +1115,11 @@ void compare_fields(const SprjFlipper& ours, const SprjFlipper& guest) {
 }
 
 }  // namespace
+#ifdef BB_CPU_TRANSLATOR
+static void* frame_ret_guest=nullptr;
+#else
 extern "C" void frame_ret();
+#endif
 extern "C" GUEST_ABI std::uint64_t frame_after();
 namespace {
 
@@ -1335,7 +1339,11 @@ GUEST_ABI std::int64_t frame_manager_hook(std::uint64_t, const std::uint64_t* sa
         // see the same inputs; frame_after replays it as the guest returns.
         t_pending.flipper = f;
         t_pending.ret = saved[6];
+#ifdef BB_CPU_TRANSLATOR
+        const_cast<std::uint64_t*>(saved)[6] = reinterpret_cast<std::uint64_t>(frame_ret_guest);
+#else
         const_cast<std::uint64_t*>(saved)[6] = reinterpret_cast<std::uint64_t>(&frame_ret);
+#endif
     }
     if (g_game_fps != 60) {
         if (g_source == Source::Compare) t_pending.before = *f;
@@ -1686,13 +1694,28 @@ extern "C" void* g_frame_after_thunk = nullptr;
 #else
 #define FR_TYPE_(n) ".type " #n ", @function\n"
 #endif
+#ifndef BB_CPU_TRANSLATOR
 asm(".text\n .globl _frame_ret\n" FR_TYPE_(frame_ret) "_frame_ret:\n"
     "push %rax\n push %rdx\n call *_g_frame_after_thunk(%rip)\n"
     "mov %rax, %r11\n pop %rdx\n pop %rax\n jmp *%r11\n");
+#endif
 
 int frame_rate_game_fps() { return g_game_fps; }
 
 void frame_rate_install(ElfImage* image) {
+#ifdef BB_CPU_TRANSLATOR
+    // The return continuation remains x86 guest code interpreted by bbcpu.
+    // Keeping it in the registered hook arena preserves compare-mode support.
+    if (!frame_ret_guest) {
+        auto* stub=static_cast<std::uint8_t*>(host_page_alloc(4096,true));
+        if (!stub) throw std::runtime_error("Cannot allocate the frame return hook");
+        const std::uint8_t code[]{0x50,0x52,0x48,0xb8,0,0,0,0,0,0,0,0,0xff,0xd0,
+            0x49,0x89,0xc3,0x5a,0x58,0x41,0xff,0xe3};
+        std::memcpy(stub,code,sizeof(code));
+        const auto after=reinterpret_cast<std::uint64_t>(&frame_after);
+        std::memcpy(stub+4,&after,8);frame_ret_guest=stub;
+    }
+#endif
     const std::uint64_t at = image->mem.slide + (kFrameManager - kPreferredGuestSlide);
     g_slide = image->mem.slide;
     // BBHOST_FRAME_SOURCE: 1 (default) SprjFlipper::Update is ours; 0 the
