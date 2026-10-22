@@ -78,6 +78,9 @@ int MetadataIdentityTests() {
     assert(identity!=Identity("Other GPU","x86_64",27,0,0));
     assert(identity!=Identity("Example GPU / private device","arm64",27,0,0));
     assert(identity!=Identity("Example GPU / private device","x86_64",27,0,1));
+    assert(AlternateArchitecture("x86_64")=="arm64");
+    assert(AlternateArchitecture("arm64")=="x86_64");
+    assert(AlternateArchitecture("unknown").empty());
     assert(Material("ab","c",27,0,0)!=Material("a","bc",27,0,0));
     assert(LegacyDirectory("100000575-27.0.0","27.0.0"));
     assert(!LegacyDirectory("100000575-26.0.0","27.0.0"));
@@ -268,6 +271,72 @@ static void LegacyRecipeMigration(id<MTLDevice> device) {
     }
     std::filesystem::remove_all(directory);
     puts("Source-recipe migration: changed registry ID, exact-source reuse, bounded read/schema/hash/link admission, stable persistence and untouched legacy inputs passed");
+}
+
+static void OtherArchitectureRecipes(id<MTLDevice> device) {
+    using Compiler=Gpu::Metal::ShaderCompiler;
+    namespace IdentityPolicy=Gpu::Metal::PipelineRecipeIdentity;
+    char directory[]="/tmp/bb-metal-other-architecture-XXXXXX";assert(mkdtemp(directory));
+    setenv("BB_DATA_DIR",directory,1);unsetenv("BB_GAME_DIR");unsetenv("BB_SOURCE_GAME");unsetenv("BB_METAL_SHADER_PREWARM");
+    const auto stable=RecipeRoot(directory,device);
+    const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
+    const auto other=IdentityPolicy::AlternateArchitecture(IdentityPolicy::Architecture());assert(!other.empty());
+    const auto base=std::filesystem::path(directory)/"metal-cache"/"prewarm-v2";
+    const auto foreign=base/Identity(device.name.UTF8String,other,os.majorVersion,os.minorVersion,os.patchVersion);
+    {
+        Compiler compiler(device,2,Compiler::CacheMode::DriverManaged);compiler.EnablePrewarming();
+        for(unsigned group:{41u,42u})AreaPipeline(compiler,group);
+    }
+    const auto originals=Recipes(directory);assert(originals.size()==2);
+    std::vector<std::pair<std::filesystem::path,std::string>> preserved;
+    std::vector<std::filesystem::file_time_type> times;
+    unsigned source_context=0;
+    for(const auto& target:{foreign,
+            base/Identity("Unrelated GPU",other,os.majorVersion,os.minorVersion,os.patchVersion),
+            base/Identity(device.name.UTF8String,other,os.majorVersion,os.minorVersion,os.patchVersion+1)}) {
+        std::filesystem::create_directories(target);
+        for(const auto& source:originals) {
+            NSData* bytes=[NSData dataWithContentsOfFile:@(source.c_str())];
+            if(source_context) {
+                NSMutableDictionary* recipe=[[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil] mutableCopy];
+                recipe[@"group"]=@([recipe[@"group"] unsignedIntValue]+source_context*10);
+                bytes=[NSJSONSerialization dataWithJSONObject:recipe options:NSJSONWritingSortedKeys error:nil];
+            }
+            const auto destination=target/(Digest(bytes.bytes,bytes.length)+".json");
+            assert([bytes writeToFile:@(destination.c_str()) atomically:YES]);
+            preserved.emplace_back(destination,FileContents(destination));times.push_back(std::filesystem::last_write_time(destination));
+        }
+        ++source_context;
+    }
+    std::filesystem::remove_all(stable);
+    for(unsigned boot=0;boot<2;++boot) {
+        auto spy=[BBArchiveSpyDevice wrapping:device];spy.captureDescriptors=YES;
+        Compiler compiler((id<MTLDevice>)spy,2,Compiler::CacheMode::DriverManaged);compiler.EnablePrewarming();
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(20);
+        while((compiler.GetWarmupStats().ready<2 || !std::filesystem::exists(stable/originals[0].filename()) ||
+               !std::filesystem::exists(stable/originals[1].filename())) && std::chrono::steady_clock::now()<deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        assert(compiler.GetWarmupStats().loaded==2 && compiler.GetWarmupStats().ready==2);
+        assert(spy.computeDescriptors.count==2 && spy.libraryCalls==1 && spy.archiveCalls==0);
+        for(unsigned group:{41u,42u})AreaPipeline(compiler,group);
+        assert(compiler.GetWarmupStats().hits==2);
+        if(boot==1) {
+            AreaPipeline(compiler,43); // Same source, different descriptor must miss.
+            assert(compiler.GetWarmupStats().hits==2 && spy.computeDescriptors.count==3);
+        }
+    }
+    for(unsigned k=0;k<preserved.size();++k) {
+        assert(FileContents(preserved[k].first)==preserved[k].second);
+        assert(std::filesystem::last_write_time(preserved[k].first)==times[k]);
+    }
+    for(const auto& source:originals)assert(FileContents(stable/source.filename())==FileContents(foreign/source.filename()));
+    // An alternate namespace remains subject to the normal no-symlink rule.
+    const auto linked_data=std::filesystem::path(directory)/"linked-data";
+    const auto linked_base=linked_data/"metal-cache"/"prewarm-v2";std::filesystem::create_directories(linked_base);
+    std::filesystem::create_directory_symlink(foreign,linked_base/foreign.filename());
+    setenv("BB_DATA_DIR",linked_data.c_str(),1);
+    {Compiler compiler(device,2,Compiler::CacheMode::DriverManaged);compiler.EnablePrewarming();assert(compiler.GetWarmupStats().loaded==0);}
+    puts("Other-architecture source recipes: current-device compilation, exact reuse, device/OS isolation, deduplication, persistence and symlink rejection passed");
 }
 
 static int CapturedRecipes(id<MTLDevice> device,int count,const char* const* paths) {
@@ -500,6 +569,7 @@ int main(int argc,const char** argv) {
             assert(compiler.ComputePipeline(changed,nil));assert(compiler.GetWarmupStats().hits==2);
         }
         LegacyRecipeMigration(device);
+        OtherArchitectureRecipes(device);
         // A route visiting several areas must learn beyond the former 512
         // recipes. Hold the background worker to exercise pending admission,
         // rather than merely compiling/writing one descriptor at a time.

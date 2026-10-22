@@ -19,6 +19,9 @@ inline constexpr const char* Architecture() {
     return "unknown";
 #endif
 }
+inline constexpr std::string_view AlternateArchitecture(std::string_view architecture) {
+    return architecture=="arm64" ? "x86_64" : architecture=="x86_64" ? "arm64" : "";
+}
 inline std::string OsVersion(std::uint64_t major,std::uint64_t minor,std::uint64_t patch) {
     return std::to_string(major)+"."+std::to_string(minor)+"."+std::to_string(patch);
 }

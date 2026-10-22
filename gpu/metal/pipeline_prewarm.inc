@@ -143,6 +143,7 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     if(archive || !data || !*data || (enabled && !std::strcmp(enabled,"0"))) return;
     NSString* resolved_data=[NSURL fileURLWithPath:@(data)].URLByResolvingSymlinksInPath.path;
     NSString* root=[resolved_data stringByAppendingPathComponent:@"metal-cache/prewarm-v2"];
+    NSString* namespaces=root;
     for(const char* variable:{"BB_GAME_DIR","BB_SOURCE_GAME"}) if(const char* game=std::getenv(variable);game && *game) {
         NSString* source=[NSURL fileURLWithPath:@(game)].URLByResolvingSymlinksInPath.path;
         if([root isEqualToString:source] || [root hasPrefix:[source stringByAppendingString:@"/"]]) return;
@@ -159,6 +160,18 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     std::vector<Candidate> files;
     std::size_t remaining=PipelineRecipeIdentity::InventoryEntries;
     if(RecipeRootSafe(root,false))for(const auto& file:StartupRecipes(root,remaining))files.push_back({root,file,0});
+    // A source recipe contains MSL and descriptor values, never a compiled
+    // pipeline or host code. Recompile the other CPU mode's inputs on this
+    // device; exact source/descriptor equality still gates foreground reuse.
+    // Keep the current namespace first and share all admission/read bounds.
+    const auto alternate=PipelineRecipeIdentity::AlternateArchitecture(PipelineRecipeIdentity::Architecture());
+    if(!alternate.empty()) {
+        const auto other_material=PipelineRecipeIdentity::Material(name.UTF8String,alternate,
+            os.majorVersion,os.minorVersion,os.patchVersion);
+        const auto other_identity=RecipeDigest(other_material.data(),other_material.size());
+        NSString* other=[namespaces stringByAppendingPathComponent:@(other_identity.c_str())];
+        if(RecipeRootSafe(other,false))for(const auto& file:StartupRecipes(other,remaining))files.push_back({other,file,1});
+    }
     NSString* legacy=[resolved_data stringByAppendingPathComponent:@"metal-cache/prewarm-v1"];
     const auto version=PipelineRecipeIdentity::OsVersion(os.majorVersion,os.minorVersion,os.patchVersion);
     NSString* current=[NSString stringWithFormat:@"%llx-%s",device.registryID,version.c_str()];
@@ -185,14 +198,14 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     });
     if(directories.size()>PipelineRecipeIdentity::LegacyDirectories)directories.resize(PipelineRecipeIdentity::LegacyDirectories);
     for(const auto& directory:directories)for(const auto& file:StartupRecipes(directory.first,remaining))
-        files.push_back({directory.first,file,[directory.first.lastPathComponent isEqualToString:current] ? 1u : 2u});
+        files.push_back({directory.first,file,[directory.first.lastPathComponent isEqualToString:current] ? 2u : 3u});
     // Stable/current-runtime inputs first, then recently observed older inputs.
     std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
         if(a.priority!=b.priority)return a.priority<b.priority;
         return a.file.modified!=b.file.modified ? a.file.modified>b.file.modified :
             [a.file.name compare:b.file.name]==NSOrderedAscending;
     });
-    unsigned count=0,stable_count=0,legacy_count=0;std::uint64_t total=0;
+    unsigned count=0,stable_count=0,imported_count=0;std::uint64_t total=0;
     std::uint64_t read_budget=PipelinePrewarmLimits::Bytes;
     std::unordered_set<std::string> admitted;
     for(const auto& entry:files) {
@@ -209,7 +222,7 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
         if(!RecipeSchema(recipe) || RecipeKey(recipe)!=key)continue;
         admitted.insert(key);total+=bytes.length;++count;
         const bool imported=entry.priority!=0;
-        imported ? ++legacy_count : ++stable_count;
+        imported ? ++imported_count : ++stable_count;
         const auto queued_bytes=bytes.length;
         {std::lock_guard guard(warm_lock);++warm_stats.loaded;++warm_queued_count;warm_queued_bytes+=queued_bytes;}
         Submit([this,recipe,bytes,key,imported,queued_bytes] {
@@ -230,8 +243,8 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
             if(write)Submit([this]{WritePendingRecipe();},true);
         },true);
     }
-    DC_INFO("gpu prewarm recipes: namespace=%s source=%u legacy=%u bytes=%llu read_bytes=%llu",identity.c_str(),
-        stable_count,legacy_count,static_cast<unsigned long long>(total),
+    DC_INFO("gpu prewarm recipes: namespace=%s source=%u imported=%u bytes=%llu read_bytes=%llu",identity.c_str(),
+        stable_count,imported_count,static_cast<unsigned long long>(total),
         static_cast<unsigned long long>(PipelinePrewarmLimits::Bytes-read_budget));
 }
 NSDictionary* ShaderCompiler::RenderRecipe(MTLRenderPipelineDescriptor* d) {

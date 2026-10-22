@@ -60,6 +60,7 @@ add_dependencies(bb-macos-game bb-plugin-randomizer bb-plugin-boss_rush bb-plugi
 
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME native-precompile-help COMMAND bb-macos-precompile-shaders --help)
     add_test(NAME native-runtime-loader COMMAND "${Python3_EXECUTABLE}" "${BB_ROOT}/tests/test_probe.py")
     set_tests_properties(native-runtime-loader PROPERTIES TIMEOUT 45
         ENVIRONMENT "BB_PROBE=$<TARGET_FILE:bb-macos-runtime-probe>;BB_PROBE_TRANSLATOR=1;BB_SOUND_HACK=0")

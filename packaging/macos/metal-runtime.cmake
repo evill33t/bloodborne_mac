@@ -29,3 +29,9 @@ target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features
     "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
+
+# Source recipes are recompiled by the selected host runtime; no game is run.
+add_executable(bb-macos-precompile-shaders "${BB_ROOT}/gpu/metal/precompile_main.mm")
+target_include_directories(bb-macos-precompile-shaders PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+target_compile_options(bb-macos-precompile-shaders PRIVATE -Wall -Wextra -Werror -fobjc-arc)
+target_link_libraries(bb-macos-precompile-shaders PRIVATE bb-ps4-metal bbruntime)
