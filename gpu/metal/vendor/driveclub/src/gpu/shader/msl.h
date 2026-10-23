@@ -114,6 +114,9 @@ struct MslOptions {
     // Vertex.
     bool rect_list = false; // expand RECTLIST: 3 vertices -> 2 triangles
     bool debug_capture = false; // write positions to buffer(6) (debugging)
+    // Bounded opt-in Dream VS diagnostic; already loaded wind/view words
+    // are recorded into private buffer14. Never used by an ordinary variant.
+    bool wind_consumed = false;
     bool points = false;          // point list: VsOut carries [[point_size]]
     bool vtx_point_size = false;  // PA_CL_VS_OUT_CNTL.USE_VTX_POINT_SIZE: POS1.x is the size
     // Default-disabled exact-hash interleaved fetch fusion. Descriptors and
@@ -184,6 +187,8 @@ bool FragmentSimdSmrdEligible(const Program& p,std::string* failure=nullptr);
 
 // Exact original vertex/fetch hashes and register/opcode/PC contract.
 bool VertexNativeFetchEligible(const Program& p,std::string* failure=nullptr);
+// Exact original Dream read sites and independent full-program no-writer proof.
+bool VertexWindConsumedEligible(const Program& p);
 
 // Fully decoded writer-free ordinary VS/PS, including only the proved single
 // branchless inline-fetch layout. Native fetch additionally requires its exact proof.

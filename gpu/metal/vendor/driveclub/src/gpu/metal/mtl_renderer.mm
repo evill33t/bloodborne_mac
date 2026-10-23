@@ -52,6 +52,7 @@
 #include "gpu/metal/snapshot_arena.h"
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/wind_capture_contract.h"
+#include "gpu/metal/wind_consumed_contract.h"
 #include "gpu/metal/ps_root_read.h"
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
@@ -825,6 +826,7 @@ struct MetalRenderer::Impl {
 
 #include "gpu/metal/renderer_capture.inc"
 #include "gpu/metal/wind_capture.inc"
+#include "gpu/metal/wind_consumed_capture.inc"
 #include "gpu/metal/htile_capture.inc"
 #include "gpu/metal/native_velocity.inc"
 #include "gpu/metal/renderer_binding_cache.inc"
@@ -833,6 +835,7 @@ struct MetalRenderer::Impl {
     stage_counter_log=StageCounterTimeline::Log::Open(device);
     InitCapture();
     InitWindCapture();
+    InitWindConsumedCapture();
     // Immutable snapshots and raw GPU detiling avoid the large CPU upload
     // stalls. Unsupported layouts retain the reference uploader; 0 disables
     // this path for diagnostics without changing the game's source files.
@@ -4992,7 +4995,12 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
   vo.readonly_guest_memory=ReadOnlyGuestMemory(*vs,vo);
   if(vo.readonly_guest_memory)++readonly_guest_vs_bindings;
+  vo.wind_consumed=WindConsumedRequested(*vs,vo.tess_stage==Shader::TessStage::None &&
+      !vo.native_tess_layout && !rect && !vo.points && !debug_vsout && !probe_buf &&
+      !vo.native_vertex_fetch && !vo.direct_vertex_root && !vo.readonly_guest_memory &&
+      !vo.static_smrd && !vo.direct_smrd && !vo.simd_smrd,any_color);
   u64 vs_key = Hash(vs->hash);
+  if(vo.wind_consumed)vs_key=Hash(WindConsumed::CacheTag,vs_key);
   if(vo.direct_vertex_root)vs_key=Hash(0x5653524f4f543031ull,vs_key); // distinct VS root-address ABI
   if(vo.readonly_guest_memory)vs_key=Hash(0x524f475545535431ull,vs_key);
   if(vo.native_vertex_fetch) vs_key=Hash(NativeVertexFetch::CacheTag,vs_key);
@@ -5472,9 +5480,17 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       StageCounterTimeline::NoteDraw(*stage_counter_pass,vs_addr,ps_addr,vs->hash,ps ? ps->hash : 0,
           {vs_key,ps_key_known ? ps_key : 0,pkey,true,ps_key_known,true});
     }
+    unsigned wind_targets=0;
+    if(vo.wind_consumed)for(auto* color:colors)wind_targets+=color!=nullptr;
+    if(vo.wind_consumed && !BindWindConsumedDraw(*vs,vud,vs_key,pkey,draw_map_generation,dc,
+        pass_width,pass_height,wind_targets)) {
+      execution->Fail("Consumed-wind diagnostic could not bind its owned actual-consumer record.");
+      return false;
+    }
+    return true;
   };
   if (tessellated) {
-    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+    prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc setTessellationFactorBuffer:tess.factors offset:tess.factor_offset instanceStride:0];
     [enc drawPatches:1 patchStart:0 patchCount:dc.count patchIndexBuffer:nil
@@ -5512,7 +5528,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       return;
     }
     {
-      prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+      prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
       StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
       [enc drawPrimitives:MTLPrimitiveTypeTriangle
               vertexStart:0
@@ -5527,7 +5543,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
 
   if (!dc.indexed && !to_list) {
-    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+    prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     if(indirect) {
       [enc drawPrimitives:mprim indirectBuffer:indirect indirectBufferOffset:0];
@@ -5541,7 +5557,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   }
   if (!dc.indexed && prim == PrimType::QuadList) {
     const u32 quads = std::min<u32>(dc.count / 4, 0x10000);
-    prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+    prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
     StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
     [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                     indexCount:quads * 6
@@ -5563,7 +5579,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     u64 ioff = 0;
     if ((src % dc.index_size) == 0 &&
         Locate(src, u64(dc.count) * dc.index_size, &ibuf, &ioff)) {
-      prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+      prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
       StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
       [enc drawIndexedPrimitives:mprim
                       indexCount:dc.count
@@ -5620,7 +5636,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     return;
   }
   auto [buf, off] = Upload(idx.data(), idx.size() * 4);
-  prepare_direct_smrd();prepare_vertex_root();note_stage_draw();
+  prepare_direct_smrd();prepare_vertex_root();if(!note_stage_draw())return;
   StutterTrace::Scope timing("draw_encode",frame_count,vs_addr,ps_addr,1);
   [enc drawIndexedPrimitives:mprim
                   indexCount:idx.size()

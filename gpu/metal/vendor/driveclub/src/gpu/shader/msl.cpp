@@ -13,6 +13,8 @@
 #include "gpu/metal/native_tessellation.h"
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/native_vertex_fetch.h"
+#include "gpu/metal/wind_consumed_contract.h"
+#include "gpu/metal/wind_consumed_msl.h"
 
 namespace Gpu::Shader {
 
@@ -644,6 +646,26 @@ bool ProveReadOnlyGuestCode(const Program& p,std::string* failure=nullptr) {
     return true;
 }
 
+bool ProveWindConsumedSite(const Program& p) {
+    if(p.stage!=Stage::Vertex || p.hash!=Gpu::Metal::WindConsumed::ShaderHash ||
+       p.num_user_sgprs<8 || p.code.empty() || !p.unsupported.empty())return false;
+    struct Site {u32 pc;Smrd op;u16 dst,base;u32 offset;};
+    constexpr Site sites[]={{0x000c,Smrd::S_LOAD_DWORDX8,16,6,0},
+        {0x001c,Smrd::S_BUFFER_LOAD_DWORDX4,12,20,32},
+        {0x14b4,Smrd::S_LOAD_DWORDX4,0,6,8},
+        {0x14ec,Smrd::S_BUFFER_LOAD_DWORDX16,8,0,200}};
+    for(const auto& site:sites) {
+        unsigned matches=0;
+        for(const auto& i:p.code)if(i.pc==site.pc) {
+            if(i.enc!=Enc::SMRD || i.op!=u16(site.op) || i.size!=1 ||
+               i.dst!=site.dst || i.sbase!=site.base || !i.imm || i.smrd_offset!=site.offset)return false;
+            ++matches;
+        }
+        if(matches!=1)return false;
+    }
+    return true;
+}
+
 class Emitter {
 public:
     Emitter(const Program& p, const MslOptions& o) : p(p), o(o),
@@ -659,7 +681,11 @@ public:
         readonly_guest_memory(o.readonly_guest_memory && o.tess_stage==TessStage::None &&
             !o.native_tess_layout && (!o.native_vertex_fetch || native_vertex_fetch) && !o.rect_list && !o.points &&
             !o.debug_capture && o.probe_pc==~0u && !direct_vertex_root && !o.static_smrd && !o.direct_smrd &&
-            !o.simd_smrd && ProveReadOnlyGuestCode(p)) {}
+            !o.simd_smrd && ProveReadOnlyGuestCode(p)),
+        wind_consumed(o.wind_consumed && o.tess_stage==TessStage::None && !o.native_tess_layout &&
+            !o.rect_list && !o.points && !o.debug_capture && o.probe_pc==~0u &&
+            !o.native_vertex_fetch && !o.direct_vertex_root && !o.static_smrd && !o.direct_smrd &&
+            !o.simd_smrd && !o.readonly_guest_memory && ProveWindConsumedSite(p) && GuestMemoryReadOnlyEligible(p)) {}
 
     std::string Run();
     std::set<std::string> unsupported;
@@ -860,6 +886,7 @@ private:
     const bool direct_vertex_root;
     const bool native_vertex_fetch;
     const bool readonly_guest_memory;
+    const bool wind_consumed;
     std::string body;
     u32 max_sgpr = 0;
     u32 max_vgpr = 0;
@@ -1194,6 +1221,14 @@ void Emitter::EmitSmrd(const Inst& i) {
                     N(count * 4) + "u);";
     for (u32 k = 0; k < count; ++k) {
         s += " " + SName(static_cast<u16>(i.dst + k)) + " = p_ ? p_[" + N(k) + "] : 0u;";
+    }
+    if(wind_consumed && (i.pc==0x001cu || i.pc==0x14ecu)) {
+        // Sample the registers after the ORIGINAL load. Both proved sites
+        // preserve their base SGPR pair; no additional guest read is added.
+        s+=" if ((vid & 63u) == 0u) { const uint dc_observed_["+N(count)+"] = {";
+        for(u32 k=0;k<count;++k)s+=(k ? ", " : "")+SName(static_cast<u16>(i.dst+k));
+        s+="}; dc_record_wind_site(dc_wind_record, "+N(i.pc==0x001cu ? 0 : 1)+
+            "u, dc_observed_, "+base+", vid, iid, p_ != nullptr); }";
     }
     s += " }";
     if(simd_smrd) {
@@ -2400,6 +2435,7 @@ std::string Emitter::Run() {
     std::string src = readonly_guest_memory ? kMslReadOnlyPrelude : kMslPrelude;
     if (o.native_tess_layout) src += Gpu::Metal::NativeTessellationMsl();
     if(native_vertex_fetch) src += Gpu::Metal::NativeVertexFetch::Msl(readonly_guest_memory);
+    if(wind_consumed) src += Gpu::Metal::WindConsumed::MslPrelude;
     src += "\n";
     const std::string mem_params =
         "constant uint* ud [[buffer(0)]], " + GuestPointer() + " gm0 [[buffer(1)]], " + GuestPointer() + " gm1 [[buffer(2)]], " +
@@ -2437,12 +2473,15 @@ std::string Emitter::Run() {
             ? ", float2 dc_uv, uint dc_patch, thread const DcNativeTess& lds"
             : ", float2 dc_uv, uint dc_patch, device uint* lds";
         const std::string root_param=direct_vertex_root ? ", constant ulong* dc_vs_roots" : "";
-        src += "static VsOut dc_run(uint vid, uint iid, constant uint* ud, thread const DcMem& mem" + root_param + tess_params + TexParams(false) +
+        const std::string wind_param=wind_consumed ? ", device atomic_uint* dc_wind_record" : "";
+        src += "static VsOut dc_run(uint vid, uint iid, constant uint* ud, thread const DcMem& mem" + root_param + wind_param + tess_params + TexParams(false) +
                ") {\n    VsOut out = {};\n" + (o.points ? "    out.psize = 1.0f;\n" : "") + decl + wrapped + "}\n\n";
-        const std::string args = std::string("ud, mem") + (direct_vertex_root ? ", dc_vs_roots" : "") + TexArgs();
+        const std::string args = std::string("ud, mem") + (direct_vertex_root ? ", dc_vs_roots" : "") +
+            (wind_consumed ? ", dc_wind_record" : "") + TexArgs();
         src += domain ? "[[patch(quad, 1)]] vertex VsOut main0(uint dc_patch [[patch_id]], float2 dc_uv [[position_in_patch]], "
             : "vertex VsOut main0(uint vid [[vertex_id]], uint iid [[instance_id]], ";
         src += mem_params + (direct_vertex_root ? ", constant ulong* dc_vs_roots [[buffer(13)]]" : "") +
+               (wind_consumed ? ", device atomic_uint* dc_wind_record [[buffer(14)]]" : "") +
                ", constant DcDraw& draw [[buffer(4)]]" + (o.debug_capture ? ", device float4* dbg [[buffer(6)]]" : "") +
                (domain ? (o.native_tess_layout ? ", constant uint* dc_lud [[buffer(11)]], constant uint* dc_hud [[buffer(12)]], constant DcTess& dc_tp [[buffer(10)]]"
                                               : ", device uint* dc_lds [[buffer(8)]]") : "") +
@@ -2566,6 +2605,10 @@ bool FragmentSimdSmrdEligible(const Program& p,std::string* failure) {
 
 bool VertexNativeFetchEligible(const Program& p,std::string* failure) {
     return ProveNativeVertexFetch(p,failure);
+}
+
+bool VertexWindConsumedEligible(const Program& p) {
+    return ProveWindConsumedSite(p) && GuestMemoryReadOnlyEligible(p);
 }
 
 bool GuestMemoryReadOnlyEligible(const Program& p,std::string* failure) {

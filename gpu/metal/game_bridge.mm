@@ -362,6 +362,10 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
         if(density>0)SDL_SetWindowSize(window,int(std::lround(1920.0/density)),int(std::lround(1080.0/density)));
         SDL_SyncWindow(window);
     }
+    if(const char* front=std::getenv("BB_TEST_WINDOW_TOPMOST");front && !std::strcmp(front,"1")) {
+        SDL_SetWindowAlwaysOnTop(window,true);
+        SDL_RaiseWindow(window);
+    }
     SDL_MetalView view=SDL_Metal_CreateView(window);
     if (!view) { fprintf(stderr,"SDL Metal view: %s\n",SDL_GetError()); return 1; }
     std::filesystem::path user="out/macos-data/user",data="out/macos-data";
