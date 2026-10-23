@@ -203,6 +203,9 @@ target_link_options(bb-metal-readonly-memory-tests PRIVATE
 add_test(NAME darwin-readonly-memory-cpu COMMAND bb-metal-readonly-memory-tests)
 add_test(NAME darwin-readonly-memory-gpu COMMAND bb-metal-readonly-memory-tests --gpu)
 set_tests_properties(darwin-readonly-memory-gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+add_test(NAME darwin-constant-map-gpu COMMAND bb-metal-readonly-memory-tests --gpu)
+set_tests_properties(darwin-constant-map-gpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60
+    ENVIRONMENT "BB_METAL_CONSTANT_MEMORY_MAP=1;ROSETTA_ADVERTISE_AVX=1")
 add_executable(bb-metal-native-vertex-fetch-tests "${BB_ROOT}/gpu/metal/tests/game_native_vertex_fetch_tests.mm")
 target_include_directories(bb-metal-native-vertex-fetch-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-metal-native-vertex-fetch-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)

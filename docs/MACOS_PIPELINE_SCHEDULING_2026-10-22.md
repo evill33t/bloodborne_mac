@@ -7,6 +7,11 @@ neither 2,000 nor 8,000 us established a repeatable FPS gain. The hash alternati
 was also rejected before renderer integration. No 60 FPS result is claimed.
 Original dump, original prepared ELF and master saves remain untouched.
 
+Work is paused at the user's request after the completed runs. The later
+cross-architecture shader-source import is unfinished: both final builds failed
+in its new test fixture, and that change has no passing regression or gameplay
+validation yet. No further runs are scheduled today.
+
 ## Profiling evidence
 
 The retained `rea21-gpu-full` capture covers 1,258 measured Dream frames.
@@ -38,8 +43,8 @@ yesterday's diagnostic observations, not a fresh baseline or current clean FPS.
 ## Opt-in implementation
 
 `BB_METAL_COMMAND_BUDGET_US=2000` adds an elapsed recording-time budget to the
-existing 400-work-item limit. It remains **off by default** pending gameplay
-testing. Values 250 through 16,000 microseconds are accepted; missing, zero or
+existing 400-work-item limit. It remains **off by default** because gameplay
+testing did not establish a repeatable gain. Values 250 through 16,000 microseconds are accepted; missing, zero or
 malformed values retain the original policy.
 
 The check runs after a naturally required render-encoder end, before a new
@@ -74,11 +79,12 @@ and only two samples per mode. Neither result is gameplay FPS or full-scene
 material cost. An initial benchmark accidentally used an 8×8 attachment with
 1080p output; it and a stale-binary retry are invalid and excluded.
 
-The final Rosetta build and serial suite with a 2,000 us budget passed:
+Before the later shader-cache import changes, the Rosetta build and serial suite with a 2,000 us budget passed:
 101 tests passed, two expected private-input skips, zero failures, 122.53 s.
 The arm64 game and raster fixture also built; the arm64 raster test passed with
 the same 2,000 us budget. These tests do not establish long-session gameplay
 stability or visual equivalence in the original scene.
+They do not validate the subsequent cross-architecture cache changes.
 
 ## Reconnected-drive gameplay comparisons
 
@@ -137,7 +143,7 @@ comparisons remove these timers and extend the common post-load warm-up from
 15 to 45 seconds. The older budget figures remain explicitly timer-instrumented;
 they are not presented as fully uninstrumented production FPS.
 
-## Matched CPU-mode check
+## CPU-mode experiment: cache mismatch invalidates architecture comparison
 
 The existing optional arm64/bbcpu integration was exercised without changing
 its implementation. The native frozen runtime is
@@ -160,10 +166,54 @@ This was not promoted as a CPU-mode benefit. The subsequent timer-free,
 | Rosetta B | 28.4692 | 41.667 ms | 66.667 ms |
 
 All four completed their planned 60 seconds on AC with complete presentation
-results and zero GPU failures. Means are 33.6190 FPS native and 33.6849 Rosetta;
-large control drift prevents attributing a benefit to host architecture. The
-normal launch default remains Rosetta. This comparison changes the whole CPU
-execution mode, not merely the renderer's host instruction set.
+results and zero GPU failures. Later log inspection found that native loaded
+zero prewarm recipes while Rosetta loaded 945. The native test-data cache was
+a symlink, correctly rejected by the existing path-safety guard. The table is
+retained as raw diagnostic evidence, but is **not a matched CPU-mode comparison**
+and supports no architecture performance conclusion. Substantial control drift
+is an additional limitation. The normal launch default remains Rosetta.
+
+## Six-minute native stability diagnostic and shader-cache gap
+
+The frozen arm64 runtime completed six minutes of movement, camera input,
+attacks and three successful area transitions, then stopped as planned with
+zero GPU failures. RSS grew from 3,930,656 to 4,573,856 KiB; this short run cannot
+establish absence of leaks. The instrumented run includes video, loading
+transitions, 74 zero presentation results and a 5,075 ms maximum display gap.
+It is **not an FPS benchmark** or proof of motion/fog correctness.
+
+The largest dispatch stall was 2,857.880 ms, containing a 2,855.256 ms pipeline
+wait: roughly 1,702 ms of shader-library creation and 1,153 ms of pipeline
+creation. The compute source was already present in the Rosetta recipe bank.
+This native run also loaded zero prewarm recipes because of the test-cache
+symlink. This is first-use compilation evidence, not proof of a GPU fence stall.
+
+A second issue exists beyond the test setup: v2 source-recipe namespaces are
+architecture-specific, so an ordinary native launch cannot import the current
+Rosetta namespace. A bounded alternate-architecture source import was added
+for the same GPU name and OS, retaining schema/hash/path/link/read limits and
+recompiling source on the current device. Binary archives are not shared.
+The standalone precompiler also now selects the configured CPU runtime.
+
+These later changes are **not validated**. Both final builds failed at three
+calls in `game_pipeline_cache_tests.mm`: the new alternate architecture is a
+`std::string_view`, but the fixture's `Identity` helper accepts `const char*`.
+The precompiler targets built; the overall builds failed. No correction,
+fixture rerun or gameplay replay was started after the pause request. The
+native test cache is now a physical copy, but the old frozen native binary
+still lacks the new source import and must not be described as fixed.
+
+## Render-worker priority experiment
+
+A temporary test plugin applied user-initiated QoS overrides to the named GPU
+graphics, GPU compute and Metal presentation workers. OFF/ON/ON/OFF stationary
+Rosetta runs used the same frozen binary, a physical cache, a 945-ready-recipe
+gate, no slow CPU scopes and a 45-second warm-up. Results were 28.3880,
+21.4205, 30.6796 and 33.4779 FPS respectively. The first ON run had 17 zero
+presentation results and is excluded by the strict comparison policy.
+All completed as planned on AC with zero GPU failures. No repeatable benefit
+was established, so no production priority change was made. Requested worker
+QoS alone does not establish effective priority or physical core placement.
 
 The M4 Max's `MTLDevice.counterSets` inventory exposes only `timestamp` /
 `GPUTimestamp`, with stage-boundary sampling. No fragment-invocation, cycle or
@@ -228,3 +278,8 @@ and GPU-writer checks remain intact.
 Evidence lives under `out/pipeline-2026-10-22/`; gameplay data is in
 `out/metal-unattended-2026-10-20/pipe22-*`. Frozen binary/source identities,
 complete logs, raw CSVs, parser scripts and rejected prototype trials are kept.
+
+Final read-only integrity verification passed after the runs: all 28,779 dump
+file sizes/mtimes match the baseline, original eboot and prepared ELF hashes
+match, and all 16 master save hashes match. Gameplay and owned build/test
+processes were stopped before recording the pause checkpoint.

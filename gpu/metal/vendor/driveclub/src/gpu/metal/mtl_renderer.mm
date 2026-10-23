@@ -28,6 +28,7 @@
 #include "common/log.h"
 #include "common/content_hash.h"
 #include "gpu/metal/parallel_chunk_hash.h"
+#include "gpu/metal/constant_memory_map.h"
 #include "core/memory.h"
 #include "gpu/liverpool/pm4.h"
 #include "gpu/liverpool/registers.h"
@@ -710,6 +711,8 @@ struct MetalRenderer::Impl {
   struct BoundVertexSource {u64 address=0,bytes=0,generation=0,map_generation=0,root_offset=0;};
   bool readonly_guest_memory_enabled=std::getenv("BB_METAL_READONLY_GUEST_MEMORY") &&
       std::strcmp(std::getenv("BB_METAL_READONLY_GUEST_MEMORY"),"1")==0;
+  bool constant_memory_map_enabled=ConstantMemoryMap::Configured(std::getenv("BB_METAL_CONSTANT_MEMORY_MAP"));
+  u64 constant_memory_map_sources=0,constant_memory_map_fallbacks=0;
   std::unordered_map<const Program*,bool> readonly_guest_programs;
   u64 readonly_guest_vs_bindings=0,readonly_guest_ps_bindings=0;
   bool native_indirect_enabled=std::getenv("BB_METAL_NATIVE_INDIRECT") &&
@@ -2607,6 +2610,10 @@ struct MetalRenderer::Impl {
     StutterTrace::Scope timing("shader_msl",frame_count,p.address,key);
     std::vector<std::string> unsupported;
     std::string src = Shader::GenerateMsl(p, o, &unsupported);
+    if(constant_memory_map_enabled) {
+      if(ConstantMemoryMap::Apply(src))++constant_memory_map_sources;
+      else ++constant_memory_map_fallbacks;
+    }
     for (const auto &u : unsupported) {
       ReportOnce("shader op not translated: " + u + " at " + Hex(p.address) +
                  " stage " + std::to_string(static_cast<int>(p.stage)));
@@ -6077,6 +6084,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
         }
       }
       const auto warm=compiler->GetWarmupStats();
+      if(constant_memory_map_enabled)DC_INFO("gpu constant map: %llu source variants, %llu unchanged fallbacks (cumulative; immutable mapping metadata only)",
+          constant_memory_map_sources,constant_memory_map_fallbacks);
       if(command_budget_us)DC_INFO("gpu command budget: %u us, %llu elapsed-time commits at natural encoder boundaries (cumulative)",
           command_budget_us,command_budget_commits);
       DC_INFO("gpu prewarm: %llu recipes loaded, %llu ready, %llu pipeline hits",

@@ -8,6 +8,7 @@
 #include "gpu/shader/msl_prelude.h"
 #include "gpu/shader/msl_readonly_prelude.h"
 #include "gpu/metal/native_vertex_fetch.h"
+#include "gpu/metal/constant_memory_map.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -142,7 +143,47 @@ void CpuProofs() {
     }
     std::puts("Readonly independent opcode/context proof and exact default-prelude bytes passed.");
 }
-id<MTLLibrary> Compile(id<MTLDevice> device,const std::string& source) {
+void ConstantMapProofs() {
+    namespace Map=Gpu::Metal::ConstantMemoryMap;
+    Require(Map::Configured("1"),"Explicit constant-map switch rejected");
+    for(const char* value:std::array<const char*,6>{nullptr,"","0","01","true","1x"})
+        Require(!Map::Configured(value),"Invalid constant-map switch accepted");
+    for(auto stage:{Shader::Stage::Vertex,Shader::Stage::Fragment})for(bool readonly:{false,true}) {
+        std::vector<std::string> unsupported;
+        auto source=Shader::GenerateMsl(Synthetic(stage),Options(stage,readonly),&unsupported);
+        Require(unsupported.empty(),"Synthetic constant-map translation unsupported");
+        const auto original=source;
+        Require(Map::Apply(source),"Generated constant-map ABI rejected");
+        Require(source.find("constant DcMap* map;")!=std::string::npos &&
+            source.find("constant DcMap& gmap [[buffer(3)]]")!=std::string::npos &&
+            source.find("((constant int*)(m.map + 1))")!=std::string::npos,
+            "Mapping metadata did not consistently use constant access");
+        const auto payload=readonly ? "device const uint* gm0" : "device uint* gm0";
+        Require(source.find(payload)!=std::string::npos && original.find(payload)!=std::string::npos,
+            "Constant-map mode changed guest payload qualification");
+        Require(source.find("ulong p = va + ulong(long(e) << 14);")!=std::string::npos &&
+            source.find("i >= m.map->pages")!=std::string::npos &&
+            source.find("p >= m.map->limit")!=std::string::npos,
+            "Constant-map mode lost mapping arithmetic or bounds");
+        const auto transformed=source;
+        Require(!Map::Apply(source) && source==transformed,"Repeated transform changed source");
+        for(std::string_view marker:{"device const DcMap* map;",
+                "device const DcMap& gmap [[buffer(3)]]","((device const int*)(m.map + 1))"}) {
+            auto altered=original;altered.erase(altered.find(marker),marker.size());
+            const auto before=altered;
+            Require(!Map::Apply(altered) && altered==before,"Partial ABI was modified");
+            altered=original;altered.append(marker);const auto duplicate=altered;
+            Require(!Map::Apply(altered) && altered==duplicate,"Duplicate ABI was modified");
+        }
+    }
+    std::puts("Constant-map generated ABI, unchanged payload/bounds and atomic fallback proofs passed.");
+}
+id<MTLLibrary> Compile(id<MTLDevice> device,const std::string& input,bool generated=false) {
+    auto source=input;
+    if(Gpu::Metal::ConstantMemoryMap::Configured(std::getenv("BB_METAL_CONSTANT_MEMORY_MAP"))) {
+        const bool applied=Gpu::Metal::ConstantMemoryMap::Apply(source);
+        Require(applied || !generated,"Actual generated shader rejected constant-map ABI");
+    }
     auto options=[MTLCompileOptions new];options.languageVersion=MTLLanguageVersion3_0;
     options.mathMode=MTLMathModeSafe;options.preserveInvariance=YES;
     NSError* error=nil;auto library=[device newLibraryWithSource:@(source.c_str()) options:options error:&error];
@@ -160,8 +201,8 @@ void Reflection(NSArray<id<MTLBinding>>* bindings,bool readonly) {
 void GeneratedReflection(id<MTLDevice> device) {
     for(bool readonly:{false,true}) {
         std::vector<std::string> unsupported;
-        auto vertex=Compile(device,Shader::GenerateMsl(SyntheticInline(),Options(Shader::Stage::Vertex,readonly),&unsupported));
-        auto fragment=Compile(device,Shader::GenerateMsl(Synthetic(Shader::Stage::Fragment),Options(Shader::Stage::Fragment,readonly),&unsupported));
+        auto vertex=Compile(device,Shader::GenerateMsl(SyntheticInline(),Options(Shader::Stage::Vertex,readonly),&unsupported),true);
+        auto fragment=Compile(device,Shader::GenerateMsl(Synthetic(Shader::Stage::Fragment),Options(Shader::Stage::Fragment,readonly),&unsupported),true);
         auto descriptor=[MTLRenderPipelineDescriptor new];descriptor.vertexFunction=[vertex newFunctionWithName:@"main0"];
         descriptor.fragmentFunction=[fragment newFunctionWithName:@"main0"];
         descriptor.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA32Uint;
@@ -242,7 +283,7 @@ using namespace metal;kernel void main0(device uint* memory [[buffer(0)]],consta
 }
 int main(int argc,char** argv) { @autoreleasepool {
     try {
-        CpuProofs();if(argc==1)return 0;
+        CpuProofs();ConstantMapProofs();if(argc==1)return 0;
         Require(argc==2 && !std::strcmp(argv[1],"--gpu"),"Use --gpu for actual Metal differential/reflection");
         auto device=MTLCreateSystemDefaultDevice();if(!device)return 77;
         GeneratedReflection(device);RawGpu(device);return 0;

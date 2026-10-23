@@ -104,6 +104,13 @@ recipes under:
 $BB_DATA_DIR/metal-cache/prewarm-v2/<device-architecture-OS-identity>/
 ```
 
+After the current namespace, startup can also import source recipes from the
+other supported CPU architecture on the same GPU name and OS version. It
+recompiles their MSL and exact descriptors on the current device, then persists
+successful inputs in the current namespace. Source/hash/schema checks, shared
+read/count/byte budgets and the no-symlink rule still apply. Compiled pipeline
+objects and binary archives are never transferred between architectures.
+
 Recipes warm on one compiler worker at the next launch. All workers prefer
 first-use work; the remaining three renderer compiler workers do not consume
 background recipes. Disk writes also run in the background and pending writes
@@ -127,6 +134,17 @@ Recorded variants can also be compiled before gameplay:
 ```sh
 bash packaging/macos/precompile-shaders.sh --data-dir out/macos-data --threads 4
 ```
+
+The wrapper uses the same CPU selection as the game: Rosetta by default, or
+`BB_MAC_CPU=bbcpu` for the optional native arm64 runtime. For example:
+
+```sh
+BB_MAC_CPU=bbcpu bash packaging/macos/precompile-shaders.sh \
+    --data-dir out/macos-native-data --threads 4
+```
+
+Use the data directory containing the recorded recipes. Its `metal-cache`
+directory must be a physical directory rather than a symlink.
 
 This standalone process lets all compiler workers consume background recipes,
 without changing the live renderer's foreground worker reservation. It reports

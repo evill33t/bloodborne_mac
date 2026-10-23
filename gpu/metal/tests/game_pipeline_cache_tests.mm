@@ -55,7 +55,7 @@ std::string Digest(const void* bytes,std::size_t count) {
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(bytes,static_cast<CC_LONG>(count),digest);
     std::string result;for(unsigned char byte:digest){result+="0123456789abcdef"[byte>>4];result+="0123456789abcdef"[byte&15];}return result;
 }
-std::string Identity(const char* name,const char* architecture,std::uint64_t major,std::uint64_t minor,std::uint64_t patch) {
+std::string Identity(std::string_view name,std::string_view architecture,std::uint64_t major,std::uint64_t minor,std::uint64_t patch) {
     const auto material=Gpu::Metal::PipelineRecipeIdentity::Material(name,architecture,major,minor,patch);
     return Digest(material.data(),material.size());
 }

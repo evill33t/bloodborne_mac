@@ -101,3 +101,13 @@ separate Rosetta pipeline-cache, raster, fence-sync and texture-upload run passe
 
 No game was launched for this integration. Native boot, actual save loading,
 gameplay, image quality, whole-game timing, CPU cost and FPS gains are unverified.
+
+### Subsequent gameplay validation
+
+That boundary describes the integration checks above. Later native gameplay
+runs booted cloned saves and completed movement, attacks and three area
+transitions without GPU failures. The October 22 CPU-mode FPS comparison had
+unmatched shader-cache coverage and is invalid for architecture attribution.
+The [October 23 follow-up](MACOS_SHADER_CACHE_2026-10-23.md) records the cache
+correction, native precompilation and gameplay limits; it does not establish
+60 FPS, complete visual correctness or long-session stability.
