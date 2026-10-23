@@ -9,7 +9,7 @@
 #include <cstring>
 
 int main(int argc,char** argv){@autoreleasepool {
-    const bool same_flip=argc>1 && std::strcmp(argv[1],"--same-flip")==0;
+    const bool stale=argc>1 && std::strcmp(argv[1],"--stale")==0;
     const bool swizzle=argc>1 && std::strcmp(argv[1],"--swizzle")==0;
     using namespace Gpu::Metal;
     id<MTLDevice> device=MTLCreateSystemDefaultDevice();
@@ -68,11 +68,12 @@ kernel void copy(texture2d<float,access::read> image [[texture(0)]],texture2d_ar
         const auto* p=static_cast<const unsigned char*>(bytes.contents);return std::vector<unsigned char>(p,p+bytes.length);
     };
     unsigned generated=0,bad_edges=0;std::shared_ptr<const GeneratedFrame> pinned;std::vector<unsigned char> pinnedBytes;
-    for(unsigned frame=0;frame<12;++frame) {
+    for(unsigned frame=0;frame<16;++frame) {
         auto cmd=[queue commandBuffer];
         if(frame) {
-            const auto copy_frame=frame-unsigned(same_flip);
+            const auto copy_frame=frame-1;
             assert(!effect.DisplayCopy((__bridge void*)cmd,(__bridge void*)display,(__bridge void*)image,(__bridge void*)lut,(__bridge void*)sampler,frame+50));
+            assert(!effect.DisplayCopy((__bridge void*)cmd,(__bridge void*)display,(__bridge void*)input,(__bridge void*)lut,(__bridge void*)sampler,copy_frame+1));
             assert(effect.DisplayCopy((__bridge void*)cmd,(__bridge void*)display,(__bridge void*)input,(__bridge void*)lut,(__bridge void*)sampler,copy_frame));
             auto e=[cmd computeCommandEncoder];[e setComputePipelineState:copy];[e setTexture:input atIndex:0];[e setTexture:lut atIndex:1];[e setTexture:display atIndex:2];[e setSamplerState:sampler atIndex:0];
             [e dispatchThreads:MTLSizeMake(1920,1080,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e endEncoding];
@@ -121,9 +122,20 @@ kernel void copy(texture2d<float,access::read> image [[texture(0)]],texture2d_ar
     }
     assert(generated>=8 && pinned && pinnedBytes==read((__bridge id<MTLTexture>)pinned->real));
     assert(bad_edges==0);
-    effect.Invalidate();assert(!effect.NeedsHud(12));
+    if(stale) {
+        // Same UI texture, later epoch, no new scene: old camera/depth/HUD
+        // metadata must never turn a changed image into a generated frame.
+        auto cmd=[queue commandBuffer];
+        unsigned p[]{100,1};auto e=[cmd computeCommandEncoder];[e setComputePipelineState:fill];[e setTexture:image atIndex:0];[e setBytes:p length:sizeof(p) atIndex:0];
+        [e dispatchThreads:MTLSizeMake(1920,1080,1) threadsPerThreadgroup:MTLSizeMake(8,8,1)];[e endEncoding];
+        assert(!effect.DisplayCopy((__bridge void*)cmd,(__bridge void*)display,(__bridge void*)input,(__bridge void*)lut,(__bridge void*)sampler,16));
+        auto real=effect.RealFrame((__bridge void*)cmd,(__bridge void*)image,16);assert(real && !real->generated);
+        [cmd commit];[cmd waitUntilCompleted];assert(!cmd.error);
+        assert(read((__bridge id<MTLTexture>)real->real)==read(image));
+    }
+    effect.Invalidate();assert(!effect.NeedsHud(16));
     auto fallbackCommand=[queue commandBuffer];
-    auto fallback=effect.RealFrame((__bridge void*)fallbackCommand,(__bridge void*)image,12);
+    auto fallback=effect.RealFrame((__bridge void*)fallbackCommand,(__bridge void*)image,16);
     assert(fallback && fallback->real && !fallback->generated && fallback->ready_event);
     [fallbackCommand commit];[fallbackCommand waitUntilCompleted];assert(!fallbackCommand.error);
     assert([(__bridge id<MTLSharedEvent>)fallback->ready_event signaledValue]>=fallback->ready_value);

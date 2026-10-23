@@ -353,6 +353,15 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     SDL_Window* window=SDL_CreateWindow("Bloodborne — 0.0 FPS",1280,720,
         SDL_WINDOW_METAL|SDL_WINDOW_RESIZABLE|SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) { fprintf(stderr,"SDL window: %s\n",SDL_GetError()); return 1; }
+    // Optional test sizing uses physical pixels, independent of Retina scale.
+    if(const char* native=std::getenv("BB_TEST_NATIVE_1080P_WINDOW");native && !std::strcmp(native,"1")) {
+        SDL_SyncWindow(window);
+        // Cocoa can constrain the initial window height before SDL receives its
+        // resize event. Pixel density uses width and avoids that stale height.
+        const float density=SDL_GetWindowPixelDensity(window);
+        if(density>0)SDL_SetWindowSize(window,int(std::lround(1920.0/density)),int(std::lround(1080.0/density)));
+        SDL_SyncWindow(window);
+    }
     SDL_MetalView view=SDL_Metal_CreateView(window);
     if (!view) { fprintf(stderr,"SDL Metal view: %s\n",SDL_GetError()); return 1; }
     std::filesystem::path user="out/macos-data/user",data="out/macos-data";
@@ -416,7 +425,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     std::unique_ptr<FILE,decltype(&std::fclose)> framegen_stats(nullptr,&std::fclose);
     if(const char* path=std::getenv("BB_METAL_FRAMEGEN_STATS")) {
         framegen_stats.reset(std::fopen(path,"w"));
-        if(framegen_stats)std::fprintf(framegen_stats.get(),"time_s,rendered_total,displayed_total,generated_displayed_total,skipped_total\n");
+        if(framegen_stats)std::fprintf(framegen_stats.get(),"time_s,rendered_total,displayed_total,generated_displayed_total,skipped_total,output_width,output_height\n");
     }
     double last_display_time=0;
     Uint64 render_frames=0,generated_frames=0;
@@ -478,10 +487,11 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     const auto rendered=renderer->FrameCount(),generated=presenter->GeneratedPresentedFrameCount();
                     const double rendered_fps=double(rendered-render_frames)*1.0e9/double(now-fps_start);
                     const double generated_fps=double(generated-generated_frames)*1.0e9/double(now-fps_start);
+                    int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);
                     if(framegen_stats) {
-                        std::fprintf(framegen_stats.get(),"%.9f,%llu,%llu,%llu,%llu\n",CACurrentMediaTime(),
+                        std::fprintf(framegen_stats.get(),"%.9f,%llu,%llu,%llu,%llu,%d,%d\n",CACurrentMediaTime(),
                             (unsigned long long)rendered,(unsigned long long)frames,(unsigned long long)generated,
-                            (unsigned long long)presenter->SkippedFrameCount());std::fflush(framegen_stats.get());
+                            (unsigned long long)presenter->SkippedFrameCount(),width,height);std::fflush(framegen_stats.get());
                     }
                     if(settings.frame_generation || framegen_stats)std::fprintf(stderr,"[frame rates] rendered=%.2f displayed=%.2f generated=%.2f FPS · %s\n",
                         rendered_fps,fps,generated_fps,renderer->FrameGenerationStatus());
@@ -490,7 +500,6 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     else if (settings.show_fps) std::snprintf(title,sizeof(title),"Bloodborne — %.1f FPS",fps);
                     else std::snprintf(title,sizeof(title),"Bloodborne");
                     SDL_SetWindowTitle(window,title);
-                    int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);
                     std::string quality=presenter->UpscalingStatus();
                     if (settings.temporal_aa) quality+=renderer->TemporalAAActive()
                         ? " · Temporal AA active" : " · Temporal AA waiting for scene";

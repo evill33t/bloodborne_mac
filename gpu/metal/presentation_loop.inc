@@ -9,7 +9,10 @@ void Presenter::Impl::ApplySettings(bool threaded) {
     layer.displaySyncEnabled=next.vsync;
     metalfx=next.metalfx;sharpness=next.sharpness;
     frame_generation=next.frame_generation && next.vsync;
-    if(frame_generation && !interpolation_queue)interpolation_queue=[device newCommandQueue];
+    if(frame_generation && !interpolation_queue) {
+        presentation_order=[device newSharedEvent];
+        if(presentation_order)interpolation_queue=[device newCommandQueue];
+    }
     if(threaded) {
         const char* opt=std::getenv("BB_METAL_DISPLAY_LINK");
         const bool use_link=next.vsync && (!opt || std::strcmp(opt,"0"));
@@ -31,7 +34,7 @@ void Presenter::Impl::ApplySettings(bool threaded) {
 }
 
 // One generated midpoint followed by its current real frame. The producer is
-// released after the midpoint is queued: only private snapshots remain in use.
+// released when its committed private snapshots are retained by the consumer.
 // Never advance guest frame clocks or count a repeat as a generated frame.
 void Presenter::Impl::Display(CAMetalDisplayLinkUpdate* update,double diagnostic_callback) {
     const double now=CACurrentMediaTime();
@@ -97,7 +100,7 @@ void Presenter::Impl::Run(std::stop_token stop) {
                     if(owner->pending())owner->queued();
                 }
             } else if(owner->held_real) {
-                owner->PresentLegacy(owner->held_real->real,owner->held_real);owner->held_real.reset();owner->ready_pair.reset();
+                owner->PresentLegacy(owner->held_real->real,owner->held_real);owner->held_real.reset();
             } else if(owner->ready_pair) {
                 owner->PresentLegacy(owner->ready_pair->real,owner->ready_pair);owner->ready_pair.reset();
             } else if(void* texture=owner->pending()) {

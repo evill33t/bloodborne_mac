@@ -52,8 +52,9 @@ public:
     std::uint64_t PresentedFrameCount() const;
     std::vector<PresentedFrame> TakePresentations();
 
-    // Pending storage stays owned by the producer until queued() is called
-    // after the presentation command is enqueued on the shared Metal queue.
+    // Borrowed storage stays producer-owned until its shared-queue read is
+    // enqueued. A GeneratedFrame owns committed private copies and an explicit
+    // readiness event, so its producer can resume as soon as we retain it.
     // Callbacks must outlive this presenter. UI setters remain nonblocking.
     void StartFrameLoop(std::function<void*()> pending,std::function<void()> queued);
     bool HasFrameLoop() const;

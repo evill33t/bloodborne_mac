@@ -174,7 +174,9 @@ bool FrameGeneration::Scene(void* command,void* depth,const SceneCamera& camera,
     auto& s=*impl;auto z=(__bridge id<MTLTexture>)depth;auto cmd=(__bridge id<MTLCommandBuffer>)command;
     if(s.current && s.current->frame==frame)return false;
     s.current.reset();
-    if(!cmd || !z || camera.width!=Width || camera.height!=Height || z.width!=Width || z.height!=Height || !s.Initialize())return false;
+    if(!cmd || !z || camera.width!=Width || camera.height!=Height || z.width!=Width || z.height!=Height ||
+        z.textureType!=MTLTextureType2D || z.sampleCount!=1 || z.mipmapLevelCount!=1 ||
+        (z.pixelFormat!=MTLPixelFormatDepth32Float && z.pixelFormat!=MTLPixelFormatDepth32Float_Stencil8 && z.pixelFormat!=MTLPixelFormatDepth16Unorm) || !s.Initialize())return false;
     for(auto it=s.hud.begin();it!=s.hud.end();)if(it->second->frame+2<frame)it=s.hud.erase(it);else ++it;
     for(auto it=s.copies.begin();it!=s.copies.end();)if(it->second.frame+1<frame)it=s.copies.erase(it);else ++it;
     for(const auto& slot:s.pool)if(slot.use_count()==1){s.current=slot;break;}
@@ -211,6 +213,7 @@ bool FrameGeneration::NeedsHud(std::uint64_t frame) const {return impl->current 
 bool FrameGeneration::Hud(void* command,void* color,std::uint64_t frame) {
     auto& s=*impl;auto t=(__bridge id<MTLTexture>)color;
     if(!s.current || s.current->frame!=frame || s.current->hud || !t || t.width!=Width || t.height!=Height ||
+        t.textureType!=MTLTextureType2D || t.sampleCount!=1 || t.mipmapLevelCount!=1 ||
         (t.pixelFormat!=MTLPixelFormatRGBA8Unorm && t.pixelFormat!=MTLPixelFormatRGBA8Unorm_sRGB &&
          t.pixelFormat!=MTLPixelFormatBGRA8Unorm && t.pixelFormat!=MTLPixelFormatBGRA8Unorm_sRGB))return false;
     auto& slot=*s.current;
@@ -226,7 +229,10 @@ bool FrameGeneration::DisplayCopy(void* command,void* destination,void* source,v
         std::fprintf(stderr,"[framegen copy input] frame=%llu source=%p parent=%p found=%d scene_frame=%llu lut_type=%lu source_format=%lu\n",
             frame,source,(__bridge void*)Parent(input),int(it!=s.hud.end()),it!=s.hud.end() ? it->second->frame : ~0ull,
             (unsigned long)gamma.textureType,(unsigned long)input.pixelFormat);
-    if(it==s.hud.end() || it->second->frame>frame || frame-it->second->frame>1 || !gamma || gamma.textureType!=MTLTextureType2DArray || !sampler)return false;
+    // The verified Metal retail pass copies the UI within the same emulated
+    // flip epoch. A matching texture address alone cannot admit stale inputs:
+    // the game can overwrite that texture while a scene observation is absent.
+    if(it==s.hud.end() || it->second->frame!=frame || !gamma || gamma.textureType!=MTLTextureType2DArray || !sampler)return false;
     auto slot=it->second;
     // A T# view can remap components without changing pixelFormat. Clone its
     // swizzle as well: omitting BGRA/RGBA remapping makes almost the whole
@@ -283,10 +289,11 @@ std::shared_ptr<const GeneratedFrame> FrameGeneration::Finish(void* command,void
     [cmd encodeSignalEvent:s.ready_event value:output->ready_value];
     output->scene=(__bridge void*)slot->color;output->motion=(__bridge void*)slot->motion;output->depth=(__bridge void*)slot->depth;
     output->source_frame=slot->frame;output->interval=reset ? 0 : delta;
-    // The first non-reset encode still primes MetalFX's history. It copies the
-    // current edge in the production GPU fixture, so never label it generated.
-    if(s.history_frames>=2){output->generated=(__bridge void*)slot->generated;++s.generated;s.Capture(cmd,slot,previous);}else if(reset)++s.resets;
-    s.status=s.history_frames<2 ? "2× MetalFX warming history" : "2× MetalFX active · HUD preserved";
+    // Cold-start Rosetta and a long source interval can require an extra
+    // priming encode. Show only real frames until three consecutive history
+    // encodes have completed the reset sequence; never count warmup copies.
+    if(s.history_frames>=3){output->generated=(__bridge void*)slot->generated;++s.generated;s.Capture(cmd,slot,previous);}else if(reset)++s.resets;
+    s.status=s.history_frames<3 ? "2× MetalFX warming history" : "2× MetalFX active · HUD preserved";
     if(s.generated && s.generated%300==0)std::fprintf(stderr,"[framegen] generated=%llu resets=%llu scenes=%llu hud=%llu copies=%llu slot_rejects=%llu\n",
         s.generated,s.resets,s.scenes,s.huds,s.display_copies,s.rejects);
     return output;

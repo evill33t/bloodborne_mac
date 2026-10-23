@@ -147,6 +147,8 @@ struct Presenter::Impl {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
     id<MTLCommandQueue> interpolation_queue;
+    id<MTLSharedEvent> presentation_order;
+    std::uint64_t presentation_order_value=0;
     CAMetalLayer* layer;
     id<MTLRenderPipelineState> pipeline;
     id<MTLSamplerState> sampler;
@@ -405,6 +407,10 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
         id<MTLCommandBuffer> cmd = [packet && interpolation_queue ? interpolation_queue : queue commandBuffer];
         if(packet && packet->ready_event)
             [cmd encodeWaitForEvent:(__bridge id<MTLSharedEvent>)packet->ready_event value:packet->ready_value];
+        // Switching V-sync/frame generation can move presentation between
+        // queues. Preserve source order without a CPU wait or a queue drain.
+        if(presentation_order && presentation_order_value)
+            [cmd encodeWaitForEvent:presentation_order value:presentation_order_value];
         const double scale=std::min(double(drawable.texture.width)/tex.width,
                                     double(drawable.texture.height)/tex.height);
         const int width=std::max(1,int(tex.width*scale)), height=std::max(1,int(tex.height*scale));
@@ -419,6 +425,8 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
         [enc setFragmentBytes:&sharpness length:sizeof(float) atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
+
+        if(presentation_order)[cmd encodeSignalEvent:presentation_order value:++presentation_order_value];
 
         dispatch_semaphore_t sem = frames_in_flight;
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> buffer) {

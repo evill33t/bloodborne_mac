@@ -263,3 +263,7 @@ Evidence: `out/pipeline-2026-10-23/`, including runtime identities, complete
 build/test/precompile logs, source-import verification, the CPU sample summary,
 and the six-minute stability summary. Raw gameplay files are retained under
 `out/metal-unattended-2026-10-20/pipe23-*`.
+
+Follow-up: optional native 1080p MetalFX interpolation, independent rendered/
+displayed FPS counters, HUD handling and its gameplay validation are documented
+in [MACOS_METALFX_FRAME_GENERATION_2026-10-23.md](MACOS_METALFX_FRAME_GENERATION_2026-10-23.md).

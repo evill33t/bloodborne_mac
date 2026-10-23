@@ -7,6 +7,8 @@ namespace Gpu::Metal {
 // One producer and one UI consumer. Hold the producer at the frame boundary
 // until presentation has been queued, so later rendering cannot overtake it
 // on the shared Metal command queue or overwrite the frame being presented.
+// Frame generation may acknowledge earlier after retaining separately owned,
+// already committed snapshots; its event protects later presentation reads.
 class FrameHandoff {
 public:
     template<class Wake> void PublishAndWait(void* texture,Wake wake) {

@@ -10,6 +10,7 @@
 #include "gpu/metal/frame_handoff.h"
 #include "gpu/metal/frame_generation.h"
 #include <atomic>
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <thread>
@@ -148,8 +149,11 @@ int main(int argc,char** argv) {
             const auto until=std::chrono::steady_clock::now()+100ms;
             while(std::chrono::steady_clock::now()<until)pump();
             auto samples=presenter.TakePresentations();
+            std::sort(samples.begin(),samples.end(),[](const auto& a,const auto& b){return a.sequence<b.sequence;});
             unsigned generated=0,real=0;
+            std::uint64_t previous_source=0;
             for(const auto& sample:samples)if(sample.presented_time>0 && sample.source_frame) {
+                assert(sample.source_frame>=previous_source);previous_source=sample.source_frame;
                 if(sample.generated)++generated;else ++real;
             }
             std::printf("Frame-generation presentation: %u real, %u generated drawable timestamps, %u producer frames\n",real,generated,produced.load());

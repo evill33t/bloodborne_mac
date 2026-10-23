@@ -172,8 +172,10 @@ struct Overlay::Impl {
         panel.wantsLayer=YES; panel.layer.cornerRadius=16; panel.layer.masksToBounds=YES;
         panel.layer.borderWidth=1; panel.layer.borderColor=[NSColor colorWithWhite:.6 alpha:.3].CGColor;
         panel.translatesAutoresizingMaskIntoConstraints=NO; [root addSubview:panel];
-        auto width=[panel.widthAnchor constraintEqualToConstant:760]; width.priority=750;
-        auto height=[panel.heightAnchor constraintEqualToConstant:600]; height.priority=750;
+        // Preferred panel dimensions must yield to the game view's existing
+        // frame; otherwise even a hidden overlay enlarges a 1080p Retina window.
+        auto width=[panel.widthAnchor constraintEqualToConstant:760]; width.priority=249;
+        auto height=[panel.heightAnchor constraintEqualToConstant:600]; height.priority=249;
         [NSLayoutConstraint activateConstraints:@[width,height,
             [panel.widthAnchor constraintLessThanOrEqualToAnchor:root.widthAnchor constant:-32],
             [panel.heightAnchor constraintLessThanOrEqualToAnchor:root.heightAnchor constant:-32],

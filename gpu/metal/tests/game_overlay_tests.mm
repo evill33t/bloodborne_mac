@@ -70,6 +70,8 @@ int main() {
             // Resizing to a smaller window retains access to controls via scrolling.
             SDL_SetWindowSize(sdl,800,500); SDL_PumpEvents(); overlay.Toggle();
             [window.contentView layoutSubtreeIfNeeded];
+            assert(std::abs(window.contentView.bounds.size.width-800)<1);
+            assert(std::abs(window.contentView.bounds.size.height-500)<1);
             assert(save.window==window && restart.window==window);
             overlay.Toggle();
             SDL_VirtualJoystickDesc desc{}; desc.version=sizeof(desc);
