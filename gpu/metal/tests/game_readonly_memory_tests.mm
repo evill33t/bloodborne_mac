@@ -143,14 +143,25 @@ void CpuProofs() {
     }
     std::puts("Readonly independent opcode/context proof and exact default-prelude bytes passed.");
 }
+std::string WithFetchHelper(std::string source,bool enabled,bool readonly) {
+    if(enabled) {
+        // Synthetic identities do not admit native fetch. Include the actual
+        // helper anyway so its additional map lookup is type-checked by Metal.
+        const auto at=source.find("struct VsOut {");Require(at!=std::string::npos,"Missing synthetic vertex output");
+        source.insert(at,Gpu::Metal::NativeVertexFetch::Msl(readonly));
+    }
+    return source;
+}
 void ConstantMapProofs() {
     namespace Map=Gpu::Metal::ConstantMemoryMap;
     Require(Map::Configured("1"),"Explicit constant-map switch rejected");
     for(const char* value:std::array<const char*,6>{nullptr,"","0","01","true","1x"})
         Require(!Map::Configured(value),"Invalid constant-map switch accepted");
-    for(auto stage:{Shader::Stage::Vertex,Shader::Stage::Fragment})for(bool readonly:{false,true}) {
+    for(auto stage:{Shader::Stage::Vertex,Shader::Stage::Fragment})for(bool readonly:{false,true})for(bool fetch:{false,true}) {
+        if(fetch && stage!=Shader::Stage::Vertex)continue;
         std::vector<std::string> unsupported;
-        auto source=Shader::GenerateMsl(Synthetic(stage),Options(stage,readonly),&unsupported);
+        auto options=Options(stage,readonly);
+        auto source=WithFetchHelper(Shader::GenerateMsl(fetch ? SyntheticInline() : Synthetic(stage),options,&unsupported),fetch,readonly);
         Require(unsupported.empty(),"Synthetic constant-map translation unsupported");
         const auto original=source;
         Require(Map::Apply(source),"Generated constant-map ABI rejected");
@@ -167,6 +178,11 @@ void ConstantMapProofs() {
             "Constant-map mode lost mapping arithmetic or bounds");
         const auto transformed=source;
         Require(!Map::Apply(source) && source==transformed,"Repeated transform changed source");
+        if(fetch)Require(source.find("((constant int*)(m.map+1))")!=std::string::npos,
+            "Native vertex-fetch page lookup lost constant qualification");
+        auto foreign_cast=original+"((device const int*)(unexpected_map+1))";
+        const auto foreign_before=foreign_cast;
+        Require(!Map::Apply(foreign_cast) && foreign_cast==foreign_before,"Unknown page lookup was modified");
         for(std::string_view marker:{"device const DcMap* map;",
                 "device const DcMap& gmap [[buffer(3)]]","((device const int*)(m.map + 1))"}) {
             auto altered=original;altered.erase(altered.find(marker),marker.size());
@@ -199,9 +215,10 @@ void Reflection(NSArray<id<MTLBinding>>* bindings,bool readonly) {
     Require(found==2,"Both guest-memory buffers must be reflected");
 }
 void GeneratedReflection(id<MTLDevice> device) {
-    for(bool readonly:{false,true}) {
+    for(bool readonly:{false,true})for(bool fetch:{false,true}) {
         std::vector<std::string> unsupported;
-        auto vertex=Compile(device,Shader::GenerateMsl(SyntheticInline(),Options(Shader::Stage::Vertex,readonly),&unsupported),true);
+        auto vertex_options=Options(Shader::Stage::Vertex,readonly);
+        auto vertex=Compile(device,WithFetchHelper(Shader::GenerateMsl(SyntheticInline(),vertex_options,&unsupported),fetch,readonly),true);
         auto fragment=Compile(device,Shader::GenerateMsl(Synthetic(Shader::Stage::Fragment),Options(Shader::Stage::Fragment,readonly),&unsupported),true);
         auto descriptor=[MTLRenderPipelineDescriptor new];descriptor.vertexFunction=[vertex newFunctionWithName:@"main0"];
         descriptor.fragmentFunction=[fragment newFunctionWithName:@"main0"];

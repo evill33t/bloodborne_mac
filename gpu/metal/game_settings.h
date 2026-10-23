@@ -10,6 +10,7 @@ struct Values {
     bool metalfx = false, vsync = true, fullscreen = false, show_fps = true;
     float sharpness = 0;
     int anisotropy = 16; // 0 preserves the game's samplers
+    bool frame_generation = false; // optional 2x MetalFX, native 1080p + V-sync
     bool temporal_aa = false; // opt-in, resolved before HUD/post-processing
     bool game_aa = true, motion_blur = true, dof = true;
     bool chromatic_aberration = true, ssao = true, dynamic_shadows = true;

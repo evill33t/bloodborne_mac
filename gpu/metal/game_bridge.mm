@@ -14,6 +14,8 @@
 #include "gpu/metal/bbhost/features.h"
 #include "gpu/metal/bbhost/network.h"
 #include "gpu/metal/frame_handoff.h"
+#include "gpu/metal/frame_generation.h"
+#import <QuartzCore/QuartzCore.h>
 #include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/wind_capture_contract.h"
 #include "hle/video_out/video_out.h"
@@ -366,6 +368,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     setenv("BB_DATA_DIR",std::filesystem::absolute(data).c_str(),1);
     setenv("BB_USER_DIR",std::filesystem::absolute(user).c_str(),1);
     MacSettings::Values settings=MacSettings::Load(settings_path);
+    const bool startup_native_1080=settings.render_width==1920 && settings.render_height==1080;
     MacFeatures::Initialize(settings);
     MacNetwork::Configure(settings);
     if (auto mode=SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)); mode && mode->refresh_rate>=30) display_refresh.store(mode->refresh_rate);
@@ -377,6 +380,11 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
             presenter->SetVsync(settings.vsync);
             presenter->SetUpscaling(settings.metalfx,settings.sharpness);
             renderer->SetGraphicsOptions(settings.anisotropy,settings.temporal_aa);
+            const char* threaded=std::getenv("BB_METAL_PRESENT_THREAD");
+            const char* link=std::getenv("BB_METAL_DISPLAY_LINK");
+            const bool fg=settings.frame_generation && startup_native_1080 && settings.vsync &&
+                (!threaded || std::strcmp(threaded,"0")) && (!link || std::strcmp(link,"0")) && presenter->SupportsFrameGeneration();
+            renderer->SetFrameGeneration(fg);presenter->SetFrameGeneration(fg);
         }
         if (settings.fullscreen!=applied_fullscreen) {
             if (SDL_SetWindowFullscreen(window,settings.fullscreen)) applied_fullscreen=settings.fullscreen;
@@ -402,10 +410,16 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     std::unique_ptr<FILE,decltype(&std::fclose)> frame_times(nullptr,&std::fclose);
     if (const char* path=std::getenv("DC_FRAME_TIMES")) {
         frame_times.reset(std::fopen(path,"w"));
-        if (frame_times) std::fprintf(frame_times.get(),"sequence,submitted_s,presented_s,interval_ms,queue_ms\n");
+        if (frame_times) std::fprintf(frame_times.get(),"sequence,submitted_s,presented_s,interval_ms,queue_ms,generated,source_frame\n");
         else std::perror("DC_FRAME_TIMES");
     }
+    std::unique_ptr<FILE,decltype(&std::fclose)> framegen_stats(nullptr,&std::fclose);
+    if(const char* path=std::getenv("BB_METAL_FRAMEGEN_STATS")) {
+        framegen_stats.reset(std::fopen(path,"w"));
+        if(framegen_stats)std::fprintf(framegen_stats.get(),"time_s,rendered_total,displayed_total,generated_displayed_total,skipped_total\n");
+    }
     double last_display_time=0;
+    Uint64 render_frames=0,generated_frames=0;
     Uint64 fps_start=0, fps_frames=0;
     while (true) {
         @autoreleasepool {
@@ -444,11 +458,13 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);
                     presenter->Resize(width,height);
                     apply_settings();
+                    presenter->SetFrameProvider([] {return renderer->LatestGeneratedFrame();});
                     const char* threaded=std::getenv("BB_METAL_PRESENT_THREAD");
                     if(!threaded || std::strcmp(threaded,"0"))
                         presenter->StartFrameLoop([] {return frame_handoff.Pending();},[] {frame_handoff.Acknowledge();});
                     fps_start=SDL_GetTicksNS();
                     fps_frames=presenter->PresentedFrameCount();
+                    render_frames=renderer->FrameCount();generated_frames=presenter->GeneratedPresentedFrameCount();
                 }
                 if (void* frame=presenter->HasFrameLoop()?nullptr:frame_handoff.Pending()) {
                     presenter->PresentTexture(frame);
@@ -459,14 +475,31 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     Gpu::Metal::StutterTrace::Scope status_timing("ui_status");
                     const Uint64 frames=presenter->PresentedFrameCount();
                     const double fps=double(frames-fps_frames)*1.0e9/double(now-fps_start);
-                    char title[96];
-                    if (settings.show_fps) std::snprintf(title,sizeof(title),"Bloodborne — %.1f FPS",fps);
+                    const auto rendered=renderer->FrameCount(),generated=presenter->GeneratedPresentedFrameCount();
+                    const double rendered_fps=double(rendered-render_frames)*1.0e9/double(now-fps_start);
+                    const double generated_fps=double(generated-generated_frames)*1.0e9/double(now-fps_start);
+                    if(framegen_stats) {
+                        std::fprintf(framegen_stats.get(),"%.9f,%llu,%llu,%llu,%llu\n",CACurrentMediaTime(),
+                            (unsigned long long)rendered,(unsigned long long)frames,(unsigned long long)generated,
+                            (unsigned long long)presenter->SkippedFrameCount());std::fflush(framegen_stats.get());
+                    }
+                    if(settings.frame_generation || framegen_stats)std::fprintf(stderr,"[frame rates] rendered=%.2f displayed=%.2f generated=%.2f FPS · %s\n",
+                        rendered_fps,fps,generated_fps,renderer->FrameGenerationStatus());
+                    char title[160];
+                    if(settings.show_fps && settings.frame_generation)std::snprintf(title,sizeof(title),"Bloodborne — %.1f rendered / %.1f displayed FPS",rendered_fps,fps);
+                    else if (settings.show_fps) std::snprintf(title,sizeof(title),"Bloodborne — %.1f FPS",fps);
                     else std::snprintf(title,sizeof(title),"Bloodborne");
                     SDL_SetWindowTitle(window,title);
                     int width=0,height=0; SDL_GetWindowSizeInPixels(window,&width,&height);
                     std::string quality=presenter->UpscalingStatus();
                     if (settings.temporal_aa) quality+=renderer->TemporalAAActive()
                         ? " · Temporal AA active" : " · Temporal AA waiting for scene";
+                    if(settings.frame_generation) {
+                        quality+=" · ";
+                        quality+=!presenter->SupportsFrameGeneration() ? "MetalFX frame generation unavailable" :
+                            !startup_native_1080 ? "Frame generation requires native 1080p" : !settings.vsync ? "Frame generation requires V-sync" : renderer->FrameGenerationStatus();
+                        quality+=" · "+std::to_string(int(std::round(rendered_fps)))+" rendered / "+std::to_string(int(std::round(fps)))+" displayed FPS";
+                    }
                     overlay.UpdateStatus(fps,width,height,presenter->SupportsMetalFX(),quality.c_str());
                     auto samples=presenter->TakePresentations();
                     if (frame_times) {
@@ -485,10 +518,10 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                             // Keep the last displayed time across dropped drawables
                             // so the next interval includes the visible gap.
                             if (sample.presented_time==0) ++skipped;
-                            std::fprintf(frame_times.get(),"%llu,%.9f,%.9f,%.3f,%.3f\n",
+                            std::fprintf(frame_times.get(),"%llu,%.9f,%.9f,%.3f,%.3f,%u,%llu\n",
                                 static_cast<unsigned long long>(sample.sequence),sample.submitted_time,
                                 sample.presented_time,interval,sample.presented_time>0
-                                    ? (sample.presented_time-sample.submitted_time)*1000 : 0);
+                                    ? (sample.presented_time-sample.submitted_time)*1000 : 0,unsigned(sample.generated),(unsigned long long)sample.source_frame);
                         }
                         std::fflush(frame_times.get());
                         if (!intervals.empty()) {
@@ -498,7 +531,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                         }
                     }
                     fps_start=now;
-                    fps_frames=frames;
+                    fps_frames=frames;render_frames=rendered;generated_frames=generated;
                     if(std::getenv("DC_GPU_STATS")) {
                         std::fprintf(stderr,"[presentation] %s, %llu unavailable-drawable skips\n",presenter->HasFrameLoop()?"dedicated thread":"UI thread",(unsigned long long)presenter->SkippedFrameCount());
                         const auto& stats=Gpu::Liverpool::Instance().GetStats();

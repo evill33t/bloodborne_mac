@@ -16,13 +16,13 @@ int main() {
     v.game_aa=false; v.motion_blur=false; v.dof=false; v.chromatic_aberration=false;
     v.ssao=false; v.dynamic_shadows=false; v.vsync=false; v.show_fps=false;
     v.fullscreen=true; v.sharpness=1.0f/3;
-    v.anisotropy=8; v.temporal_aa=true;
+    v.anisotropy=8; v.temporal_aa=true;v.frame_generation=true;
     std::string error; assert(Save(path,v,error) && error.empty());
     assert(Load(path)==v && NeedsRestart(v,Values{}));
     for (int cap : {30,60,90,120,144,165,240,0}) {
         v.frame_cap=cap; assert(Save(path,v,error)); assert(Load(path)==v);
     }
-    v=Values{}; v.metalfx=true; v.vsync=false; v.show_fps=false; v.sharpness=1;
+    v=Values{}; v.metalfx=true; v.vsync=false; v.show_fps=false; v.sharpness=1;v.frame_generation=true;
     assert(!NeedsRestart(v,Values{}));
     for (int filter:{0,2,4,8,16}) {
         v.anisotropy=filter; v.temporal_aa=true;

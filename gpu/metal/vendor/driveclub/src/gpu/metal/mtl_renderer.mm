@@ -42,6 +42,7 @@
 #include "gpu/metal/raw_texture_snapshot.h"
 #include "gpu/metal/texture_cache_policy.h"
 #include "gpu/metal/temporal_aa.h"
+#include "gpu/metal/frame_generation.h"
 #include "gpu/metal/native_motion_capture.h"
 #include "gpu/metal/stutter_trace.h"
 #include "gpu/metal/command_timeline.h"
@@ -445,6 +446,11 @@ struct MetalRenderer::Impl {
   TargetMap color_targets; // by address
   TargetMap depth_targets;
   std::unique_ptr<TemporalAA> temporal;
+  std::atomic<bool> frame_generation_enabled{false};
+  std::unique_ptr<FrameGeneration> frame_generation;
+  std::shared_ptr<const GeneratedFrame> generated_frame;
+  std::atomic<const char*> frame_generation_status{"Off"};
+  bool frame_generation_hud_pending=false;
   RenderTarget *temporal_depth=nullptr,*temporal_color=nullptr;
   bool temporal_resolved=false;
   std::atomic<bool> temporal_active{false};
@@ -4436,7 +4442,7 @@ bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 a
   for(u32 k=0;k<8;++k) if(((r[Reg::CB_TARGET_MASK]>>(4*k))&15) &&
       ((r[Reg::SPI_SHADER_COL_FORMAT]>>(4*k))&15)) ++target_count;
   const bool camera_read=target_count>=5 && (r[Reg::DB_DEPTH_CONTROL]&3) &&
-      (temporal_aa.load(std::memory_order_relaxed) || !capture_root.empty()) &&
+      (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty()) &&
       (!temporal || !temporal->HasCamera());
   if(!vertex || (pixel_address && !pixel) || camera_read ||
       !NativeResources(*vertex,vud,ready) || (pixel && !NativeResources(*pixel,pud,ready))) {
@@ -4761,7 +4767,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     }
   }
   // ---- resources ----
-  if (temporal_aa.load(std::memory_order_relaxed) || !capture_root.empty()) {
+  if (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty()) {
     if (!temporal) temporal=std::make_unique<TemporalAA>((__bridge void*)device);
     unsigned targets=0;
     for (auto* target:colors) targets+=target!=nullptr;
@@ -4794,6 +4800,49 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     }
   }
 
+  bool frame_generation_display_copy=false;
+  if(frame_generation_enabled.load(std::memory_order_relaxed)) {
+    if(!frame_generation)frame_generation=std::make_unique<FrameGeneration>((__bridge void*)device);
+    if(std::getenv("BB_METAL_FRAMEGEN_TRACE") && frame_generation->NeedsHud(frame_count) && frame_count%300==0)
+      DC_INFO("framegen HUD candidate frame=%llu vs=%llx retail=%llx ps=%llx color=%llx",frame_count,vs->hash,vs->retail_id,ps ? ps->hash : 0,colors[0] ? colors[0]->addr : 0);
+    const auto ui_shader=[](u64 id) {
+      switch(id) {case 0x34e8a281:case 0x81d336ce:case 0x09957251:case 0x24042a9b:case 0xa400228b:
+        case 0xbb4d5f8c:case 0xe94b5b06:case 0x9951d199:case 0x44072322:case 0xa334a845:return true;default:return false;}
+    };
+    if(ui_shader(vs->retail_id))frame_generation_hud_pending=true;
+    if(frame_generation_hud_pending && frame_generation->NeedsHud(frame_count) && colors[0] && colors[0]->initialized && !colors[0]->clear_pending) {
+      EndPass();EnsureCommandBuffer();
+      if(frame_generation->Hud((__bridge void*)cmd,(__bridge void*)colors[0]->tex,frame_count))frame_generation_hud_pending=false;
+    }
+    if(std::getenv("BB_METAL_FRAMEGEN_TRACE") && frame_count%300==0 &&
+        (vs->hash==0x601fd916b9e41328ull || (ps && ps->hash==0x1c472a7564e37de2ull))) {
+      DC_INFO("framegen COPY candidate f=%llu vs=%llx ps=%llx prim=%x idx=%u count=%u instances=%u first=%u base=%u target=%llx size=%ux%u depth=%u mask=%x shader=%x blend=%x textures=%zu samplers=%zu viewport=%g,%g,%g,%g,%g,%g",frame_count,
+        vs->hash,ps ? ps->hash : 0,unsigned(prim),unsigned(dc.indexed),dc.count,dc.instances,dc.first_vertex,r[Reg::VGT_INDX_OFFSET],colors[0] ? colors[0]->addr : 0,
+        colors[0] ? colors[0]->width : 0,colors[0] ? colors[0]->height : 0,unsigned(depth!=nullptr),target_mask,r[Reg::CB_SHADER_MASK],r[Reg::CB_BLEND0_CONTROL],ps_res.tex.size(),ps_res.smp.size(),
+        r.F(Reg::PA_CL_VPORT_XSCALE),r.F(Reg::PA_CL_VPORT_XSCALE+1),r.F(Reg::PA_CL_VPORT_XSCALE+2),r.F(Reg::PA_CL_VPORT_XSCALE+3),r.F(Reg::PA_CL_VPORT_XSCALE+4),r.F(Reg::PA_CL_VPORT_XSCALE+5));
+    }
+    // Verified retail display copy: procedural full-screen rectangle, integer
+    // scene pixels, then the actual bound gamma LUT. No address-only matching.
+    if(ps && vs->hash==0x601fd916b9e41328ull && ps->hash==0x1c472a7564e37de2ull &&
+        colors[0] && !depth && colors[0]->width==1920 && colors[0]->height==1080 &&
+        std::count_if(colors,colors+8,[](auto* c){return c!=nullptr;})==1 &&
+        prim==PrimType::RectList && !dc.indexed && dc.count==3 && std::max(1u,dc.instances)==1 &&
+        dc.first_vertex==0 && r[Reg::VGT_INDX_OFFSET]==0 && (target_mask&15)==15 && (r[Reg::CB_SHADER_MASK]&15)==15 &&
+        !(r[Reg::CB_BLEND0_CONTROL]&(1u<<30)) && ps_res.tex.size()==2 && ps_res.smp.size()==1 &&
+        ps_res.tex[0].width==1920 && ps_res.tex[0].height==1080 &&
+        r.F(Reg::PA_CL_VPORT_XSCALE)==960 && r.F(Reg::PA_CL_VPORT_XSCALE+1)==960 &&
+        r.F(Reg::PA_CL_VPORT_XSCALE+2)==-540 && r.F(Reg::PA_CL_VPORT_XSCALE+3)==540) {
+      Rect area{0,0,1920,1080};
+      for(auto reg:{Reg::PA_SC_SCREEN_SCISSOR_TL,Reg::PA_SC_WINDOW_SCISSOR_TL,Reg::PA_SC_GENERIC_SCISSOR_TL})
+        area=Intersect(area,ScissorReg(r[reg],r[reg+1]));
+      if(r[Reg::PA_SC_MODE_CNTL_0]&2)area=Intersect(area,ScissorReg(r[Reg::PA_SC_VPORT_SCISSOR_0_TL],r[Reg::PA_SC_VPORT_SCISSOR_0_TL+1]));
+      if(area.x0==0 && area.y0==0 && area.x1==1920 && area.y1==1080) {
+        EndPass();EnsureCommandBuffer();
+        frame_generation_display_copy=frame_generation->DisplayCopy((__bridge void*)cmd,(__bridge void*)colors[0]->tex,
+            (__bridge void*)ps_res.tex[0],(__bridge void*)ps_res.tex[1],(__bridge void*)ps_res.smp[0],frame_count);
+      }
+    }
+  }
   // One transaction reserves every stage before tessellation or render
   // encoders are created. Keep its leases pinned across diagnostic commits.
   u32 vud[16],pud[16],lud[16],hud[16];
@@ -5412,6 +5461,9 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     [enc setFragmentBytes:&addresses length:sizeof(addresses) atIndex:Shader::Binding::StaticSmrd];
   };
   const auto note_stage_draw=[&] {
+    if(frame_generation_enabled.load(std::memory_order_relaxed) && frame_generation)
+      for(auto* target:colors)if(target)frame_generation->Draw((__bridge void*)target->tex,target->written,
+          target==colors[0] && frame_generation_display_copy);
     if(capture_wind)MarkWindCaptureDraw();
     if(stage_counter_pass) {
       // debug_fs replaces the translated fragment function without a compiler
@@ -5642,6 +5694,13 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   if (!cs) return;
   TraceHtileReaders(*cs,ud,gx,gy,gz);
   if(!indirect && cs->retail_id==0x9a9cf8a9) CaptureSceneBoundary();
+  if(!indirect && cs->retail_id==0x9a9cf8a9 && frame_generation_enabled.load(std::memory_order_relaxed) &&
+      scene_camera && scene_camera_frame==frame_count && temporal_depth) {
+    EndPass();EnsureCommandBuffer();
+    if(!frame_generation)frame_generation=std::make_unique<FrameGeneration>((__bridge void*)device);
+    const auto motion=NativeVelocityInput();
+    frame_generation->Scene((__bridge void*)cmd,(__bridge void*)temporal_depth->tex,*scene_camera,frame_count,motion ? &*motion : nullptr);
+  }
   if (!indirect && cs->retail_id==0x9a9cf8a9 && temporal_aa.load(std::memory_order_relaxed) &&
       temporal && temporal_depth && temporal_color) {
     // The retail scene-postprocessing boundary used by bbport. Resolve HDR
@@ -6015,6 +6074,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
 
 void MetalRenderer::Impl::Flip(const FlipInfo &f) {
   FinishNativeVelocityFrame();
+  frame_generation_hud_pending=false;
   // Finish the previous frame's last pass under its own trace flag before
   // selecting the next request. Diagnostic profiling never cuts normal frames.
   if (profile_trace_only) EndPass();
@@ -6318,6 +6378,17 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
     [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
       WorldFrameQueue::Complete(ticket,state,completed.status==MTLCommandBufferStatusCompleted);
     }];
+  }
+  if(frame_generation_enabled.load(std::memory_order_relaxed) && frame_generation && rt && src) {
+    auto packet=frame_generation->Finish((__bridge void*)cmd,(__bridge void*)rt->tex,(__bridge void*)dst,rt->written,frame_count-1);
+    if(!packet)packet=frame_generation->RealFrame((__bridge void*)cmd,(__bridge void*)dst,frame_count-1);
+    std::atomic_store_explicit(&generated_frame,std::move(packet),std::memory_order_release);
+    frame_generation_status.store(frame_generation->Status(),std::memory_order_relaxed);
+    if(frame_count%300==0)frame_generation->Report();
+  } else {
+    std::atomic_store_explicit(&generated_frame,std::shared_ptr<const GeneratedFrame>{},std::memory_order_release);
+    if(frame_generation)frame_generation->Invalidate();
+    frame_generation_status.store("Off",std::memory_order_relaxed);
   }
   Commit(false);
   if (triggered_trace) {
@@ -6660,5 +6731,8 @@ void MetalRenderer::SetGraphicsOptions(int anisotropy,bool temporal_aa) {
     impl->temporal_aa.store(temporal_aa,std::memory_order_relaxed);
 }
 bool MetalRenderer::TemporalAAActive() const { return impl->temporal_active.load(std::memory_order_relaxed); }
+void MetalRenderer::SetFrameGeneration(bool enabled) {impl->frame_generation_enabled.store(enabled,std::memory_order_relaxed);}
+std::shared_ptr<const GeneratedFrame> MetalRenderer::LatestGeneratedFrame() const {return std::atomic_load_explicit(&impl->generated_frame,std::memory_order_acquire);}
+const char* MetalRenderer::FrameGenerationStatus() const {return impl->frame_generation_status.load(std::memory_order_relaxed);}
 
 } // namespace Gpu::Metal

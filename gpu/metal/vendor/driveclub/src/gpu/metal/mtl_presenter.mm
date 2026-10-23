@@ -7,6 +7,7 @@
 
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/spatial_upscaler.h"
+#include "gpu/metal/frame_generation.h"
 #include "gpu/metal/stutter_trace.h"
 #include <algorithm>
 #include <atomic>
@@ -73,7 +74,7 @@ fragment float4 fs_present(VertexOut in [[stage_in]],
 // A presented callback may arrive after GPU completion (and after Presenter
 // destruction). Each callback owns this small state independently of Impl.
 struct PresentationState {
-    std::atomic<std::uint64_t> displayed{0};
+    std::atomic<std::uint64_t> displayed{0},generated{0};
     std::mutex mutex;
     std::deque<PresentedFrame> samples;
 };
@@ -145,16 +146,17 @@ struct PresentationTiming {
 struct Presenter::Impl {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
+    id<MTLCommandQueue> interpolation_queue;
     CAMetalLayer* layer;
     id<MTLRenderPipelineState> pipeline;
     id<MTLSamplerState> sampler;
     dispatch_semaphore_t frames_in_flight;
     std::unique_ptr<SpatialUpscaler> upscaler;
-    bool metalfx=false;
+    bool metalfx=false,frame_generation=false,frame_generation_supported=false;
     float sharpness=0;
     std::shared_ptr<PresentationState> presentations=std::make_shared<PresentationState>();
     std::atomic<std::uint64_t> next_sequence{0},display_updates{0};
-    struct Settings {bool vsync=true,metalfx=false;float sharpness=0,refresh_rate=60;int width=0,height=0;};
+    struct Settings {bool vsync=true,metalfx=false,frame_generation=false;float sharpness=0,refresh_rate=60;int width=0,height=0;};
     std::mutex settings_mutex;
     Settings requested,applied;
     std::uint64_t settings_generation=1,applied_generation=0;
@@ -164,6 +166,10 @@ struct Presenter::Impl {
     std::jthread worker;
     std::function<void*()> pending;
     std::function<void()> queued;
+    std::function<std::shared_ptr<const GeneratedFrame>()> frame_provider;
+    std::shared_ptr<const GeneratedFrame> held_real,ready_pair;
+    double real_due=0;
+    void Display(CAMetalDisplayLinkUpdate*,double);
     CAMetalDisplayLink* display_link=nil;
     BBMetalDisplayTarget* display_target=nil;
     double last_display_update=0;
@@ -172,11 +178,13 @@ struct Presenter::Impl {
 
     void ApplySettings(bool threaded);
     void EncodeTexture(id<MTLTexture>,id<CAMetalDrawable>,bool display_link,
-                       double callback=0,double deadline=0,double target_presentation=0);
-    void PresentLegacy(void*);
+                       double callback=0,double deadline=0,double target_presentation=0,
+                       bool generated=false,std::uint64_t source_frame=0,
+                       std::shared_ptr<const GeneratedFrame> packet={});
+    void PresentLegacy(void*,std::shared_ptr<const GeneratedFrame> packet={});
     void Run(std::stop_token);
 
-    void Track(id<CAMetalDrawable> drawable,std::shared_ptr<PresentationTiming> timing={}) {
+    void Track(id<CAMetalDrawable> drawable,std::shared_ptr<PresentationTiming> timing={},bool generated=false,std::uint64_t source_frame=0) {
         auto state=presentations;
         const auto sequence=++next_sequence;
         const double submitted=CACurrentMediaTime();
@@ -188,11 +196,14 @@ struct Presenter::Impl {
                 timing->presented=presented;timing->presented_callback=CACurrentMediaTime();
                 timing->present_done=true;timing->WriteIfComplete();
             }
-            if (presented>0) state->displayed.fetch_add(1,std::memory_order_relaxed);
+            if (presented>0) {
+                state->displayed.fetch_add(1,std::memory_order_relaxed);
+                if(generated)state->generated.fetch_add(1,std::memory_order_relaxed);
+            }
             std::scoped_lock lock(state->mutex);
             // Keep memory bounded even if the UI thread is stalled.
             if (state->samples.size()==4096) state->samples.pop_front();
-            state->samples.push_back({sequence,submitted,presented});
+            state->samples.push_back({sequence,submitted,presented,generated,source_frame});
         }];
     }
 };
@@ -202,6 +213,7 @@ Presenter::Presenter(Device& device, void* layer, const PresenterConfig& config)
     impl->device = (__bridge id<MTLDevice>)device.Handle();
     impl->queue = (__bridge id<MTLCommandQueue>)device.Queue();
     impl->upscaler=std::make_unique<SpatialUpscaler>(device.Handle());
+    impl->frame_generation_supported=FrameGeneration::Supported(device.Handle());
     impl->layer = (__bridge CAMetalLayer*)layer;
     impl->frames_in_flight = dispatch_semaphore_create(kFramesInFlight);
 
@@ -288,6 +300,15 @@ void Presenter::SetUpscaling(bool enabled,float sharpness) {
     impl->requested.metalfx=enabled;impl->requested.sharpness=std::clamp(sharpness,0.0f,1.0f);++impl->settings_generation;
 }
 bool Presenter::SupportsMetalFX() const { return impl->upscaler->Supported(); }
+bool Presenter::SupportsFrameGeneration() const {return impl->frame_generation_supported;}
+void Presenter::SetFrameGeneration(bool enabled) {
+    std::lock_guard lock(impl->settings_mutex);
+    impl->requested.frame_generation=enabled && impl->frame_generation_supported;++impl->settings_generation;
+}
+void Presenter::SetFrameProvider(std::function<std::shared_ptr<const GeneratedFrame>()> provider) {
+    if(!HasFrameLoop())impl->frame_provider=std::move(provider);
+}
+std::uint64_t Presenter::GeneratedPresentedFrameCount() const {return impl->presentations->generated.load(std::memory_order_relaxed);}
 const char* Presenter::UpscalingStatus() const {
     return impl->status.load(std::memory_order_acquire);
 }
@@ -341,7 +362,7 @@ void Presenter::PresentTexture(void* texture_handle) {
     impl->ApplySettings(false);impl->PresentLegacy(texture_handle);
 }
 
-void Presenter::Impl::PresentLegacy(void* texture_handle) {
+void Presenter::Impl::PresentLegacy(void* texture_handle,std::shared_ptr<const GeneratedFrame> packet) {
     StutterTrace::Scope timing("present",next_sequence+1,0,0,50);
     if (!texture_handle || !pipeline) {
         return;
@@ -362,12 +383,13 @@ void Presenter::Impl::PresentLegacy(void* texture_handle) {
             return;
         }
 
-        EncodeTexture(tex,drawable,false);
+        EncodeTexture(tex,drawable,false,0,0,0,false,packet ? packet->source_frame : 0,packet);
     }
 }
 
 void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawable,bool from_display_link,
-                                  double callback,double deadline,double target_presentation) {
+                                  double callback,double deadline,double target_presentation,
+                                  bool generated,std::uint64_t source_frame,std::shared_ptr<const GeneratedFrame> packet) {
         std::shared_ptr<PresentationTiming> timing;
         if(timing_log) {
             timing=std::make_shared<PresentationTiming>();timing->log=timing_log;
@@ -380,7 +402,9 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0,0,0,1);
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-        id<MTLCommandBuffer> cmd = [queue commandBuffer];
+        id<MTLCommandBuffer> cmd = [packet && interpolation_queue ? interpolation_queue : queue commandBuffer];
+        if(packet && packet->ready_event)
+            [cmd encodeWaitForEvent:(__bridge id<MTLSharedEvent>)packet->ready_event value:packet->ready_value];
         const double scale=std::min(double(drawable.texture.width)/tex.width,
                                     double(drawable.texture.height)/tex.height);
         const int width=std::max(1,int(tex.width*scale)), height=std::max(1,int(tex.height*scale));
@@ -398,6 +422,7 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
 
         dispatch_semaphore_t sem = frames_in_flight;
         [cmd addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+          (void)packet; // Pins both private frame textures until this GPU read ends.
           if(timing) {
               std::scoped_lock lock(timing->mutex);
               timing->gpu_start=buffer.GPUStartTime;timing->gpu_end=buffer.GPUEndTime;
@@ -411,7 +436,7 @@ void Presenter::Impl::EncodeTexture(id<MTLTexture> tex,id<CAMetalDrawable> drawa
                 std::scoped_lock lock(timing->mutex);timing->scheduled=CACurrentMediaTime();
             }];
         }
-        Track(drawable,timing);
+        Track(drawable,timing,generated,source_frame);
         // Apple's CAMetalDisplayLink sample uses command-buffer presentation.
         // Timed presentation alternatives assert with CAMetalDisplayLink.
         [cmd presentDrawable:drawable];

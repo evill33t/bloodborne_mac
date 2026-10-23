@@ -12,6 +12,7 @@
 namespace Gpu::Metal {
 
 class Device;
+struct GeneratedFrame;
 
 class MetalRenderer : public Gpu::Renderer {
 public:
@@ -97,6 +98,9 @@ public:
     // Main thread; applied by the GPU thread without changing guest state.
     void SetGraphicsOptions(int anisotropy,bool temporal_aa);
     bool TemporalAAActive() const;
+    void SetFrameGeneration(bool enabled);
+    std::shared_ptr<const GeneratedFrame> LatestGeneratedFrame() const;
+    const char* FrameGenerationStatus() const;
 
 private:
     struct Impl;

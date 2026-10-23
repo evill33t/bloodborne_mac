@@ -81,6 +81,7 @@ Values Load(const std::filesystem::path& path) {
                 const bool b=n!=0;
                 if (key=="metalfx") v.metalfx=b;
                 else if (key=="temporal_aa") v.temporal_aa=b;
+                else if (key=="frame_generation") v.frame_generation=b;
                 else if (key=="vsync") v.vsync=b;
                 else if (key=="fullscreen") v.fullscreen=b;
                 else if (key=="show_fps") v.show_fps=b;
@@ -113,6 +114,7 @@ bool Save(const std::filesystem::path& path,const Values& values,std::string& er
         << "\nmetalfx=" << v.metalfx << "\nvsync=" << v.vsync << "\nfullscreen=" << v.fullscreen
         << "\nshow_fps=" << v.show_fps << "\nsharpness=" << v.sharpness
         << "\nanisotropy=" << v.anisotropy << "\ntemporal_aa=" << v.temporal_aa
+        << "\nframe_generation=" << v.frame_generation
         << "\neffect_game_aa=" << v.game_aa << "\neffect_motion_blur=" << v.motion_blur
         << "\neffect_dof=" << v.dof << "\neffect_chromatic_aberration=" << v.chromatic_aberration
         << "\neffect_ssao=" << v.ssao << "\neffect_dynamic_shadows=" << v.dynamic_shadows

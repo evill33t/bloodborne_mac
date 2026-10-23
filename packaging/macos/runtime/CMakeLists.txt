@@ -142,6 +142,8 @@ add_test(NAME darwin-metal-presentation COMMAND bb-presenter-tests)
 set_tests_properties(darwin-metal-presentation PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
 add_test(NAME darwin-metal-presentation-latency2 COMMAND bb-presenter-tests --latency2)
 set_tests_properties(darwin-metal-presentation-latency2 PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
+add_test(NAME darwin-metal-presentation-framegen COMMAND bb-presenter-tests --framegen)
+set_tests_properties(darwin-metal-presentation-framegen PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
 target_link_libraries(bb-metal-worklist-tests PRIVATE bbruntime)
 target_link_libraries(bb-metal-native_tessellation-tests PRIVATE bbruntime)
 target_link_options(bb-metal-native_tessellation-tests PRIVATE

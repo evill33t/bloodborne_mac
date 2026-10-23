@@ -386,7 +386,7 @@ void pop_last_row(void* builder) {
 
 std::uint8_t display[5]{},last_display[5]{},effects[6]{},last_effects[6]{},plugins[4]{},last_plugins[4]{},sharpness=0,last_sharpness=0;
 std::int32_t cap_value=30,last_cap=30,resolution_value=4,last_resolution=4;
-std::uint8_t lights=0,last_lights=0;
+std::uint8_t lights=0,last_lights=0,frame_generation=0,last_frame_generation=0;
 std::int32_t lod=0,last_lod=0;
 const Choice lods[]{{-2,126071},{0,126072},{1,126073},{2,126074}};
 const char* plugin_names[]{"randomizer","boss_rush","mutators","debug_menu"};
@@ -404,6 +404,7 @@ void seed() {
     for (int k=0;k<MacSettings::ResolutionCount;++k) if (v.render_width==MacSettings::Widths[k]) resolution_value=k;
     last_resolution=resolution_value; seeded=true;
     lights=last_lights=v.optimized_lights; lod=last_lod=v.model_lod;
+    frame_generation=last_frame_generation=v.frame_generation;
 }
 GUEST_ABI void display_handler(void* dialog,void*) {
     seed(); alignas(16) std::uint8_t scratch[0x100]{};
@@ -427,6 +428,7 @@ GUEST_ABI void performance_handler(void* dialog,void*) {
     seed(); alignas(16) std::uint8_t scratch[0x100]{};
     hle_call_guest<std::int64_t>(guest_fn(kScratchInit),scratch);
     add_toggle_row(dialog,&lights,126070,0);
+    add_toggle_row(dialog,&frame_generation,126076,0);
     add_list_row(dialog,&lod,126075,lods,std::size(lods),0);
 }
 // Our sections save each edit immediately. Remove the engine's appended
@@ -570,6 +572,7 @@ void PollMenu() {
     if (cap_value!=last_cap) { v.frame_cap=cap_value; changed=true; }
     if (lights!=last_lights) { v.optimized_lights=lights!=0; changed=true; }
     if (lod!=last_lod) { v.model_lod=lod; changed=true; }
+    if (frame_generation!=last_frame_generation) {v.frame_generation=frame_generation!=0;changed=true;}
     if (resolution_value!=last_resolution) {
         const auto k=std::clamp(int(resolution_value),0,MacSettings::ResolutionCount-1);
         v.render_width=MacSettings::Widths[k]; v.render_height=MacSettings::Heights[k]; changed=true;
@@ -584,6 +587,6 @@ void PollMenu() {
     std::copy(std::begin(effects),std::end(effects),last_effects);
     std::copy(std::begin(plugins),std::end(plugins),last_plugins);
     last_cap=cap_value; last_resolution=resolution_value; last_sharpness=sharpness;
-    last_lights=lights; last_lod=lod;
+    last_lights=lights; last_lod=lod;last_frame_generation=frame_generation;
 }
 } // namespace MacFeatures

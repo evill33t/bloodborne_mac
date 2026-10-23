@@ -12,7 +12,7 @@ static bool ReadVelocityBytes(u64 address,void* out,std::size_t size) {
 }
 bool NativeVelocityEnabled() const {
   static const bool enabled=[] {const char* value=std::getenv("BB_METAL_NATIVE_MOTION");return !value || std::strcmp(value,"0");}();
-  return enabled && temporal_aa.load(std::memory_order_relaxed);
+  return enabled && (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed));
 }
 bool VelocityFrame(const RenderTarget& target) const {
   return target.velocity.safe && target.velocity.frame==frame_count &&

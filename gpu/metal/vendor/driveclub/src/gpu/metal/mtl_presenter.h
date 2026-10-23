@@ -12,6 +12,7 @@
 namespace Gpu::Metal {
 
 class Device;
+struct GeneratedFrame;
 
 struct PresenterConfig {
     bool vsync = true;
@@ -22,6 +23,8 @@ struct PresentedFrame {
     std::uint64_t sequence;
     double submitted_time;
     double presented_time; // Metal reports zero when the drawable was skipped.
+    bool generated=false;
+    std::uint64_t source_frame=0;
 };
 
 class Presenter {
@@ -40,6 +43,11 @@ public:
     void SetRefreshRate(float hz);
     void SetUpscaling(bool enabled,float sharpness);
     bool SupportsMetalFX() const;
+    bool SupportsFrameGeneration() const;
+    void SetFrameGeneration(bool enabled);
+    // Install before StartFrameLoop; packets contain independently owned GPU snapshots.
+    void SetFrameProvider(std::function<std::shared_ptr<const GeneratedFrame>()> provider);
+    std::uint64_t GeneratedPresentedFrameCount() const;
     const char* UpscalingStatus() const;
     std::uint64_t PresentedFrameCount() const;
     std::vector<PresentedFrame> TakePresentations();

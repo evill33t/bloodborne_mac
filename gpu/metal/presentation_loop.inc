@@ -8,6 +8,8 @@ void Presenter::Impl::ApplySettings(bool threaded) {
         layer.drawableSize=CGSizeMake(next.width,next.height);
     layer.displaySyncEnabled=next.vsync;
     metalfx=next.metalfx;sharpness=next.sharpness;
+    frame_generation=next.frame_generation && next.vsync;
+    if(frame_generation && !interpolation_queue)interpolation_queue=[device newCommandQueue];
     if(threaded) {
         const char* opt=std::getenv("BB_METAL_DISPLAY_LINK");
         const bool use_link=next.vsync && (!opt || std::strcmp(opt,"0"));
@@ -28,6 +30,46 @@ void Presenter::Impl::ApplySettings(bool threaded) {
     applied=next;applied_generation=generation;
 }
 
+// One generated midpoint followed by its current real frame. The producer is
+// released after the midpoint is queued: only private snapshots remain in use.
+// Never advance guest frame clocks or count a repeat as a generated frame.
+void Presenter::Impl::Display(CAMetalDisplayLinkUpdate* update,double diagnostic_callback) {
+    const double now=CACurrentMediaTime();
+    const double tick=1./std::max(30.f,applied.refresh_rate);
+    const double display_time=update.targetPresentationTimestamp>0 ? update.targetPresentationTimestamp : now;
+    // The renderer has already committed private snapshots before publishing.
+    // Release guest submission now, without reserving a drawable that would
+    // expire while its GPU inputs are still being produced.
+    if(frame_generation && !ready_pair && frame_provider && pending()) {
+        auto packet=frame_provider();
+        if(packet && packet->real && packet->ready_event) {ready_pair=std::move(packet);queued();}
+    }
+    if(!update.drawable || !pipeline)return;
+    if(held_real) {
+        if(frame_generation && display_time+tick*.25<real_due)return;
+        if(dispatch_semaphore_wait(frames_in_flight,DISPATCH_TIME_NOW)!=0)return;
+        auto packet=std::move(held_real);
+        EncodeTexture((__bridge id<MTLTexture>)packet->real,update.drawable,true,diagnostic_callback,
+            update.targetTimestamp,update.targetPresentationTimestamp,false,packet->source_frame,packet);
+        return;
+    }
+    if(ready_pair && ready_pair->ready_event &&
+        [(__bridge id<MTLSharedEvent>)ready_pair->ready_event signaledValue]<ready_pair->ready_value)return;
+    void* texture=ready_pair ? ready_pair->real : pending();if(!texture)return;
+    if(dispatch_semaphore_wait(frames_in_flight,DISPATCH_TIME_NOW)!=0)return;
+    const bool acknowledge=!ready_pair;
+    auto packet=std::move(ready_pair);
+    const bool generated=frame_generation && packet && packet->generated && packet->interval>=1.75/std::max(30.f,applied.refresh_rate);
+    if(packet)texture=generated ? packet->generated : packet->real;
+    EncodeTexture((__bridge id<MTLTexture>)texture,update.drawable,true,diagnostic_callback,
+        update.targetTimestamp,update.targetPresentationTimestamp,generated,packet ? packet->source_frame : 0,packet);
+    if(generated) {
+        held_real=packet;
+        real_due=display_time+std::clamp(std::round(packet->interval*.5/tick)*tick,tick,.05);
+    }
+    if(acknowledge)queued();
+}
+
 void Presenter::Impl::Run(std::stop_token stop) {
     pthread_setname_np("Metal presentation");
     @autoreleasepool {
@@ -37,31 +79,27 @@ void Presenter::Impl::Run(std::stop_token stop) {
             const double callback=owner->timing_log ? CACurrentMediaTime() : 0;
             ++owner->display_updates;
             owner->last_display_update=StutterTrace::Now();
-            void* texture=owner->pending();
-            if(!texture || !update.drawable || !owner->pipeline) return;
-            // A display callback must never wait for a GPU slot. The producer
-            // retains its frame until a later callback can enqueue the read.
-            if(dispatch_semaphore_wait(owner->frames_in_flight,DISPATCH_TIME_NOW)!=0)return;
-            StutterTrace::Scope timing("display_link_encode",owner->next_sequence+1);
-            @autoreleasepool {
-                owner->EncodeTexture((__bridge id<MTLTexture>)texture,update.drawable,true,
-                    callback,update.targetTimestamp,update.targetPresentationTimestamp);
-                owner->queued();
-            }
+            owner->Display(update,callback);
+
         };
         ApplySettings(true);
         NSTimer* timer=[NSTimer timerWithTimeInterval:.001 repeats:YES block:^(NSTimer*) {
             owner->ApplySettings(true);
             if(owner->display_link) {
                 const double now=StutterTrace::Now();
-                if(now-owner->last_display_update>.1 && owner->pending()) {
+                if(now-owner->last_display_update>.1 && (owner->pending() || owner->held_real || owner->ready_pair)) {
                     // Hidden/occluded windows may receive no updates. Preserve
                     // the old nil-drawable skip behavior with a bounded delay;
                     // never strand a guest fence behind a missing compositor.
                     StutterTrace::Record("display_unavailable",owner->last_display_update,now,owner->next_sequence);
                     owner->last_display_update=now;++owner->skipped;
-                    owner->queued();
+                    owner->held_real.reset();owner->ready_pair.reset();
+                    if(owner->pending())owner->queued();
                 }
+            } else if(owner->held_real) {
+                owner->PresentLegacy(owner->held_real->real,owner->held_real);owner->held_real.reset();owner->ready_pair.reset();
+            } else if(owner->ready_pair) {
+                owner->PresentLegacy(owner->ready_pair->real,owner->ready_pair);owner->ready_pair.reset();
             } else if(void* texture=owner->pending()) {
                 owner->PresentLegacy(texture);owner->queued();
             }

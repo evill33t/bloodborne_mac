@@ -20,6 +20,7 @@ add_library(bb-ps4-metal STATIC
     "${BB_ROOT}/gpu/metal/game_input.mm"
     "${BB_ROOT}/gpu/metal/spatial_upscaler.mm"
     "${BB_ROOT}/gpu/metal/temporal_aa.mm"
+    "${BB_ROOT}/gpu/metal/frame_generation.mm"
     "${BB_ROOT}/gpu/metal/vendor/bbport/cp/cp_decoder.cpp"
     "${BB_ROOT}/gpu/metal/raw_texture_snapshot.mm"
     "${BB_ROOT}/gpu/metal/gpu_texture_upload.mm"
@@ -35,3 +36,16 @@ add_executable(bb-macos-precompile-shaders "${BB_ROOT}/gpu/metal/precompile_main
 target_include_directories(bb-macos-precompile-shaders PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-macos-precompile-shaders PRIVATE -Wall -Wextra -Werror -fobjc-arc)
 target_link_libraries(bb-macos-precompile-shaders PRIVATE bb-ps4-metal bbruntime)
+
+if(BUILD_TESTING OR NOT DEFINED BUILD_TESTING)
+    add_executable(bb-frame-generation-tests "${BB_ROOT}/gpu/metal/tests/game_frame_generation_tests.mm")
+    target_include_directories(bb-frame-generation-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+    target_compile_options(bb-frame-generation-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+    target_link_libraries(bb-frame-generation-tests PRIVATE bb-ps4-metal)
+    add_test(NAME metal-frame-generation COMMAND bb-frame-generation-tests)
+    set_tests_properties(metal-frame-generation PROPERTIES TIMEOUT 60 LABELS "gpu" SKIP_RETURN_CODE 77)
+    add_test(NAME metal-frame-generation-same-flip COMMAND bb-frame-generation-tests --same-flip)
+    set_tests_properties(metal-frame-generation-same-flip PROPERTIES TIMEOUT 60 LABELS "gpu" SKIP_RETURN_CODE 77)
+    add_test(NAME metal-frame-generation-swizzle COMMAND bb-frame-generation-tests --swizzle)
+    set_tests_properties(metal-frame-generation-swizzle PROPERTIES TIMEOUT 60 LABELS "gpu" SKIP_RETURN_CODE 77)
+endif()

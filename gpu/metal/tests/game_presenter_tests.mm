@@ -8,6 +8,7 @@
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/mtl_presenter.h"
 #include "gpu/metal/frame_handoff.h"
+#include "gpu/metal/frame_generation.h"
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -57,6 +58,7 @@ int main(int argc,char** argv) {
     using namespace std::chrono_literals;
     const bool legacy=argc>1 && std::strcmp(argv[1],"--legacy")==0;
     const bool latency2=argc>1 && std::strcmp(argv[1],"--latency2")==0;
+    const bool framegen=argc>1 && std::strcmp(argv[1],"--framegen")==0;
     char timing_path[]="/private/tmp/bb-presenter-timing-XXXXXX";
     if(latency2) {
         const int fd=mkstemp(timing_path);assert(fd>=0);close(fd);
@@ -82,8 +84,26 @@ int main(int argc,char** argv) {
         std::atomic<bool> stop=false;
         std::atomic<bool> done=false;
         std::atomic<unsigned> produced=0;
+        std::shared_ptr<const Gpu::Metal::GeneratedFrame> packet;
+        id<MTLSharedEvent> ready_event=[(__bridge id<MTLDevice>)device.Handle() newSharedEvent];
+        if(framegen) {
+            if(!presenter.SupportsFrameGeneration())return 77;
+            presenter.SetFrameGeneration(true);
+            presenter.SetFrameProvider([&] {return std::atomic_load(&packet);});
+        }
         if(!legacy)presenter.StartFrameLoop([&] {return handoff.Pending();},[&] {handoff.Acknowledge();});
-        std::thread producer([&] {while(!stop.load()) {handoff.PublishAndWait((__bridge void*)texture,[]{});++produced;}done=true;});
+        std::thread producer([&] {while(!stop.load()) {
+            if(framegen) {
+                auto next=std::make_shared<Gpu::Metal::GeneratedFrame>();next->real=next->generated=(__bridge void*)texture;
+                next->source_frame=produced.load()+1;next->interval=1./30;
+                next->ready_event=(__bridge void*)ready_event;next->ready_value=next->source_frame;
+                auto command=[(__bridge id<MTLCommandQueue>)device.Queue() commandBuffer];
+                [command encodeSignalEvent:ready_event value:next->ready_value];[command commit];
+                std::atomic_store(&packet,std::shared_ptr<const Gpu::Metal::GeneratedFrame>(next));
+            }
+            handoff.PublishAndWait((__bridge void*)texture,[]{});++produced;
+            if(framegen)std::this_thread::sleep_for(33ms);
+        }done=true;});
         const auto pump=[&] {
             @autoreleasepool {
                 SDL_Event event;
@@ -124,6 +144,18 @@ int main(int argc,char** argv) {
         assert(done);
         producer.join();
         assert(!handoff.Pending());
+        if(framegen && before>=8) {
+            const auto until=std::chrono::steady_clock::now()+100ms;
+            while(std::chrono::steady_clock::now()<until)pump();
+            auto samples=presenter.TakePresentations();
+            unsigned generated=0,real=0;
+            for(const auto& sample:samples)if(sample.presented_time>0 && sample.source_frame) {
+                if(sample.generated)++generated;else ++real;
+            }
+            std::printf("Frame-generation presentation: %u real, %u generated drawable timestamps, %u producer frames\n",real,generated,produced.load());
+            assert(generated>=8 && real>=8 && presenter.GeneratedPresentedFrameCount()>0);
+            assert(presenter.PresentedFrameCount()<=2*produced.load());
+        }
         if(before<8) {std::puts("No onscreen presentation timestamps; interactive fixture skipped");result=77;}
         else std::puts(legacy?"Legacy control reproduced UI-stall backpressure":"Metal presenter: UI-stall isolation, queue handoff, settings transitions and shutdown passed");
         }

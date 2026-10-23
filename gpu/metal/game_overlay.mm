@@ -58,6 +58,7 @@ struct Overlay::Impl {
     std::function<void()> show_achievements;
     NSPopUpButton *cap,*resolution,*upscaler,*sharpness,*model_detail,*anisotropy;
     NSButton* temporal_aa;
+    NSButton* frame_generation;
     NSButton* optimized_lights;
     NSButton *vsync,*fullscreen,*fps,*aa,*blur,*dof,*ca,*ssao,*shadows,*save,*restart,*defaults,*close,*achievements;
     NSTextField *status,*message;
@@ -191,6 +192,8 @@ struct Overlay::Impl {
         upscaler=Popup(@[@"Bilinear",@"MetalFX Spatial"],@"Upscaling");
         sharpness=Popup(@[@"Off",@"10%",@"20%",@"30%",@"40%",@"50%",@"60%",@"70%",@"80%",@"90%",@"100%"],@"Additional sharpening");
         anisotropy=Popup(@[@"Game default",@"2×",@"4×",@"8×",@"16×"],@"Texture filtering");
+        frame_generation=Check(@"2× MetalFX frame generation (experimental)");
+        frame_generation.toolTip=@"Adds intermediate display frames at native 1080p. Requires supported Apple Silicon, macOS 26 and V-sync. Input and simulation follow the rendered FPS.";
         temporal_aa=Check(@"Temporal anti-aliasing (experimental)");
         temporal_aa.toolTip=@"Stabilizes scene edges before the HUD. Uses camera motion and depth rejection; moving objects may show ghosting.";
         vsync=Check(@"V-sync"); fullscreen=Check(@"Fullscreen"); fps=Check(@"FPS in title bar");
@@ -200,7 +203,7 @@ struct Overlay::Impl {
         model_detail=Popup(@[@"Highest",@"Original",@"Lower",@"Lowest"],@"Model detail");
         auto left=Stack(@[Label(@"DISPLAY & PERFORMANCE",11,true),Field(@"Frame cap · restart required",cap),
             Field(@"Render resolution · restart required",resolution),Field(@"Upscaling",upscaler),
-            Field(@"Additional sharpening",sharpness),Field(@"Texture filtering",anisotropy),temporal_aa,
+            Field(@"Additional sharpening",sharpness),Field(@"Texture filtering",anisotropy),temporal_aa,frame_generation,
             vsync,fullscreen,fps],NSUserInterfaceLayoutOrientationVertical,10);
         auto note=Label(@"Frame rate, resolution and effects apply after a restart. Rates above 120 FPS are experimental. MetalFX scales the game HUD with the scene.",12);
         note.textColor=NSColor.secondaryLabelColor;
@@ -272,6 +275,7 @@ struct Overlay::Impl {
         constexpr int filters[]{0,2,4,8,16};
         v.anisotropy=filters[std::clamp(int(anisotropy.indexOfSelectedItem),0,4)];
         v.temporal_aa=temporal_aa.state==NSControlStateValueOn;
+        v.frame_generation=frame_generation.state==NSControlStateValueOn;
         v.vsync=vsync.state==NSControlStateValueOn; v.fullscreen=fullscreen.state==NSControlStateValueOn;
         v.show_fps=fps.state==NSControlStateValueOn;
         v.game_aa=aa.state==NSControlStateValueOn; v.motion_blur=blur.state==NSControlStateValueOn;
@@ -291,6 +295,7 @@ struct Overlay::Impl {
         [upscaler selectItemAtIndex:v.metalfx ? 1 : 0];
         [anisotropy selectItemAtIndex:v.anisotropy==0 ? 0 : v.anisotropy==2 ? 1 : v.anisotropy==4 ? 2 : v.anisotropy==8 ? 3 : 4];
         temporal_aa.state=v.temporal_aa;
+        frame_generation.state=v.frame_generation;
         [sharpness selectItemAtIndex:std::clamp(int(std::round(v.sharpness*10)),0,10)];
         vsync.state=v.vsync; fullscreen.state=v.fullscreen; fps.state=v.show_fps;
         aa.state=v.game_aa; blur.state=v.motion_blur; dof.state=v.dof;

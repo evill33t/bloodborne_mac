@@ -159,3 +159,4 @@
 126073	Lower	
 126074	Lowest	
 126075	Model detail	Change the engine model LOD bias live.
+126076	2x MetalFX frame generation	Adds intermediate display frames at native 1080p. Requires macOS 26, supported Apple Silicon and V-sync. Simulation and input follow rendered FPS.
