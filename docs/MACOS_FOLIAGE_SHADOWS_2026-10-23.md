@@ -80,13 +80,107 @@ single wind timeline. This evidence does not justify another clock-speed change.
 The bounded diagnostic is off by default and uses a separate shader/cache ABI.
 It adds no guest-memory rereads, CPU snapshots, command waits or drains. Atomics
 perturb timing; stable sparse samples cannot prove all vertices, inputs or frames.
-Schema extensions retain the separately loaded camera XYZ and one selected original
-object-matrix index, with full descriptor/index identity, so legitimate per-vertex
-matrix differences are not misclassified as a race. Matrix mapping status remains
-explicitly unobserved.
+Schema 4 retains the separately loaded camera XYZ and one selected original
+object-matrix index, with full descriptor/index identity. Both fresh 240-record
+runs found zero within-draw variation in all four observed groups. There were
+849,960 stationary and 373,625 camera-motion selected invocations for each group.
+All 480 selected matrices had the known plain stride16/float4 descriptor form and
+nonzero data. The exact captured ignored padding bit 15 is admitted separately
+from true cache/address-swizzle flags; ADD_TID and unknown forms fail closed.
+Other matrix indices are counted separately, avoiding a false race finding from
+legitimate per-index differences. Matrix mapping status remains explicitly
+unobserved. These observations do not establish every input or frame as correct.
+
+The original shader math review found no further concrete translation defect in
+its 16 sine/32 fract operations, authored clamp modifiers, scalar branch conditions
+or matrix addressing for the captured plain descriptors. This does not establish
+bit-exact PS4 arithmetic. No additional clock or snapshot workaround is enabled.
 
 ## Validation status
 
-Final schema fixtures, runtime suites, clean FPS and gameplay results are recorded
-below after completion. The remaining foliage jitter and sliding-shadow report
-must not be described as fixed solely from source review or fixtures.
+Both final x86-64/Rosetta and arm64 builds passed. The broad runtime suite passed
+112 executed tests with 3 private-input skips; the arm64 suite passed 20 with one
+private-input skip. The original shadow shader differential was supplied its
+private input and passed separately. Final focused depth-bounds/frame-generation/
+wind tests passed 8/8, the Python protocol suite passed 15/15, and the final ARM64
+atomic-helper/lifecycle/matrix-subgroup GPU fixture plus exact original instrumented
+VS compile passed. The CPU emitter fixture verifies the normal OFF source remains
+byte-identical after stripping diagnostic plumbing.
+
+Only the depth/color alias regression is proven fixed. The reported foliage
+jitter and sliding shadows remain unresolved; none of the above fixtures or sparse
+observations is presented as a visual cure. No 60 FPS improvement is claimed from
+instrumented captures. The final uninstrumented replay results follow below.
+
+
+## Final clean replays and pause
+
+Three 90-second Rosetta gameplay replays completed, on AC power at native
+1920×1080, TAA/FG off, all shader probes/tracing/stage counters/recordings off,
+and all 951 loaded prewarm recipes ready. Routes included stationary viewing,
+camera orbit, forward/backward movement and attacks. Each run stopped as planned
+with **zero GPU failures and zero missing presentation timestamps**.
+
+| Replay | Rendered FPS | Displayed FPS | p99 presentation interval | Worst interval |
+| --- | ---: | ---: | ---: | ---: |
+| Fog baseline | 24.48 | 24.49 | 58.33ms | 91.67ms |
+| Fog with alias fix | 31.36 | 31.37 | 33.34ms | 41.67ms |
+| Dream with alias fix | 38.28 | 38.28 | 41.67ms | 50.00ms |
+
+Rendered/displayed rates use in-window periodic counters; the complete per-frame
+presentation stream averages 24.47, 31.35 and 38.19 FPS respectively, with slightly
+different timestamp windows. Generated-frame count is zero in every run.
+
+QEMU used approximately one CPU core at preflight and again after the matched fog
+pair. These are shared-load observations from one pair, not an isolated causal
+speedup or evidence of sustained 60 FPS. The scene and combat paths can diverge.
+The fixed fog run’s stationary/camera/attack phases measured 33.85/31.32/30.07 FPS
+versus 31.15/22.74/21.71 in the baseline. These short replays do not establish
+long-session stability or whole-game visual correctness.
+
+Authoritative checked metrics: `clean-validation-results-checked.json`, with
+per-phase results, physical output extents, binary identities and diagnostic flags.
+The copied driver’s summary label erroneously said diagnostic=true for these
+clean runs; the underlying per-run metrics and all actual environment flags show
+otherwise. The checked summary derives its flag from those actual metrics, and
+the reusable driver’s reporting label has been corrected. Raw logs are retained.
+
+The final original-file check passed: all 28,779 dump file size/mtime entries,
+original eboot hash, prepared original ELF hash and 16 master-save hashes match
+their baselines. `original-integrity-final.json` records the exact scope and
+hashes. `owned-processes-final.json` confirms no owned game process remains.
+
+Paused at the user’s request after this validation round. The depth/color alias
+fix is validated; the reported foliage jitter/sliding shadows and the 60 FPS goal
+remain open. No further optimization or unattended gameplay is running.
+
+
+## Saved state for the next round
+
+Source checkpoint: `b4575f6` (`Expand depth alias and consumed shader diagnostics`).
+Final frozen gameplay binaries are in `out/foliage-shadows-2026-10-23/rosetta-final2`
+and `native-final2`, with adjacent SHA256 manifests. Gameplay validation here uses
+Rosetta; ARM64 build and fixture results are separate from ARM64 gameplay proof.
+
+The diagnostic remains opt-in:
+
+```sh
+BB_METAL_WIND_CONSUMED_FRAMES=120
+BB_METAL_WIND_CONSUMED_PASS=color
+BB_METAL_WIND_CONSUMED_DIR=/absolute/external/capture/directory
+```
+
+Arm it with the existing bounded trace trigger. Each draw owns a separate private
+480-byte record; completion owns its resources and metadata. The protocol parser
+is `tools/analyze_wind_consumed.py`; offline mutation tests are
+`gpu/metal/tests/test_analyze_wind_consumed.py`. Raw schema4 evidence is in
+`out/metal-unattended-2026-10-20/visual23-consumed4-{stationary,camera}/consumed`.
+The normal shader ABI is unchanged when this diagnostic is OFF.
+
+Resume by separating the actual shadow-mask factor from AO, lighting and fog at
+the reported arch during camera motion, rather than assuming every dark patch is
+a static-light shadow. The existing controls did not establish the cause. For
+Dream foliage, retain the correct clock and use stable frame pacing plus actual
+vertex/output evidence before another animation workaround. Do not treat sparse
+negative race observations as complete proof of input lifetime. Neither a broad
+renderer rewrite nor new default performance flags were added in this round.
