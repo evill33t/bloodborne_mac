@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include "gpu/metal/mtl_compiler.h"
+#include "gpu/metal/constant_memory_map.h"
 #include <cassert>
 #include <atomic>
 #include <filesystem>
@@ -61,8 +62,10 @@ std::string Identity(std::string_view name,std::string_view architecture,std::ui
 }
 std::filesystem::path RecipeRoot(const std::filesystem::path& directory,id<MTLDevice> device) {
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
-    return directory/"metal-cache"/"prewarm-v2"/Identity(device.name.UTF8String,
+    auto material=Gpu::Metal::PipelineRecipeIdentity::Material(device.name.UTF8String,
         Gpu::Metal::PipelineRecipeIdentity::Architecture(),os.majorVersion,os.minorVersion,os.patchVersion);
+    if(Gpu::Metal::ConstantMemoryMap::Configured(std::getenv("BB_METAL_CONSTANT_MEMORY_MAP")))material+="\nconstant-map-v1";
+    return directory/"metal-cache"/"prewarm-v2"/Digest(material.data(),material.size());
 }
 std::filesystem::path LegacyRoot(const std::filesystem::path& directory,std::uint64_t registry) {
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;

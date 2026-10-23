@@ -150,9 +150,14 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     }
     const auto os=NSProcessInfo.processInfo.operatingSystemVersion;
     NSString* name=device.name;if(!name.length || name.length>4096)return;
-    const auto material=PipelineRecipeIdentity::Material(name.UTF8String,PipelineRecipeIdentity::Architecture(),
-        os.majorVersion,os.minorVersion,os.patchVersion);
-    const auto identity=RecipeDigest(material.data(),material.size());
+    const bool constant_mapping=ConstantMemoryMap::Configured(std::getenv("BB_METAL_CONSTANT_MEMORY_MAP"));
+    const auto namespace_identity=[&](std::string_view architecture,bool mapping) {
+        auto material=PipelineRecipeIdentity::Material(name.UTF8String,architecture,
+            os.majorVersion,os.minorVersion,os.patchVersion);
+        if(mapping)material+="\nconstant-map-v1";
+        return RecipeDigest(material.data(),material.size());
+    };
+    const auto identity=namespace_identity(PipelineRecipeIdentity::Architecture(),constant_mapping);
     root=[root stringByAppendingPathComponent:@(identity.c_str())];
     if(!RecipeRootSafe(root,true))return;
     warm_root=root;
@@ -165,12 +170,19 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     // device; exact source/descriptor equality still gates foreground reuse.
     // Keep the current namespace first and share all admission/read bounds.
     const auto alternate=PipelineRecipeIdentity::AlternateArchitecture(PipelineRecipeIdentity::Architecture());
-    if(!alternate.empty()) {
-        const auto other_material=PipelineRecipeIdentity::Material(name.UTF8String,alternate,
-            os.majorVersion,os.minorVersion,os.patchVersion);
-        const auto other_identity=RecipeDigest(other_material.data(),other_material.size());
-        NSString* other=[namespaces stringByAppendingPathComponent:@(other_identity.c_str())];
-        if(RecipeRootSafe(other,false))for(const auto& file:StartupRecipes(other,remaining))files.push_back({other,file,1});
+    const auto add_namespace=[&](std::string_view architecture,bool mapping,unsigned priority) {
+        if(architecture.empty())return;
+        const auto key=namespace_identity(architecture,mapping);
+        NSString* other=[namespaces stringByAppendingPathComponent:@(key.c_str())];
+        if(RecipeRootSafe(other,false))for(const auto& file:StartupRecipes(other,remaining))files.push_back({other,file,priority});
+    };
+    add_namespace(alternate,constant_mapping,1);
+    // A full derived bank must not evict the ordinary bank under the existing
+    // per-namespace 1024-recipe limit. Import base sources only when selecting
+    // the derived mode; OFF never compiles the other mode's namespace.
+    if(constant_mapping) {
+        add_namespace(PipelineRecipeIdentity::Architecture(),false,2);
+        add_namespace(alternate,false,3);
     }
     NSString* legacy=[resolved_data stringByAppendingPathComponent:@"metal-cache/prewarm-v1"];
     const auto version=PipelineRecipeIdentity::OsVersion(os.majorVersion,os.minorVersion,os.patchVersion);
@@ -198,7 +210,7 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     });
     if(directories.size()>PipelineRecipeIdentity::LegacyDirectories)directories.resize(PipelineRecipeIdentity::LegacyDirectories);
     for(const auto& directory:directories)for(const auto& file:StartupRecipes(directory.first,remaining))
-        files.push_back({directory.first,file,[directory.first.lastPathComponent isEqualToString:current] ? 2u : 3u});
+        files.push_back({directory.first,file,[directory.first.lastPathComponent isEqualToString:current] ? 4u : 5u});
     // Stable/current-runtime inputs first, then recently observed older inputs.
     std::sort(files.begin(),files.end(),[](const auto& a,const auto& b) {
         if(a.priority!=b.priority)return a.priority<b.priority;
@@ -207,21 +219,37 @@ void ShaderCompiler::EnablePrewarming(bool parallel) {
     });
     unsigned count=0,stable_count=0,imported_count=0;std::uint64_t total=0;
     std::uint64_t read_budget=PipelinePrewarmLimits::Bytes;
-    std::unordered_set<std::string> admitted;
+    std::unordered_set<std::string> admitted,seen_sources;
     for(const auto& entry:files) {
         if(count>=PipelinePrewarmLimits::Recipes || !read_budget) break;
         if(entry.file.bytes>PipelinePrewarmLimits::RecipeBytes || entry.file.bytes>PipelinePrewarmLimits::Bytes-total ||
             entry.file.bytes>read_budget ||
             !RecipeRootSafe(entry.root,false))continue;
-        const auto key=std::string(entry.file.name.stringByDeletingPathExtension.UTF8String);
-        if(admitted.contains(key))continue;
+        const auto source_key=std::string(entry.file.name.stringByDeletingPathExtension.UTF8String);
+        if(seen_sources.contains(source_key))continue;
         NSData* bytes=ReadRecipe([entry.root stringByAppendingPathComponent:entry.file.name],read_budget);
         if(!bytes || bytes.length>PipelinePrewarmLimits::RecipeBytes || bytes.length>PipelinePrewarmLimits::Bytes-total) continue;
-        if(RecipeDigest(bytes.bytes,bytes.length)!=key)continue;
+        if(RecipeDigest(bytes.bytes,bytes.length)!=source_key)continue;
         id recipe=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
-        if(!RecipeSchema(recipe) || RecipeKey(recipe)!=key)continue;
+        if(!RecipeSchema(recipe) || RecipeKey(recipe)!=source_key)continue;
+        seen_sources.insert(source_key);
+        // Derive the selected source variant only after validating the stored
+        // hash/schema. Persist a new key after compilation; never edit inputs.
+        if(constant_mapping) {
+            NSMutableDictionary* selected=[recipe mutableCopy];bool changed=false;
+            for(NSString* field in @[@"source",@"vertex",@"fragment"]) {
+                NSString* value=selected[field];if(![value isKindOfClass:NSString.class])continue;
+                std::string source(value.UTF8String,[value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+                if(source.find('\0')!=std::string::npos)continue;
+                if(ConstantMemoryMap::Apply(source)){selected[field]=@(source.c_str());changed=true;}
+            }
+            if(changed){recipe=selected;bytes=RecipeData(recipe);}
+        }
+        if(!bytes || bytes.length>PipelinePrewarmLimits::RecipeBytes || bytes.length>PipelinePrewarmLimits::Bytes-total)continue;
+        const auto key=RecipeKey(recipe);
+        if(key.empty() || admitted.contains(key))continue;
         admitted.insert(key);total+=bytes.length;++count;
-        const bool imported=entry.priority!=0;
+        const bool imported=entry.priority!=0 || key!=source_key;
         imported ? ++imported_count : ++stable_count;
         const auto queued_bytes=bytes.length;
         {std::lock_guard guard(warm_lock);++warm_stats.loaded;++warm_queued_count;warm_queued_bytes+=queued_bytes;}

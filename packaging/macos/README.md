@@ -43,8 +43,9 @@ BB_MAC_CPU=bbcpu BB_DATA_DIR=out/macos-native-data \
 The example uses separate player data. `BB_MAC_NATIVE_RUNTIME_DIR` overrides
 `out/macos-native-runtime`. The native executable needs no Rosetta; only its
 synthetic differential CPU test uses Rosetta for reference answers. Native
-gameplay is unverified, and the x86 checkpoint continuation provider remains
-specific to the Rosetta build. `BB_MAC_CPU=rosetta` selects the existing default.
+gameplay has passed focused native-1080p Dream and area-transition replays;
+broader compatibility remains unverified. The x86 checkpoint continuation
+provider remains specific to the Rosetta build. `BB_MAC_CPU=rosetta` selects the existing default.
 The [upstream integration report](../../docs/MACOS_NATIVE_UPSTREAM_2026-10-22.md)
 records the imported sources, command-writer guards, tests and remaining limits.
 
@@ -184,6 +185,18 @@ This separate process uses all four workers and reports its progress. It does
 not launch the game or modify its dump or saves. It compiles previously observed
 variants using Metal's managed cache; new variants can still compile on first
 encounter. The live renderer retains its background worker policy.
+
+For the experimental immutable mapping specialization, use
+`BB_METAL_CONSTANT_MEMORY_MAP=1` for both precompilation and gameplay. The
+precompiler derives the matching source recipes into a separate bounded cache
+namespace, preserving the ordinary recipes. Switching it off reuses the
+ordinary bank. This changes only mapping metadata, not guest payload access.
+
+The native arm64 runtime additionally supports `BB_METAL_NATIVE_SIMD_HASH=1`
+for full-byte NEON texture change checks; Rosetta retains its existing detector.
+Both switches default off. CPU and GPU fixtures verify correctness, but isolated
+timing gains do not establish a gameplay FPS gain. See the
+[throughput measurements](../../docs/MACOS_METAL_THROUGHPUT_2026-10-23.md).
 
 `BB_METAL_SHADER_PREWARM=0` disables automatic in-game prewarming. GPU label waits now park on
 completion notifications, detect invalid mappings and report failures. Supported

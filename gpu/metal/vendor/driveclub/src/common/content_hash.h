@@ -4,7 +4,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <vector>
+#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON)
+#define XXH_INLINE_ALL
+#include "xxhash/xxhash.h"
+#endif
 #if defined(__x86_64__)
 #include <nmmintrin.h>
 #elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
@@ -71,7 +76,23 @@ inline bool HasHardware() {
 inline bool HasHardware() { return false; }
 #endif
 
+// Choose once per process: upload snapshots and later comparisons must use
+// the same detector. These hashes are not stored in shader recipes or saves.
+inline bool NativeSimd() {
+#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON)
+    static const bool enabled=[] {
+        const char* value=std::getenv("BB_METAL_NATIVE_SIMD_HASH");
+        return value && value[0]=='1' && !value[1];
+    }();
+    return enabled;
+#else
+    return false;
+#endif
+}
 inline std::uint64_t Bytes(const void* data,std::size_t size) {
+#if defined(__APPLE__) && defined(__aarch64__) && defined(__ARM_NEON)
+    if(NativeSimd())return XXH3_64bits(data,size);
+#endif
 #if defined(__x86_64__) || (defined(__aarch64__) && defined(__ARM_FEATURE_CRC32))
     if (HasHardware()) return Hardware(data,size);
 #endif

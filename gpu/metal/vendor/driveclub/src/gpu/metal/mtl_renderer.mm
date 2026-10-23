@@ -6418,6 +6418,7 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
 }
 
 MetalRenderer::MetalRenderer(Device &device) : impl(std::make_unique<Impl>()) {
+  if(ContentHash::NativeSimd())DC_INFO("gpu texture validation: native NEON XXH3 (complete byte coverage)");
   impl->execution=Execution();
   impl->device = (__bridge id<MTLDevice>)device.Handle();
   impl->queue = (__bridge id<MTLCommandQueue>)device.Queue();

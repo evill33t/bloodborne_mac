@@ -12,6 +12,7 @@
 
 #include "common/log.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/constant_memory_map.h"
 
 namespace Gpu::Metal {
 
