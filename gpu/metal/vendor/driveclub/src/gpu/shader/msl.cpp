@@ -651,14 +651,29 @@ bool ProveWindConsumedSite(const Program& p) {
        p.num_user_sgprs<8 || p.code.empty() || !p.unsupported.empty())return false;
     struct Site {u32 pc;Smrd op;u16 dst,base;u32 offset;};
     constexpr Site sites[]={{0x000c,Smrd::S_LOAD_DWORDX8,16,6,0},
+        {0x0010,Smrd::S_BUFFER_LOAD_DWORD,0,12,20},
         {0x001c,Smrd::S_BUFFER_LOAD_DWORDX4,12,20,32},
         {0x14b4,Smrd::S_LOAD_DWORDX4,0,6,8},
-        {0x14ec,Smrd::S_BUFFER_LOAD_DWORDX16,8,0,200}};
+        {0x14e8,Smrd::S_BUFFER_LOAD_DWORD,4,0,191},
+        {0x14ec,Smrd::S_BUFFER_LOAD_DWORDX16,8,0,200},
+        {0x14f8,Smrd::S_BUFFER_LOAD_DWORD,5,0,187},
+        {0x1500,Smrd::S_BUFFER_LOAD_DWORD,0,0,183}};
     for(const auto& site:sites) {
         unsigned matches=0;
         for(const auto& i:p.code)if(i.pc==site.pc) {
             if(i.enc!=Enc::SMRD || i.op!=u16(site.op) || i.size!=1 ||
                i.dst!=site.dst || i.sbase!=site.base || !i.imm || i.smrd_offset!=site.offset)return false;
+            ++matches;
+        }
+        if(matches!=1)return false;
+    }
+    for(unsigned row=0;row<3;++row) {
+        unsigned matches=0;
+        for(const auto& i:p.code)if(i.pc==0x00b4u+row*8u) {
+            if(i.enc!=Enc::MTBUF || i.op!=u16(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW) || i.size!=2 ||
+               i.vdata!=23+row*4 || i.vaddr!=row || i.srsrc!=16 || i.soffset!=Operand::Zero ||
+               i.offset || !i.idxen || i.offen || i.addr64 || i.glc || i.slc || i.tfe || i.lds ||
+               i.dfmt!=14 || i.nfmt!=7)return false;
             ++matches;
         }
         if(matches!=1)return false;
@@ -1219,6 +1234,9 @@ void Emitter::EmitSmrd(const Inst& i) {
     // Scalar loads ignore the low address bits: one translation for all dwords.
     std::string s = "{ " + GuestPointer() + " p_ = dc_ptr_n(mem, (" + base + " + ulong(" + off + ")) & ~3ul, " +
                     N(count * 4) + "u);";
+    // The last original camera load overwrites s0, which was part of its
+    // descriptor base. Save that register-derived base before the assignment.
+    if(wind_consumed && i.pc==0x1500u)s+=" const ulong dc_camera_leaf_ = "+base+";";
     for (u32 k = 0; k < count; ++k) {
         s += " " + SName(static_cast<u16>(i.dst + k)) + " = p_ ? p_[" + N(k) + "] : 0u;";
     }
@@ -1229,6 +1247,14 @@ void Emitter::EmitSmrd(const Inst& i) {
         for(u32 k=0;k<count;++k)s+=(k ? ", " : "")+SName(static_cast<u16>(i.dst+k));
         s+="}; dc_record_wind_site(dc_wind_record, "+N(i.pc==0x001cu ? 0 : 1)+
             "u, dc_observed_, "+base+", vid, iid, p_ != nullptr); }";
+    }
+    if(wind_consumed && i.pc==0x14e8u)s+=" dc_camera_z_mapped = p_ != nullptr;";
+    if(wind_consumed && i.pc==0x14f8u)s+=" dc_camera_y_mapped = p_ != nullptr;";
+    if(wind_consumed && i.pc==0x1500u) {
+        // Original camera X/Y/Z are already in s0/s5/s4. Preserve the success
+        // of ALL three original loads; a zero from an earlier null is not a
+        // valid camera observation merely because the last load translated.
+        s+=" if ((vid & 63u) == 0u) { const uint dc_observed_[3] = {s0, s5, s4}; dc_record_wind_site(dc_wind_record, 2u, dc_observed_, dc_camera_leaf_, vid, iid, p_ != nullptr && dc_camera_y_mapped && dc_camera_z_mapped); }";
     }
     s += " }";
     if(simd_smrd) {
@@ -1782,6 +1808,14 @@ void Emitter::EmitBuffer(const Inst& i) {
         const std::string fetch = "dc_load_fmt(mem, a_, " + N(i.dfmt) + "u, " + N(i.nfmt) + "u)";
         if (op <= static_cast<u32>(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW)) {
             load_fmt(op + 1, fetch);
+            if(wind_consumed && i.pc==0x00c4u) {
+                // The original three loads have assigned v23..34; v0..2
+                // still contain their actual row indices. Never reread a row.
+                std::string observed="if ((vid & 63u) == 0u && exec_lo != 0u) { const uint dc_matrix_observed_[12] = {";
+                for(unsigned k=0;k<12;++k)observed+=(k ? ", " : "")+VName(23+k);
+                observed+="}; dc_record_wind_matrix(dc_wind_record, dc_matrix_observed_, uint4(s16, s17, s18, s19), uint3(v0, v1, v2), vid, iid); }";
+                Line(observed);
+            }
         } else if (i.dfmt == 4 || i.dfmt == 11 || i.dfmt == 13 || i.dfmt == 14) { // 32-bit stores
             const u32 n = op - static_cast<u32>(Mtbuf::TBUFFER_STORE_FORMAT_X) + 1;
             for (u32 k = 0; k < n; ++k) {
@@ -2348,6 +2382,7 @@ std::string Emitter::Run() {
     }
     dl("uint vcc_lo = 0u, vcc_hi = 0u, exec_lo = 0xffffffffu, exec_hi = 0xffffffffu, m0r = 0u, dc_null = 0u;");
     dl("bool scc = false;");
+    if(wind_consumed)dl("bool dc_camera_z_mapped = false, dc_camera_y_mapped = false;");
     std::vector<std::string> vinit(max_vgpr, "0u");
     if (o.tess_stage == TessStage::Local) {
         if (!vinit.empty()) vinit[0] = "dc_tp.base_vertex + dc_vertex";

@@ -164,11 +164,60 @@ int main() {
             renderer.Draw(regs,Gpu::DrawCall{.count=3});
         };
         sample_alias(8);if (!check(8,255)) return 1;
+
+        // Reading an old depth attachment is not a new write to its aliased
+        // allocation. A load-only bind after the R32 colour write above must
+        // keep sampling colour=1 rather than resurrecting old depth=.4.
+        const auto read_only_depth=[&](unsigned target) {
+            color(target);
+            regs[Reg::CB_COLOR0_BASE+Reg::CB_INFO]=(10u<<2)|(1u<<11);
+            regs[Reg::SPI_SHADER_COL_FORMAT]=9;
+            regs[Reg::SPI_SHADER_PGM_LO_PS]=uint32_t(uintptr_t(shader+64)>>8);
+            regs[Reg::DB_DEPTH_CONTROL]=0x72; // depth test ALWAYS, writes disabled
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        };
+        read_only_depth(12);
+        regs[Reg::DB_DEPTH_CONTROL]=0;
+        sample_alias(13);
+        if (!check(13,255)) {
+            fputs("Load-only depth binding displaced the newer colour writer\n",stderr);
+            return 1;
+        }
+
+        // The opposite transition must still become authoritative: changing
+        // the next draw from load-only to depth-writing uses the SAME render
+        // pass/attachments. Timestamping only clears or BeginPass would lose
+        // this actual write. Immutable vertex set 1 writes depth=.75.
+        read_only_depth(14);
+        regs[Reg::DB_DEPTH_CONTROL]=0x76;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_DEPTH_CONTROL]=0;
+        sample_alias(15);
+        if (!check(15,191)) {
+            fputs("An actual depth write in a previously read-only pass was not authoritative\n",stderr);
+            return 1;
+        }
+
+        // Restore a newer colour writer before the clear below. Clear load
+        // actions change stored depth even with the draw write bit disabled.
+        regs[Reg::SPI_SHADER_PGM_LO_PS]=uint32_t(uintptr_t(shader+64)>>8);
+        regs[Reg::CB_COLOR0_BASE+Reg::CB_BASE]=uint32_t((address+16384)>>8);
+        regs[Reg::CB_COLOR0_BASE+Reg::CB_INFO]=(4u<<2)|(7u<<8);
+        regs[Reg::SPI_SHADER_COL_FORMAT]=1;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        sample_alias(13);if (!check(13,255)) return 1;
         regs[Reg::CB_COLOR_CONTROL]=0;regs[Reg::CB_TARGET_MASK]=0;
         regs[Reg::DB_RENDER_CONTROL]=1;regs[Reg::DB_DEPTH_CONTROL]=2;
         renderer.Draw(regs,Gpu::DrawCall{.count=3});
         regs[Reg::DB_RENDER_CONTROL]=0;regs[Reg::DB_DEPTH_CONTROL]=0;
         sample_alias(9);if (!check(9,102)) return 1;
+        read_only_depth(12);
+        regs[Reg::DB_DEPTH_CONTROL]=0;
+        sample_alias(13);
+        if (!check(13,102)) {
+            fputs("Read-only depth use lost the authoritative clear value\n",stderr);
+            return 1;
+        }
         // An ordered GPU depth copy must also invalidate a destination's
         // existing bounds snapshot. Its source aliases an older colour image.
         const uint64_t destination=address+98304;
@@ -201,6 +250,88 @@ int main() {
         color(11);renderer.Draw(regs,Gpu::DrawCall{.count=3});
         if (!check(11,255)) return 1;
         assert(renderer.DepthBoundsCopyCount()==5);
-        puts("Metal depth: successive writes, read-only copy reuse and colour/shadow address reuse passed");
+
+        // Stencil has its own guest allocation. Writes and clears of that
+        // aspect must preserve Z and keep an existing depth-bounds snapshot.
+        const uint64_t stencil_depth=address+114688,stencil_bytes=address+118784;
+        regs[Reg::DB_Z_READ_BASE]=regs[Reg::DB_Z_WRITE_BASE]=uint32_t(stencil_depth>>8);
+        regs[Reg::DB_STENCIL_READ_BASE]=regs[Reg::DB_STENCIL_WRITE_BASE]=uint32_t(stencil_bytes>>8);
+        regs[Reg::DB_STENCIL_INFO]=1;
+        regs[Reg::DB_DEPTH_CLEAR]=std::bit_cast<uint32_t>(.4f);
+        regs[Reg::DB_STENCIL_CLEAR]=0;
+        regs[Reg::CB_COLOR_CONTROL]=0;regs[Reg::CB_TARGET_MASK]=0;
+        regs[Reg::DB_RENDER_CONTROL]=3;regs[Reg::DB_DEPTH_CONTROL]=2;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_RENDER_CONTROL]=0;
+        regs[Reg::SPI_SHADER_PGM_LO_PS]=uint32_t(uintptr_t(shader+64)>>8);
+        regs[Reg::DB_DEPTH_CONTROL]=0x7a; // bounds, depth test ALWAYS, no Z write
+        regs[Reg::DB_DEPTH_BOUNDS_MIN]=std::bit_cast<uint32_t>(.35f);
+        regs[Reg::DB_DEPTH_BOUNDS_MAX]=std::bit_cast<uint32_t>(.45f);
+        // Fresh colour outputs start black: rejection must not accidentally
+        // pass by retaining red pixels from an earlier fixture draw.
+        color(17);renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        if (!check(17,255)) return 1;
+        assert(renderer.DepthBoundsCopyCount()==6);
+
+        // ALWAYS stencil, REPLACE_OP=9 on every result, with Z writes off.
+        // A subsequent EQUAL=9 draw proves the stencil operation executed.
+        regs[Reg::DB_DEPTH_CONTROL]=0x7bu|(7u<<8);
+        regs[Reg::DB_STENCIL_CONTROL]=2u|(2u<<4)|(2u<<8);
+        regs[Reg::DB_STENCILREFMASK]=9u|(255u<<8)|(255u<<16)|(9u<<24);
+        color(13);renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_DEPTH_CONTROL]=0x7bu|(2u<<8); // stencil EQUAL
+        regs[Reg::DB_STENCIL_CONTROL]=0; // KEEP in every result
+        color(18);renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        if (!check(18,255)) {
+            fputs("Stencil-only replacement did not reach the following stencil test\n",stderr);
+            return 1;
+        }
+        assert(renderer.DepthBoundsCopyCount()==6);
+
+        // A stencil-only clear also preserves .4 Z and its cached bounds.
+        regs[Reg::CB_COLOR_CONTROL]=0;regs[Reg::CB_TARGET_MASK]=0;
+        regs[Reg::DB_RENDER_CONTROL]=2;regs[Reg::DB_DEPTH_CONTROL]=0;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_RENDER_CONTROL]=0;
+        regs[Reg::DB_DEPTH_CONTROL]=0x7bu|(2u<<8);
+        regs[Reg::DB_STENCILREFMASK]=(255u<<8)|(255u<<16); // EQUAL zero
+        color(19);renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        if (!check(19,255)) return 1;
+        assert(renderer.DepthBoundsCopyCount()==6);
+
+        // New R32 colour at the Z address is newer than the combined D/S
+        // texture. Mutating the SEPARATE stencil allocation must not promote
+        // that texture's old .4 depth over the colour's current value of one.
+        regs[Reg::DB_DEPTH_CONTROL]=0;
+        regs[Reg::CB_COLOR_CONTROL]=1u<<4;regs[Reg::CB_TARGET_MASK]=15;
+        regs[Reg::CB_COLOR0_BASE+Reg::CB_BASE]=uint32_t(stencil_depth>>8);
+        regs[Reg::CB_COLOR0_BASE+Reg::CB_INFO]=(4u<<2)|(7u<<8);
+        regs[Reg::SPI_SHADER_COL_FORMAT]=1;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::CB_COLOR0_BASE+Reg::CB_INFO]=(10u<<2)|(1u<<11);
+        regs[Reg::SPI_SHADER_COL_FORMAT]=9;
+        regs[Reg::DB_DEPTH_CONTROL]=1u|(7u<<8); // stencil ALWAYS, Z disabled
+        regs[Reg::DB_STENCIL_CONTROL]=2u|(2u<<4)|(2u<<8);
+        regs[Reg::DB_STENCILREFMASK]=9u|(255u<<8)|(255u<<16)|(9u<<24);
+        color(12);renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_DEPTH_CONTROL]=0;
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0]=uint32_t(stencil_depth>>8);
+        regs[Reg::SPI_SHADER_USER_DATA_PS_0+1]=uint32_t(stencil_depth>>40)|(4u<<20)|(7u<<26);
+        sample_alias(13);
+        if (!check(13,255)) {
+            fputs("Stencil-only write displaced the newer colour writer at the Z address\n",stderr);
+            return 1;
+        }
+        regs[Reg::CB_COLOR_CONTROL]=0;regs[Reg::CB_TARGET_MASK]=0;
+        regs[Reg::DB_RENDER_CONTROL]=2;
+        renderer.Draw(regs,Gpu::DrawCall{.count=3});
+        regs[Reg::DB_RENDER_CONTROL]=0;
+        sample_alias(15);
+        if (!check(15,255)) {
+            fputs("Stencil-only clear displaced the newer colour writer at the Z address\n",stderr);
+            return 1;
+        }
+        assert(renderer.DepthBoundsCopyCount()==6);
+        puts("Metal depth: successive writes, copy reuse, load-versus-clear writer authority, same-pass depth writes, colour/shadow aliases and independent stencil mutation passed");
     }
 }

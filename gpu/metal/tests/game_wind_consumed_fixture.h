@@ -17,16 +17,25 @@ inline Shader::Program SyntheticShape() {
     // program identity. --capture validates actual retained code+fetch bytes.
     Shader::Program p;p.stage=Shader::Stage::Vertex;
     p.hash=Gpu::Metal::WindConsumed::ShaderHash;p.num_user_sgprs=16;
-    for(unsigned pc=0;pc<=0x14f0;pc+=4) {
+    for(unsigned pc=0;pc<=0x1504;) {
         Inst i;i.pc=pc;i.enc=Enc::SOPP;i.op=u16(Sopp::S_NOP);
         switch(pc) {
         case 0x000c:i.enc=Enc::SMRD;i.op=u16(Smrd::S_LOAD_DWORDX8);i.dst=16;i.sbase=6;i.imm=true;i.smrd_offset=0;break;
+        case 0x0010:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORD);i.dst=0;i.sbase=12;i.imm=true;i.smrd_offset=20;break;
         case 0x001c:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORDX4);i.dst=12;i.sbase=20;i.imm=true;i.smrd_offset=32;break;
         case 0x14b4:i.enc=Enc::SMRD;i.op=u16(Smrd::S_LOAD_DWORDX4);i.dst=0;i.sbase=6;i.imm=true;i.smrd_offset=8;break;
+        case 0x14e8:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORD);i.dst=4;i.sbase=0;i.imm=true;i.smrd_offset=191;break;
         case 0x14ec:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORDX16);i.dst=8;i.sbase=0;i.imm=true;i.smrd_offset=200;break;
-        case 0x14f0:i.op=u16(Sopp::S_ENDPGM);break;
+        case 0x14f8:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORD);i.dst=5;i.sbase=0;i.imm=true;i.smrd_offset=187;break;
+        case 0x1500:i.enc=Enc::SMRD;i.op=u16(Smrd::S_BUFFER_LOAD_DWORD);i.dst=0;i.sbase=0;i.imm=true;i.smrd_offset=183;break;
+        case 0x1504:i.op=u16(Sopp::S_ENDPGM);break;
+        }
+        if(pc==0x00b4 || pc==0x00bc || pc==0x00c4) {
+            const auto row=(pc-0x00b4)/8;i.enc=Enc::MTBUF;i.size=2;i.op=u16(Mtbuf::TBUFFER_LOAD_FORMAT_XYZW);
+            i.vdata=23+row*4;i.vaddr=row;i.srsrc=16;i.soffset=Operand::Zero;i.idxen=true;i.dfmt=14;i.nfmt=7;
         }
         p.code.push_back(i);
+        pc+=i.size*4;
     }
     return p;
 }

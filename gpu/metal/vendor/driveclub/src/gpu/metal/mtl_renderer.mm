@@ -3636,7 +3636,8 @@ struct MetalRenderer::Impl {
       rp.colorAttachments[k].storeAction = MTLStoreActionStore;
       rt.initialized = true;
       rt.clear_pending = false;
-      rt.written = seq;
+      if (rp.colorAttachments[k].loadAction == MTLLoadActionClear)
+        rt.written = seq;
       ps.color[k] = reinterpret_cast<u64>(&rt);
       ps.slice[k] = rt.bind_slice | (rt.bind_level << 24);
       w = std::min(w, std::max(rt.width >> rt.bind_level, 1u));
@@ -3668,7 +3669,11 @@ struct MetalRenderer::Impl {
       }
       depth->initialized = true;
       depth->clear_pending = false;
-      depth->written = seq;
+      // Loading an attachment preserves its old contents. Promoting it here
+      // would hide a newer colour/depth alias of the same guest allocation.
+      // This registry resolves the Z allocation. Stencil has a separate
+      // guest base, so a stencil-only clear does not replace its depth bytes.
+      if (clear) depth->written = seq;
       ps.depth = reinterpret_cast<u64>(depth);
       w = std::min(w, depth->width);
       h = std::min(h, depth->height);
@@ -5444,11 +5449,6 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
             vs_ud[6], vs_ud[7], vs_ud[8], vs_ud[9], vs_ud[10], vs_ud[11],
             vs_ud[12], vs_ud[13], vs_ud[14], vs_ud[15]);
   }
-  // A bounded draw compares against pre-draw depth, then may write new depth.
-  // Invalidate AFTER selecting its input copy, so the following light cannot
-  // reuse that now-stale copy. Read-only passes leave the revision untouched.
-  if (depth && (db_control & 6u) == 6u) ++depth->depth_revision;
-
   // Address proof and read ticket belong to the ACTUAL consumer command,
   // after all setup/index uploads. No guest descriptor/payload bytes are read.
   const auto prepare_vertex_root=[&] {
@@ -5469,9 +5469,6 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     [enc setFragmentBytes:&addresses length:sizeof(addresses) atIndex:Shader::Binding::StaticSmrd];
   };
   const auto note_stage_draw=[&] {
-    if(frame_generation_enabled.load(std::memory_order_relaxed) && frame_generation)
-      for(auto* target:colors)if(target)frame_generation->Draw((__bridge void*)target->tex,target->written,
-          target==colors[0] && frame_generation_display_copy);
     if(capture_wind)MarkWindCaptureDraw();
     if(stage_counter_pass) {
       // debug_fs replaces the translated fragment function without a compiler
@@ -5487,6 +5484,18 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       execution->Fail("Consumed-wind diagnostic could not bind its owned actual-consumer record.");
       return false;
     }
+    const bool depth_written = depth && (db_control & 6u) == 6u;
+    // Stamp possible writes on the actual encoded draw, including changes
+    // from read-only to writable state within the same render pass.
+    const u64 seq=++write_seq;
+    for(auto* target:colors)if(target)target->written=seq;
+    if(depth_written)depth->written=seq;
+    // Select the bounded draw's pre-draw snapshot first; only a depth write
+    // invalidates it for the following draw. Stencil-only writes leave it valid.
+    if(depth_written)++depth->depth_revision;
+    if(frame_generation_enabled.load(std::memory_order_relaxed) && frame_generation)
+      for(auto* target:colors)if(target)frame_generation->Draw((__bridge void*)target->tex,target->written,
+          target==colors[0] && frame_generation_display_copy);
     return true;
   };
   if (tessellated) {

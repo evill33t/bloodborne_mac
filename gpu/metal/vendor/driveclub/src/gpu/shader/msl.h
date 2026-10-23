@@ -114,7 +114,7 @@ struct MslOptions {
     // Vertex.
     bool rect_list = false; // expand RECTLIST: 3 vertices -> 2 triangles
     bool debug_capture = false; // write positions to buffer(6) (debugging)
-    // Bounded opt-in Dream VS diagnostic; already loaded wind/view words
+    // Bounded opt-in Dream VS diagnostic; already loaded wind/view/camera words
     // are recorded into private buffer14. Never used by an ordinary variant.
     bool wind_consumed = false;
     bool points = false;          // point list: VsOut carries [[point_size]]
