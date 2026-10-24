@@ -9,7 +9,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
     (void)table; (void)count; (void)name;
     return 0;
 }
-/* T4's mouse/hotkey API lives in the GPU library (gpu/shim/bbgpu.cpp), not linked into this
+/* T4's mouse/hotkey API lives in the GPU library (gpu/metal/game_input.mm), not linked into this
  * C-only test; stubbed as "no mouse, nothing to reload" so runtime_pad.c's calls into it are
  * harmless here. T5 will need a controllable stub instead, to test the mouse-to-stick path. */
 /* Controlled by the tests below via stub_mouse (T5): BbMouseInput as the window thread would

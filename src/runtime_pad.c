@@ -1,5 +1,5 @@
 /* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
- * by the window thread (gpu/shim/window.cpp); here state is only sampled.
+ * by the window thread (gpu/metal/game_input.mm); here state is only sampled.
  *
  * Bindings (keyboard, controller and mouse) come from input.ini, parsed by
  * runtime_input_config.c; see specs/keyboard-and-mouse/spec-design-keyboard-mouse-input.md.
@@ -454,7 +454,7 @@ static InputConfig default_config;
 static InputConfig *loaded_config; /* NULL until pad_open's first load; falls back to defaults */
 static int config_initialized;
 
-/* Button prompts (gpu/shim/bbport_prompts.cpp): the actions each of the game's key-guide icons
+/* Button prompts (shared input API; Mac texture replacement is not implemented): the actions each of the game's key-guide icons
  * stands for, in bbport_prompt_icons.h's order. Each icon is named after its role and shows a
  * button (KG_OK shows Circle): the keyboard icon is that button's key. */
 #define PROMPT_ICONS 20

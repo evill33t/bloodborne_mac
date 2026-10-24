@@ -1,106 +1,77 @@
-# Файловые моды
+# External mods and patches on macOS
 
-В лаунчере появилась группа **Моды**: выбор папки, общий переключатель,
-включение каждого мода и стрелки порядка загрузки. Изменения применяются при
-следующем запуске. Нижний включённый мод имеет больший приоритет; при совпадении
-файлов в журнале выводится, какой мод заменил предыдущий.
+The source game and DLC dump stay read-only. The Mac Mods page and native
+settings manage loose-file overlays, patches and plugins; several changes need a
+restart. The default writable root is `out/macos-data/`, overridden by
+`BB_DATA_DIR`. See [the Mac guide](../packaging/macos/README.md) for settings.
 
-По умолчанию используется `bbport/mods/`, а в AppImage —
-`~/.local/share/bbport/mods/`. Распакуйте скачанный мод так:
+## Loose-file mods
+
+Place extracted mods below the data root's `mods/` directory:
 
 ```text
 mods/
-  Название мода/
+  My Mod/
     dvdroot_ps4/
       chr/...
       param/...
       menu/...
 ```
 
-Также принимаются:
+The loader also accepts an `app0/` or title-ID wrapper, one archive wrapper
+folder, or bare game asset folders such as `chr/`, `parts/`, `param/` and `sfx/`.
+ZIP/7z archives must be extracted first. Names match case-insensitively, including
+mods assembled on a case-sensitive filesystem. Replacement `.dcx`/`.bnd` files
+are taken whole; their contents are not merged.
 
-- `Название мода/app0/dvdroot_ps4/...` и `Название мода/CUSA03173/dvdroot_ps4/...`;
-- лишняя папка-обёртка, как после распаковки архива в папку с его именем:
-  `Название мода/Название мода v1.2/dvdroot_ps4/...` (рядом могут лежать readme/картинки);
-- мод без `dvdroot_ps4`, в котором сразу лежат папки игры: `Название мода/chr/...`,
-  `Название мода/parts/...` (`chr`, `parts`, `map`, `menu`, `msg`, `param`, `sfx`,
-  `sound`, `font` и другие папки `dvdroot_ps4`).
+The profile in `mods.json` controls order and disabled folders:
 
-Регистр имён в моде не важен: `DVDROOT_PS4/Chr/C0000.chrbnd.dcx` из мода, собранного
-под Windows, заменяет игровой `dvdroot_ps4/chr/c0000.chrbnd.dcx`. Раньше такой файл
-добавлялся рядом под своим именем, и игра его не видела. В журнале запуска видно, сколько
-файлов игры мод заменил и сколько добавил: `Mods: 12 game files replaced, 0 added`.
-Если мод должен заменять файлы, а пишет `0 game files replaced`, проверьте пути внутри мода.
-Архивы ZIP/7z нужно предварительно распаковать. Поддерживаются готовые замены
-файлов `dvdroot_ps4`: текстуры, модели, параметры, интерфейс, звук и шрифты.
-Менеджер не объединяет содержимое двух одинаковых `.dcx`/`.bnd` файлов: последняя
-замена выигрывает целиком.
+```json
+{"order": ["First Mod", "Second Mod"], "disabled": ["First Mod"]}
+```
 
-Для уже подготовленной папки shadPS4 работает соседний каталог
-`CUSA03173-mods/dvdroot_ps4/...` рядом с `CUSA03173/`. Он подключается автоматически
-перед модами из списка. Общий переключатель выключает и его. Можно также выбрать
-папку, непосредственно содержащую `dvdroot_ps4`, как папку модов; такая папка
-подключается целиком, без списка отдельных модов.
-Соглашение `-mods` проверено по
-[исходникам shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/file_sys/fs.cpp).
-
-Оригиналы игры не перезаписываются. На время запуска создаётся отдельное
-объединённое дерево ссылок в каталоге данных `out/mod-game-*`; чтение, stat и
-перечисление каталогов видят выбранные замены и остальные оригинальные файлы.
-Игровые `/app0` и `/hostapp` доступны только для чтения. Сохранения остаются
-в прежней папке и доступны для записи. При обычном завершении или остановке
-лаунчером временное дерево удаляется. После SIGKILL/аварийного отключения оно
-может остаться; такие каталоги не используются в следующем запуске.
-
-Моды с заменой `eboot.bin`, `sce_module` или `sce_sys`, инжекторы DLL и скриптовые
-плагины этим загрузчиком не поддерживаются. Патчи исполняемого кода остаются
-в существующей системе `patches/` / `BB_PATCHES`. Символьные ссылки внутри мода
-не принимаются. Совместимость конкретного мода с CUSA03173 1.09 определяется
-его автором.
-
-Для запуска из терминала:
+Later enabled mods win when two replace the same file. New folders join the end
+in alphabetical order. A sibling `CUSA00900-mods/dvdroot_ps4/` is loaded before
+profile-selected mods. A selected mod root that directly contains `dvdroot_ps4/`
+is also accepted. `BB_MODS_ENABLED=0` disables loose mods, including the sibling.
 
 ```sh
-BB_GAME_DIR=/path/to/CUSA03173 BB_MODS_DIR=/path/to/mods bash run.sh
-BB_GAME_DIR=/path/to/CUSA03173 BB_MODS_ENABLED=0 bash run.sh
+BB_GAME_DIR=/path/to/CUSA00900 BB_MODS_DIR=/path/to/mods bash run.sh
+BB_GAME_DIR=/path/to/CUSA00900 BB_MODS_ENABLED=0 bash run.sh
 ```
 
-Порядок и отключения сохраняются в каталоге данных `mods.json`:
+`BB_MODS_CONFIG` overrides the profile path. A private symlink view in
+`prepared/mod-game-*` combines the original files with replacements. The loader
+expands only directories it must change, and cleans up its own view on normal
+exit. A forced termination can leave a view behind; later runs create a new one.
+The runtime exposes `/app0` and `/hostapp` read-only and keeps saves separate.
+
+Symlinks inside a mod and replacements for `eboot.bin`, `sce_module` or `sce_sys`
+are rejected. Windows junctions, hard-link fallbacks and DLL injectors are not
+part of this path. `BB_MOD_TRACE=1` logs initial file reads.
+
+## Executable patches
+
+External patches live in the data root's `patches/` folder. The Mac runtime
+accepts supported XML and TOML patches for the verified 1.09 layout; it checks
+addresses, original bytes where required, and conflicts with installed timing
+hooks before writing the generated image. Source executables stay unchanged.
+
+`patches.json` stores the enabled and disabled selections:
 
 ```json
-{"order": ["Первый", "Второй"], "disabled": ["Первый"]}
+{"enabled": ["extra.xml/My Patch"], "disabled": ["extra.xml/Other Patch"]}
 ```
 
-Новые папки включаются автоматически и добавляются в конец по алфавиту.
-`BB_MODS_CONFIG` меняет путь профиля. `BB_MOD_TRACE=1` с `BB_MODS_DIR` выводит
-первые чтения реально подключённых файлов для диагностики.
+`BB_PATCHES_DIR` and `BB_PATCHES_CONFIG` override those paths. Unsupported mask
+searches and invalid addresses are rejected. A matching SFO version alone does
+not establish executable compatibility. The preparation report records patch
+analysis in `macos-patch-analysis.json`.
 
-# Сторонние патчи (XML shadPS4)
+## Plugins and player data
 
-Папка `patches/` в каталоге данных (в AppImage — `~/.local/share/bbport/patches/`, в лаунчере
-группа **Сторонние патчи**, там же можно выбрать другую папку). Подходят XML-файлы патчей в
-формате shadPS4/GoldHEN: берутся `Metadata` для `AppVer="01.09"` и `eboot.bin`, файлы с
-`TitleID` других игр пропускаются. Включение по умолчанию — из `isEnabled` файла, выбор в
-лаунчере сохраняется в `patches.json` каталога данных:
-
-```json
-{"enabled": ["файл.xml/Имя патча"], "disabled": ["файл.xml/Другой патч"]}
-```
-
-Поддерживаются строки `bytes`, `bytes16/32/64`, `float32/64`, `utf8`, `utf16`.
-Патч со строками `mask` (поиск по шаблону) или с адресом вне eboot пропускается целиком,
-с сообщением в журнале. Сторонние патчи применяются после встроенных
-(`patches/Bloodborne.xml`): при пересечении побеждает сторонний. Из терминала:
-`BB_PATCHES_DIR=/путь BB_PATCHES_CONFIG=/путь/patches.json bash run.sh`.
-
-Патчи, которые заменяют указатели в таблицах (как `60 FPS++` и `90 FPS++`), загрузчик
-переносит на реальный адрес образа. Раньше такие патчи останавливали запуск ошибкой
-`patch overlaps a relocation`.
-
-# Резкость TAA
-
-Настройки `sharpen` и `sharpness` теперь работают также для TAA, в лаунчере и
-меню игры. Диапазон — **0…1**; при 0 или выключенном переключателе дополнительного
-прохода нет. RCAS применяется к готовой сцене перед HUD. В историю TAA сохраняется
-цвет до повышения резкости, чтобы она не усиливалась при повторном накоплении.
-Ровные участки сохраняют исходный цвет, включая HDR; дополнительный буфер не нужен.
+The selected randomizer, boss-rush, mutator and debug-menu plugins build as
+macOS `.dylib` modules for the chosen runtime architecture. Configure them through
+the Mac integration rather than copying Windows `.dll` or Linux `.so` files.
+Plugin and parameter changes can persist in game saves. Existing saves and trophy
+history remain in the selected user directory; use copies for experiments.

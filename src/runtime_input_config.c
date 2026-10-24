@@ -296,7 +296,7 @@ static void ParseMouseToJoystick(InputConfig *cfg, const char *value) {
 }
 
 /* mouse_camera = direct|stick: direct writes the game's camera angles from mouse motion
- * (gpu/shim/bloodborne_cam.cpp, game 1.09), stick keeps the mouse-to-joystick emulation.
+ * when a host adapter supports it; the Mac adapter currently falls back to stick mode.
  * Direct still needs mouse_to_joystick (it is the stick used while locked on). */
 static void ParseMouseCamera(InputConfig *cfg, const char *value) {
     if (EqualsCaseInsensitive(value, "direct")) cfg->mouse.camera_direct = 1;

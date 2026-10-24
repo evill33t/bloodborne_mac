@@ -48,6 +48,8 @@ static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
 
+#include "throw_audit.inc"
+
 static __attribute__((noreturn)) void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
@@ -675,6 +677,7 @@ int main(int argc, char **argv) {
 #ifdef BB_CPU_TRANSLATOR
     bbcpu_add_guest_code((uintptr_t)traps,round_page((import_count+1)*32));
     bbcpu_set_tls_displacement(0);
+    if(native_libc)install_throw_audit(segments,ns,bindings,binding_kinds);
 #endif
     if (!cpu_only) {
         extern void bbmac_features_segment(uint64_t,uint64_t,uint32_t);

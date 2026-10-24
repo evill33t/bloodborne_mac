@@ -2,7 +2,7 @@
  * builder functions are imports, but games may also build chunks inline), and
  * run synchronously at submission: decoding a batch takes well under a
  * millisecond, so waiting always finds it complete. ATRAC9 is decoded by
- * LibAtrac9 (MIT, third_party/LibAtrac9). MP3/AAC instances stop explicitly. */
+ * LibAtrac9 (MIT, fetched by the macOS CMake targets). MP3/AAC instances stop explicitly. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
