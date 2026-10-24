@@ -737,8 +737,10 @@ struct MetalRenderer::Impl {
   TextureWriteJournal texture_write_journal{TextureWriteJournal::ConfiguredLimit(
       std::getenv("BB_METAL_TEXTURE_JOURNAL_RECORDS")),0,
       native_texture_coherence && TextureWriteJournal::PageIndexEnabled(
-          std::getenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX")) ? Core::Memory::kDirectSize : 0};
+          std::getenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX")) ? Core::Memory::kDirectSize : 0,
+      TextureWriteJournal::PageIndexUsesBoundedHistory(std::getenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX"))};
   u64 texture_coherence_checks=0,texture_coherence_refreshes=0,texture_coherence_waits=0;
+  u64 texture_indexed_frame_checks=0;
   WorldFrameQueue world_frames;
   const unsigned world_frame_limit=WorldFrameQueue::ConfiguredLimit();
   id<MTLComputePipelineState> indirect_draw_adapter=nil;
@@ -3130,7 +3132,15 @@ struct MetalRenderer::Impl {
       if(force_content_check)++texture_coherence_refreshes;
     }
     if (e.tex) {
-      if (!gpu_source && e.hash_baseline_valid && !TextureChanged(e,key,addr,size,force_content_check)) {
+      // The optional indexed journal avoids false full checks caused by
+      // forgotten unrelated writes. It cannot observe raw guest CPU stores:
+      // retain a complete byte comparison on first use in EVERY frame, even
+      // for a cold texture. Existing same-frame descriptor reuse remains
+      // guarded by mapping identity and the complete physical write history.
+      const bool complete=force_content_check || (texture_write_journal.FullFrameValidation() && e.frame!=frame_count);
+      if(!gpu_source && e.hash_baseline_valid && texture_write_journal.FullFrameValidation() && e.frame!=frame_count)
+        ++texture_indexed_frame_checks;
+      if (!gpu_source && e.hash_baseline_valid && !TextureChanged(e,key,addr,size,complete)) {
         e.frame = frame_count;
         RememberTextureSource(e,addr,size,generation);
         return view();
@@ -5386,16 +5396,18 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
   UpdateMemMap();
   id<MTLBuffer> draw_map=mem_map;
   const u64 draw_map_generation=mem_map_gen;
-  [enc setVertexBytes:vud length:64 atIndex:Shader::Binding::UserData];
+  if(binding_cache.Bytes(false,Shader::Binding::UserData,vud,64))
+    [enc setVertexBytes:vud length:64 atIndex:Shader::Binding::UserData];
   if(binding_cache.Buffer(false,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
     [enc setVertexBuffer:mem[0] offset:0 atIndex:Shader::Binding::Mem0];
   if(binding_cache.Buffer(false,Shader::Binding::Mem1,(__bridge const void*)mem[1]))
     [enc setVertexBuffer:mem[1] offset:0 atIndex:Shader::Binding::Mem1];
   if(binding_cache.Buffer(false,Shader::Binding::MemMap,(__bridge const void*)draw_map))
     [enc setVertexBuffer:draw_map offset:0 atIndex:Shader::Binding::MemMap];
-  [enc setVertexBytes:&consts
-               length:sizeof(consts)
-              atIndex:Shader::Binding::Draw];
+  if(binding_cache.Bytes(false,Shader::Binding::Draw,&consts,sizeof(consts)))
+    [enc setVertexBytes:&consts
+                 length:sizeof(consts)
+                atIndex:Shader::Binding::Draw];
   if (tessellated) {
     if (tess.native) {
       [enc setVertexBytes:tess.local_ud.data() length:64 atIndex:Shader::Binding::TessLocalUserData];
@@ -5413,7 +5425,8 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
       [enc setVertexSamplerState:vs_res.smp[u] atIndex:u];
   }
   if (ps) {
-    [enc setFragmentBytes:pud length:64 atIndex:Shader::Binding::UserData];
+    if(binding_cache.Bytes(true,Shader::Binding::UserData,pud,64))
+      [enc setFragmentBytes:pud length:64 atIndex:Shader::Binding::UserData];
     if(fo.static_smrd) [enc setFragmentBytes:static_smrd_packed.words.data()
         length:static_smrd_packed.count*sizeof(u32) atIndex:Shader::Binding::StaticSmrd];
     if(binding_cache.Buffer(true,Shader::Binding::Mem0,(__bridge const void*)mem[0]))
@@ -6042,6 +6055,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   auto shadow_clear=PrepareShadowHtileClear(*cs,cud,gx,gy,gz,tx,ty,tz,bool(indirect));
   EnsureCommandBuffer();
   UpdateMemMap();
+  EncodeShadowHtileDecision(shadow_clear);
   id<MTLComputeCommandEncoder> e=nil;
   std::optional<StageCounterTimeline::Pass> compute_counter;
   if(stage_counter_log && stage_counter_log->ComputeEnabled()) {
@@ -6322,6 +6336,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
             unsigned(texture_write_journal.PageIndexActive()),texture_write_journal.PageIndexExtent(),
             texture_write_journal.PageIndexBytes(),journal.indexed_queries,journal.page_checks,
             journal.page_updates,journal.index_allocation_failures);
+        DC_INFO("gpu texture journal blocks: checks=%llu updates=%llu full-frame-checks=%llu (cumulative; 64-page summaries; complete first-use validation)",
+            journal.block_checks,journal.block_updates,texture_indexed_frame_checks);
       }
       if(native_worklist_extent) DC_INFO("gpu worklist extents: %llu refined, %llu conservative fallbacks "
           "[context=%llu layout=%llu input=%llu overflow=%llu output=%llu self=%llu capacity=%llu] (cumulative)",
@@ -6349,6 +6365,8 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           binding_cache.buffer_counts.skipped,binding_cache.buffer_counts.intended,
           binding_cache.texture_counts.skipped,binding_cache.texture_counts.intended,
           binding_cache.sampler_counts.skipped,binding_cache.sampler_counts.intended);
+      if(binding_cache.inline_enabled) DC_INFO("gpu inline binding cache: %llu/%llu APIs skipped/intended (cumulative)",
+          binding_cache.inline_counts.skipped,binding_cache.inline_counts.intended);
       stat_upload_base=upload_allocations.load(std::memory_order_relaxed);
       stat_hashed = 0;
       stat_depth_copies = 0;

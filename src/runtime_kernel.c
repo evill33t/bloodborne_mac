@@ -3,6 +3,7 @@
  * use FreeBSD numbering; host errno values never reach the guest directly. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_modules.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -360,4 +361,7 @@ static const RuntimeExport exports[]={
     {"pthread_key_create",posix_key_create}, {"pthread_key_delete",posix_key_delete},
     {"pthread_setspecific",posix_key_set}, {"pthread_getspecific",key_get},
 };
-uintptr_t runtime_kernel_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
+uintptr_t runtime_kernel_resolve(const char *name) {
+    const uintptr_t result=RUNTIME_LOOKUP(exports,name);
+    return result ? result : runtime_modules_resolve(name);
+}

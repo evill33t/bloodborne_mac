@@ -11,6 +11,7 @@
 #include "cpu/bbcpu.h"
 #endif
 #include "runtime.h"
+#include "runtime_modules.h"
 #include "runtime_trophy.h"
 #include "gpu/bbgpu.h"
 #if (!defined(__x86_64__) && !defined(BB_CPU_TRANSLATOR)) || !defined(__GNUC__)
@@ -624,7 +625,7 @@ int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
     char magic[8];
-    if (fread(magic, 1, 8, f) != 8 || (memcmp(magic, "BBPROBE1", 8) && memcmp(magic, "BBPROBE2", 8) && memcmp(magic,"BBPROBE3",8) && memcmp(magic,"BBPROBE4",8) && memcmp(magic,"BBPROBE5",8))) fail("bad boot file signature");
+    if (fread(magic, 1, 8, f) != 8 || (memcmp(magic, "BBPROBE1", 8) && memcmp(magic, "BBPROBE2", 8) && memcmp(magic,"BBPROBE3",8) && memcmp(magic,"BBPROBE4",8) && memcmp(magic,"BBPROBE5",8) && memcmp(magic,"BBPROBE6",8))) fail("bad boot file signature");
     uint64_t size = read64(f), entry = read64(f), ns = read64(f), nr = read64(f);
     import_count = read64(f);
     uint64_t capabilities = memcmp(magic, "BBPROBE1", 8) ? read64(f) : 0;
@@ -632,10 +633,13 @@ int main(int argc, char **argv) {
     runtime_start(strict_imports ? 0 : capabilities);
     if (!size || size > 512*1024*1024 || entry >= size || !ns || ns > 64 || nr > 1000000 || import_count > 100000)
         fail("boot file limits exceeded");
-    int multi=!memcmp(magic,"BBPROBE5",8);
+    int described=!memcmp(magic,"BBPROBE6",8);
+    int multi=!memcmp(magic,"BBPROBE5",8) || described;
     int linked=!memcmp(magic,"BBPROBE3",8) || !memcmp(magic,"BBPROBE4",8) || multi;
     int native_libc=linked && !strict_imports && (capabilities&1);
     uint64_t main_tls[4]={0};
+    RuntimeModuleInfo descriptions[RUNTIME_MODULE_LIMIT];
+    uint64_t description_count=0;
     uint64_t nb=0,procparam=0;
     uint64_t *bindings=calloc(import_count ? import_count : 1,sizeof(*bindings));
     uint64_t *binding_kinds=calloc(import_count ? import_count : 1,sizeof(*binding_kinds));
@@ -681,6 +685,13 @@ int main(int argc, char **argv) {
             bindings[index]=address; binding_kinds[index]=kind;
         }
     }
+    if(described) {
+        description_count=read64(f);
+        if(description_count!=module_count+1 || description_count>RUNTIME_MODULE_LIMIT)
+            fail("invalid module-info count");
+        if(fread(descriptions,sizeof(*descriptions),description_count,f)!=description_count)
+            fail("truncated module-info table");
+    }
     Segment *segments = calloc(ns, sizeof(*segments));
     Reloc *relocs = calloc(nr ? nr : 1, sizeof(*relocs));
     names = calloc(import_count ? import_count : 1, sizeof(*names));
@@ -708,6 +719,54 @@ int main(int argc, char **argv) {
         if (!mapped(segments,ns,modules[m].init,1) || (modules[m].tls_module && !mapped(segments,ns,modules[m].tls_address,modules[m].tls_memsz)))
             fail("unmapped module metadata");
     if (module_count && !mapped(segments,ns,procparam,64)) fail("unmapped procparam");
+    for(uint64_t n=0;n<description_count;++n) {
+        RuntimeModuleInfo *d=&descriptions[n];
+        const uint64_t begin=n ? modules[n-1].base : 0;
+        const uint64_t extent=n ? modules[n-1].size : modules[0].base;
+        if(d->size!=sizeof(*d) || d->id!=(int32_t)n || !memchr(d->name,0,sizeof(d->name)) ||
+           !d->segment_count || d->segment_count>4 || d->reserved1 || d->reserved2)
+            fail("invalid module-info metadata");
+        for(uint32_t k=0;k<d->segment_count;++k) {
+            const RuntimeModuleSegment *s=&d->segments[k];
+            if(s->address<begin || s->address-begin>=extent || s->size>extent-(s->address-begin))
+                fail("module-info segment outside its image");
+            int exact=0;
+            for(uint64_t i=0;i<ns;++i)
+                if(s->address==segments[i].address && s->size==segments[i].size &&
+                   s->prot==(int32_t)segments[i].flags)exact=1;
+            if(!exact)fail("module-info segment does not match a load segment");
+        }
+        uint64_t actual=0;
+        for(uint64_t i=0;i<ns;++i)if(segments[i].address>=begin && segments[i].address-begin<extent) {
+            ++actual;
+            int present=0;
+            for(uint32_t k=0;k<d->segment_count;++k)
+                if(d->segments[k].address==segments[i].address && d->segments[k].size==segments[i].size &&
+                   d->segments[k].prot==(int32_t)segments[i].flags)present=1;
+            if(!present)fail("incomplete module-info segment table");
+        }
+        if(actual!=d->segment_count)fail("incomplete module-info segment table");
+        const uint64_t tls_address=n ? modules[n-1].tls_address : main_tls[0];
+        const uint64_t tls_filesz=n ? modules[n-1].tls_filesz : main_tls[1];
+        const uint64_t tls_memsz=n ? modules[n-1].tls_memsz : main_tls[2];
+        const uint64_t tls_index=n ? modules[n-1].tls_module : (main_tls[2] ? 1 : 0);
+        if(d->tls_init_addr!=tls_address || d->tls_init_size!=tls_filesz ||
+           d->tls_size!=tls_memsz || d->tls_index!=tls_index)
+            fail("module-info TLS metadata mismatch");
+        /* Each nonempty unwind range must remain within this image's actual
+         * segments, rather than merely inside the aggregate boot allocation. */
+        const uint64_t addresses[]={d->eh_frame_hdr_addr,d->eh_frame_addr,d->init_proc_addr,d->fini_proc_addr};
+        const uint64_t lengths[]={d->eh_frame_hdr_size,d->eh_frame_size,!!d->init_proc_addr,!!d->fini_proc_addr};
+        for(unsigned field=0;field<4;++field)if(lengths[field]) {
+            int inside=0;
+            for(uint32_t k=0;k<d->segment_count;++k) {
+                const RuntimeModuleSegment *s=&d->segments[k];
+                if(addresses[field]>=s->address && lengths[field]<=s->size &&
+                   addresses[field]-s->address<=s->size-lengths[field])inside=1;
+            }
+            if(!inside)fail("unmapped module-info unwind/init range");
+        }
+    }
     for (uint64_t i=0;i<import_count;++i) {
         if (!bindings[i]) continue;
         if (!mapped(segments,ns,bindings[i],1)) fail("unmapped native export");
@@ -731,6 +790,18 @@ int main(int argc, char **argv) {
 #endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    for(uint64_t n=0;n<description_count;++n) {
+        RuntimeModuleInfo *d=&descriptions[n];
+        for(uint32_t k=0;k<d->segment_count;++k)d->segments[k].address+=(uintptr_t)image;
+        if(d->tls_size)d->tls_init_addr+=(uintptr_t)image;
+        if(d->init_proc_addr)d->init_proc_addr+=(uintptr_t)image;
+        if(d->fini_proc_addr)d->fini_proc_addr+=(uintptr_t)image;
+        if(d->eh_frame_hdr_size)d->eh_frame_hdr_addr+=(uintptr_t)image;
+        if(d->eh_frame_size)d->eh_frame_addr+=(uintptr_t)image;
+    }
+    if(description_count && runtime_modules_install(descriptions,description_count))
+        fail("invalid loaded module-info metadata");
+    if(description_count)printf("Loaded %" PRIu64 " module-info records with bounded unwind metadata\n",description_count);
     if (!cpu_only) {
         char title[128]="Bloodborne", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;

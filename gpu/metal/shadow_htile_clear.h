@@ -5,11 +5,13 @@
 // only after proving that the original kernel will replace EVERY word. Its
 // low-nibble-13 preservation branch must never be silently discarded.
 #include "gpu/shader/program.h"
+#include "src/runtime_gpu_memory.h"
 #include <array>
 #include <bit>
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace Gpu::Metal::ShadowHtileClear {
 using Word=std::uint32_t;
@@ -20,6 +22,20 @@ inline constexpr Address MetadataBytes=Address(Words)*4;
 // Live original CS14 probes in two frames: count=0x40000, value=0xfffffff0.
 // DB_DEPTH_CLEAR is 1.0. Do not broaden to a guessed min/max encoding.
 inline constexpr Word ClearWord=0xfffffff0u,DepthClearWord=0x3f800000u;
+inline constexpr Address DepthBytes=Address(Width)*Height*4;
+struct MappingSpan {
+    Address address=0,bytes=0,physical=0,identity=0;
+    bool operator==(const MappingSpan&) const=default;
+};
+inline void AppendMappingSpan(std::vector<MappingSpan>& spans,MappingSpan next) {
+    if(!spans.empty()) {
+        auto& last=spans.back();
+        if(last.address+last.bytes==next.address && last.physical+last.bytes==next.physical && last.identity==next.identity) {
+            last.bytes+=next.bytes;return;
+        }
+    }
+    spans.push_back(next);
+}
 
 inline auto Fields(const Shader::Gcn::Inst& i) {
     // Compare decoded values rather than padding in the C++ instruction struct.
@@ -99,13 +115,18 @@ struct CpuReadProof {
     Address address=0,bytes=0,generation_before=0,generation_after=0;
     bool ready=false;
 };
+struct GpuReadProof {
+    // The complete input is mapped in the actual consumer's ordered queue.
+    // CP stores, queued/active callback writes, unknown GPU writers and map
+    // changes are excluded, and its physical range is leased through completion.
+    Address address=0,bytes=0,generation_before=0,generation_after=0;
+    bool ready=false;
+};
 struct Plan {Address metadata,target,generation;Word depth_clear_word;};
-enum class Reject {None,Program,Surface,Dispatch,MetadataDescriptor,UniformDescriptor,Readiness,Uniform,PreservedTiles};
+enum class Reject {None,Program,Surface,Dispatch,MetadataDescriptor,UniformDescriptor,Readiness,Uniform,PreservedTiles,InputAlias};
 struct Decision {std::optional<Plan> plan;Reject reason=Reject::None;};
-inline Decision Recognize(const Shader::Program& program,std::span<const Word,16> user,
-    std::array<Word,3> groups,std::array<Word,3> threads,bool indirect,const Surface& surface,
-    const CpuReadProof& uniform_proof,std::array<Word,2> uniform,
-    const CpuReadProof& metadata_proof,std::span<const Word> metadata) {
+inline Decision RecognizeShape(const Shader::Program& program,std::span<const Word,16> user,
+    std::array<Word,3> groups,std::array<Word,3> threads,bool indirect,const Surface& surface) {
     const auto no=[](Reject why) {return Decision{{},why};};
     if(!ProgramEligible(program))return no(Reject::Program);
     if(!surface.metadata || !surface.target || !surface.mapping_generation || !surface.initialized ||
@@ -121,6 +142,17 @@ inline Decision Recognize(const Shader::Program& program,std::span<const Word,16
        Base(target)>((1ull<<40)-MetadataBytes))return no(Reject::MetadataDescriptor);
     if((control[0]&15) || (control[1]&0xffffff00u)!=0x00108000u || control[2]!=1 ||
        control[3]!=0x00077facu || !Base(control) || Base(control)>((1ull<<40)-8))return no(Reject::UniformDescriptor);
+    if(Base(control)<surface.metadata+MetadataBytes && surface.metadata<Base(control)+8)return no(Reject::InputAlias);
+    return {{Plan{surface.metadata,surface.target,surface.mapping_generation,DepthClearWord}},Reject::None};
+}
+inline Decision Recognize(const Shader::Program& program,std::span<const Word,16> user,
+    std::array<Word,3> groups,std::array<Word,3> threads,bool indirect,const Surface& surface,
+    const CpuReadProof& uniform_proof,std::array<Word,2> uniform,
+    const CpuReadProof& metadata_proof,std::span<const Word> metadata) {
+    auto shape=RecognizeShape(program,user,groups,threads,indirect,surface);
+    if(!shape.plan)return shape;
+    const auto no=[](Reject why) {return Decision{{},why};};
+    const auto control=user.subspan<8,4>();
     const auto safe=[&](const CpuReadProof& proof,Address address,Address bytes) {
         return proof.ready && proof.address==address && proof.bytes==bytes &&
             proof.generation_before==surface.mapping_generation && proof.generation_after==surface.mapping_generation;
@@ -129,6 +161,43 @@ inline Decision Recognize(const Shader::Program& program,std::span<const Word,16
        metadata.size()!=Words)return no(Reject::Readiness);
     if(uniform!=std::array<Word,2>{Words,ClearWord})return no(Reject::Uniform);
     for(Word value:metadata)if((value&15u)==13u)return no(Reject::PreservedTiles);
-    return {{Plan{surface.metadata,surface.target,surface.mapping_generation,DepthClearWord}},Reject::None};
+    return shape;
 }
+// This approves a GPU CONTENT TEST, never an unconditional depth clear. The
+// GPU must inspect the pre-RMW inputs and suppress the draw on either invalid
+// uniform or any preserved-13 word. No host copy or completed-writer wait.
+inline Decision RecognizeGpu(const Shader::Program& program,std::span<const Word,16> user,
+    std::array<Word,3> groups,std::array<Word,3> threads,bool indirect,const Surface& surface,
+    const GpuReadProof& uniform,const GpuReadProof& metadata) {
+    auto shape=RecognizeShape(program,user,groups,threads,indirect,surface);
+    if(!shape.plan)return shape;
+    const auto safe=[&](const GpuReadProof& proof,Address address,Address bytes) {
+        return proof.ready && proof.address==address && proof.bytes==bytes &&
+            proof.generation_before==surface.mapping_generation && proof.generation_after==surface.mapping_generation;
+    };
+    if(!safe(uniform,Base(user.subspan<8,4>()),8) || !safe(metadata,surface.metadata,MetadataBytes))
+        return {{},Reject::Readiness};
+    return shape;
+}
+inline constexpr const char* DecisionMsl=R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void main0(device const uint* uniform [[buffer(0)]],
+    device const uint* metadata [[buffer(1)]],device atomic_uint* args [[buffer(2)]],
+    uint tid [[thread_position_in_grid]]) {
+    if(tid>=262144u)return;
+    if((metadata[tid]&15u)==13u || (tid==0u &&
+        (uniform[0]!=262144u || uniform[1]!=0xfffffff0u)))
+        atomic_store_explicit(args,0u,memory_order_relaxed);
+}
+)MSL";
+inline constexpr const char* DepthMsl=R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+struct DepthVertex {float4 position [[position]];};
+vertex DepthVertex main0(uint tid [[vertex_id]]) {
+    const float2 positions[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};
+    return {float4(positions[tid],1.0f,1.0f)};
+}
+)MSL";
 } // namespace Gpu::Metal::ShadowHtileClear

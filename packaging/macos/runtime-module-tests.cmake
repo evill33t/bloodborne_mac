@@ -1,0 +1,5 @@
+add_executable(bb-runtime-module-tests "${BB_ROOT}/tests/test_runtime_modules.c" "${BB_ROOT}/src/runtime_modules.c")
+target_include_directories(bb-runtime-module-tests PRIVATE "${BB_ROOT}" "${BB_ROOT}/src")
+target_compile_options(bb-runtime-module-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-runtime-module-info COMMAND bb-runtime-module-tests)
+set_tests_properties(darwin-runtime-module-info PROPERTIES TIMEOUT 15)

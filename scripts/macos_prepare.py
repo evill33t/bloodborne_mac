@@ -83,6 +83,11 @@ def main():
         if script == 'content_profile.py':
             cmd += ['--sku', os.environ.get('BB_CONTENT_SKU', 'full')]
         subprocess.run(cmd, env=env, check=True)
+    # This path rebuilds on every preparation. Refuse stale/mismatched linker
+    # output instead of advertising unwind readiness for a legacy boot image.
+    with (out / 'boot-linked.bin').open('rb') as linked:
+        if linked.read(8) != b'BBPROBE6':
+            parser.error('Prepared boot image lacks BBPROBE6 module unwind metadata')
     elf = (out / 'eboot.elf').read_bytes()
     settings_path = args.settings or out.parent / 'macos-settings.ini'
     engine_timing = report['elf_sha256'] in ENGINE_ELF_HASHES

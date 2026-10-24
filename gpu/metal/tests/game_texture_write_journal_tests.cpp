@@ -3,7 +3,20 @@
 #include <array>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <new>
 #include <vector>
+
+namespace {thread_local int fail_allocation_after=-1;}
+void* operator new(std::size_t bytes) {
+    if(fail_allocation_after==0){fail_allocation_after=-1;throw std::bad_alloc();}
+    if(fail_allocation_after>0)--fail_allocation_after;
+    if(auto* memory=std::malloc(bytes ? bytes : 1))return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer)noexcept{std::free(pointer);}
+void* operator new[](std::size_t bytes){return ::operator new(bytes);}
+void operator delete[](void* pointer)noexcept{std::free(pointer);}
 
 using Gpu::Metal::TextureWriteJournal;
 using R=TextureWriteJournal::Range;
@@ -21,9 +34,11 @@ static void ConfigurationTests() {
     assert(J::ConfiguredLimit("00004096")==4096);
     assert(J::ConfiguredLimit("8192")==8192);
     assert(J(J::kMaximumRecords+1).Capacity()==8192);
-    for(const char* disabled:{"","0","true","01","1 ","-1"})assert(!J::PageIndexEnabled(disabled));
-    assert(!J::PageIndexEnabled(nullptr) && J::PageIndexEnabled("1"));
-    assert(!J{}.PageIndexActive());
+    for(const char* disabled:{"","0","true","01","1 ","-1","02","2 ","3"})assert(!J::PageIndexEnabled(disabled));
+    assert(!J::PageIndexEnabled(nullptr) && J::PageIndexEnabled("1") && J::PageIndexEnabled("2"));
+    for(const char* disabled:{"","0","1","true","02","2 ","-2","3"})assert(!J::PageIndexUsesBoundedHistory(disabled));
+    assert(!J::PageIndexUsesBoundedHistory(nullptr) && J::PageIndexUsesBoundedHistory("2"));
+    assert(!J{}.PageIndexActive() && !J{}.FullFrameValidation());
     J oversized(2,0,J::kMaximumIndexedExtent+1);assert(!oversized.PageIndexActive());
     J maximum(2,0,J::kMaximumIndexedExtent);
     assert(maximum.PageIndexActive() && maximum.PageIndexExtent()==(64ull<<30));
@@ -71,6 +86,144 @@ private:
     std::uint64_t epoch=0;
 };
 
+// Independent original bounded-deque policy using a vector, byte arithmetic
+// and its own watermark/coalescing logic. No production overlap/index helper.
+class LegacyBoundedHistory {
+public:
+    explicit LegacyBoundedHistory(std::size_t limit,std::uint64_t initial=0)
+        :capacity(std::min(limit,std::size_t(8192))),epoch(initial){}
+    void Publish(std::span<const R> ranges,bool unknown=false,bool cpu=false) {
+        bool any=unknown;
+        for(const auto range:ranges){any|=range.bytes!=0;unknown|=range.address>UINT64_MAX-range.bytes;}
+        if(!any)return;
+        if(epoch==UINT64_MAX){saturated=true;forgotten=epoch;records.clear();return;}
+        ++epoch;
+        const auto append=[&](R range,bool uncertain) {
+            if(!capacity){forgotten=epoch;return;}
+            if(records.size()==capacity){forgotten=std::max(forgotten,records.front().epoch);records.erase(records.begin());}
+            records.push_back({epoch,range,uncertain,cpu});
+        };
+        if(unknown){append({},true);return;}
+        for(const auto range:ranges)if(range.bytes) {
+            if(!records.empty()) {
+                auto& prior=records.back();
+                if(prior.epoch==epoch && !prior.unknown &&
+                    range.address<=prior.range.address+prior.range.bytes &&
+                    prior.range.address<=range.address+range.bytes) {
+                    const auto end=std::max(prior.range.address+prior.range.bytes,range.address+range.bytes);
+                    prior.range.address=std::min(prior.range.address,range.address);
+                    prior.range.bytes=end-prior.range.address;continue;
+                }
+            }
+            append(range,false);
+        }
+    }
+    TextureWriteJournal::Query Inspect(std::uint64_t checked,std::span<const R> source,bool complete=true) const {
+        if(saturated || checked>epoch || checked<forgotten)return {Relation::Unknown,true};
+        if(checked==epoch)return {Relation::Unchanged,false};
+        if(!complete)return {Relation::Unknown,true};
+        TextureWriteJournal::Query answer{Relation::Disjoint,false};
+        for(auto it=records.rbegin();it!=records.rend() && it->epoch>checked;++it) {
+            bool hit=it->unknown;
+            for(const auto range:source) {
+                if(!range.bytes || range.address>UINT64_MAX-range.bytes)return {Relation::Unknown,true};
+                hit|=range.bytes && it->range.bytes && range.address<it->range.address+it->range.bytes &&
+                    it->range.address<range.address+range.bytes;
+            }
+            if(hit) {
+                if(it->unknown)answer.relation=Relation::Unknown;
+                else if(answer.relation!=Relation::Unknown)answer.relation=Relation::Overlap;
+                answer.cpu_callbacks|=it->cpu;
+            }
+        }
+        return answer;
+    }
+    std::uint64_t Epoch()const{return epoch;}
+    std::uint64_t ForgottenThrough()const{return forgotten;}
+private:
+    struct Record {std::uint64_t epoch;R range;bool unknown,cpu;};
+    std::size_t capacity;
+    std::uint64_t epoch=0,forgotten=0;
+    bool saturated=false;
+    std::vector<Record> records;
+};
+
+static void CheckBounded(const TextureWriteJournal& indexed,const LegacyBoundedHistory& old,
+                         std::uint64_t checked,std::span<const R> source,bool complete=true) {
+    assert(!indexed.FullFrameValidation());
+    assert(indexed.Epoch()==old.Epoch() && indexed.ForgottenThrough()==old.ForgottenThrough());
+    const auto expected=old.Inspect(checked,source,complete),actual=indexed.Inspect(checked,source,complete);
+    if(expected.FullCheck())assert(actual.FullCheck());
+    if(expected.cpu_callbacks)assert(actual.cpu_callbacks);
+    if(expected.relation==Relation::Unknown)assert(actual.relation==Relation::Unknown);
+}
+
+static void BoundedIndexTests() {
+    using J=TextureWriteJournal;
+    constexpr auto extent=4*J::kBlockPages*J::kPageBytes+17;
+    const std::array<R,1> source{{{0,64}}},other{{{2*J::kPageBytes,4}}};
+    J bounded(2,0,extent,true),persistent(2,0,extent);LegacyBoundedHistory old(2);
+    for(unsigned k=0;k<8;++k){bounded.Publish(other);persistent.Publish(other);old.Publish(other);}
+    assert(bounded.PageIndexActive() && !bounded.FullFrameValidation() && persistent.FullFrameValidation());
+    // Mode2 retains the old forgotten check rather than trusting persistent
+    // disjoint history; this preserves its raw CPU content-validation policy.
+    assert(bounded.Inspect(0,source).relation==Relation::Unknown && bounded.Inspect(0,source).cpu_callbacks);
+    assert(persistent.Inspect(0,source).relation==Relation::Disjoint);
+    CheckBounded(bounded,old,0,source);CheckBounded(bounded,old,bounded.ForgottenThrough(),source);
+    assert(bounded.Inspect(bounded.ForgottenThrough(),source).relation==Relation::Disjoint);
+    assert(bounded.GetStats().forgotten_queries && bounded.GetStats().indexed_queries && !bounded.GetStats().examined_records);
+    // Page rounding may conservatively introduce a check, never remove one.
+    J rounded(512,0,extent,true);LegacyBoundedHistory rounded_old(512);
+    const std::array<R,1> same_page{{{128,4}}};rounded.Publish(same_page,false,true);rounded_old.Publish(same_page,false,true);
+    assert(rounded_old.Inspect(0,source).relation==Relation::Disjoint);
+    assert(rounded.Inspect(0,source).relation==Relation::Overlap && rounded.Inspect(0,source).cpu_callbacks);
+    CheckBounded(rounded,rounded_old,0,source);
+    std::uint64_t random=0x9e3779b97f4a7c15ull;
+    const auto next=[&](){random^=random<<13;random^=random>>7;random^=random<<17;return random;};
+    for(const std::size_t capacity:{0u,1u,2u,7u,64u,512u,8192u}) {
+        J index(capacity,0,extent,true);LegacyBoundedHistory reference(capacity);
+        for(unsigned step=0;step<320;++step) {
+            std::array<R,8> writes{};
+            for(auto& range:writes){range.address=next()%extent;range.bytes=std::min(1+next()%65536,extent-range.address);}
+            if(step%23==0)writes[0]={extent,4};
+            if(step%47==0)writes[1]={UINT64_MAX-2,4};
+            if(step%19==0)writes[2].bytes=0;
+            const bool unknown=step%31==0,cpu=next()%3==0;
+            index.Publish(writes,unknown,cpu);reference.Publish(writes,unknown,cpu);
+            for(unsigned query=0;query<7;++query) {
+                std::array<R,3> sources{};
+                for(auto& range:sources){range.address=next()%extent;range.bytes=std::min(1+next()%(2*J::kBlockPages*J::kPageBytes),extent-range.address);}
+                const auto checked=query==0 ? index.ForgottenThrough() : query==1 && index.ForgottenThrough()
+                    ? index.ForgottenThrough()-1 : next()%(index.Epoch()+2);
+                CheckBounded(index,reference,checked,sources,step%29!=0);
+            }
+        }
+        const std::array<R,1> outside{{{extent,1}}},overflow{{{UINT64_MAX-1,4}}},empty{{{0,0}}};
+        for(const auto* bad:{&outside,&overflow,&empty})CheckBounded(index,reference,index.Epoch(),*bad);
+        CheckBounded(index,reference,index.Epoch(),source,false);
+    }
+    for(const auto initial:{std::uint64_t(7),UINT64_MAX-1}) {
+        J index(1,initial,extent,true);LegacyBoundedHistory reference(1,initial);
+        for(unsigned k=0;k<3;++k) {
+            index.Publish(source,false,true);reference.Publish(source,false,true);
+            CheckBounded(index,reference,initial,source);
+            CheckBounded(index,reference,index.Epoch(),source);
+        }
+    }
+    for(int failure=0;failure<2;++failure) {
+        J fallback(512,0,extent,true);LegacyBoundedHistory reference(512);
+        fail_allocation_after=failure;fallback.Publish(source,false,true);fail_allocation_after=-1;
+        reference.Publish(source,false,true);
+        assert(!fallback.PageIndexActive() && !fallback.FullFrameValidation());
+        CheckBounded(fallback,reference,0,source);
+        assert(fallback.Inspect(0,source).relation==Relation::Overlap && fallback.Inspect(0,source).cpu_callbacks);
+        fallback.Publish(other);reference.Publish(other);
+        CheckBounded(fallback,reference,0,source);CheckBounded(fallback,reference,1,source);
+        assert(fallback.Inspect(1,source).relation==Relation::Disjoint);
+    }
+    std::puts("Bounded indexed journal: independent legacy-policy oracle, unchanged watermark/full-check requirements, CPU flags, block edges, allocation fallback and saturation passed");
+}
+
 static void CheckConservative(const TextureWriteJournal& indexed,const ExactHistory& exact,
                               std::uint64_t checked,std::span<const R> source,bool complete=true) {
     assert(indexed.Epoch()==exact.Epoch());
@@ -86,7 +239,7 @@ static void PageIndexTests() {
     const std::array<R,1> zero{{{0,4}}},same_page{{{100,4}}},next_page{{{page,4}}};
     J indexed(2,0,extent);assert(indexed.PageIndexActive() && !indexed.PageIndexBytes());
     indexed.Publish(zero,false,true);
-    assert(indexed.PageIndexBytes()==5*16);
+    assert(indexed.PageIndexBytes()==6*16 && indexed.FullFrameValidation());
     assert(indexed.Inspect(0,zero).relation==Relation::Overlap && indexed.Inspect(0,zero).cpu_callbacks);
     const auto conservative=indexed.Inspect(0,same_page);
     assert(conservative.relation==Relation::Overlap && conservative.cpu_callbacks); // allowed page false positive
@@ -151,7 +304,7 @@ static void PageIndexTests() {
 
 static void RandomizedPageIndexTests() {
     using J=TextureWriteJournal;
-    constexpr std::uint64_t extent=16*J::kPageBytes+19;
+    constexpr std::uint64_t extent=3*J::kBlockPages*J::kPageBytes+19;
     std::uint64_t random=0xd1b54a32d192ed03ull;
     const auto next=[&]() {random^=random<<13;random^=random>>7;random^=random<<17;return random;};
     for(unsigned trial=0;trial<8;++trial) {
@@ -170,7 +323,7 @@ static void RandomizedPageIndexTests() {
             for(unsigned query=0;query<5;++query) {
                 std::array<R,3> source{};
                 for(auto& range:source) {
-                    range.address=next()%extent;range.bytes=std::min(1+next()%2048,extent-range.address);
+                    range.address=next()%extent;range.bytes=std::min(1+next()%(2*J::kBlockPages*J::kPageBytes),extent-range.address);
                 }
                 const auto checked=next()%(exact.Epoch()+2);
                 CheckConservative(indexed,exact,checked,source);
@@ -179,6 +332,43 @@ static void RandomizedPageIndexTests() {
         }
         assert(indexed.GetStats().indexed_queries && indexed.GetStats().page_checks &&
             indexed.GetStats().evicted_records && !indexed.GetStats().examined_records);
+    }
+}
+
+static void BlockSummaryTests() {
+    using J=TextureWriteJournal;
+    constexpr auto page=J::kPageBytes,block=page*J::kBlockPages,extent=3*block+7;
+    const std::array<R,1> middle{{{block,block}}},edge{{{block-1,2}}},outside{{{0,1}}};
+    J journal(1,0,extent);ExactHistory exact;
+    journal.Publish(outside,false,true);exact.Publish(outside,false,true);
+    assert(journal.Inspect(0,middle).relation==Relation::Disjoint);
+    assert(journal.GetStats().block_checks==1 && !journal.GetStats().page_checks);
+    assert(!journal.Inspect(0,middle).cpu_callbacks); // outside the wholly covered block
+    journal.Publish(edge,false,true);exact.Publish(edge,false,true);
+    assert(journal.Inspect(1,middle).relation==Relation::Overlap && journal.Inspect(1,middle).cpu_callbacks);
+    const auto checked=journal.Epoch();
+    journal.Publish(middle);exact.Publish(middle);
+    assert(journal.Inspect(checked,middle).relation==Relation::Overlap && !journal.Inspect(checked,middle).cpu_callbacks);
+    // Partial query edges must not borrow a summary from an unrelated page.
+    const std::array<R,1> untouched_edge{{{block+2*page,7}}},tail{{{extent-1,1}}};
+    J partial(1,0,extent);partial.Publish(edge,false,true);
+    assert(partial.Inspect(0,untouched_edge).relation==Relation::Disjoint);
+    assert(!partial.Inspect(0,untouched_edge).cpu_callbacks);
+    partial.Publish(tail,false,true);assert(partial.Inspect(1,tail).cpu_callbacks);
+    for(const auto* source:{&middle,&edge,&outside,&untouched_edge,&tail})
+        for(std::uint64_t observed=0;observed<=journal.Epoch();++observed)
+            CheckConservative(journal,exact,observed,*source);
+    // Both allocation sites must restore the bounded conservative history,
+    // including a completed CPU effect and the triggering publish's epoch.
+    for(int failure=0;failure<2;++failure) {
+        J fallback(1,0,extent);
+        fail_allocation_after=failure;fallback.Publish(middle,false,true);fail_allocation_after=-1;
+        assert(!fallback.PageIndexActive() && !fallback.PageIndexBytes());
+        assert(fallback.GetStats().index_allocation_failures==1);
+        const auto unknown=fallback.Inspect(0,middle);
+        assert(unknown.relation==Relation::Unknown && unknown.cpu_callbacks);
+        fallback.Publish(outside);
+        assert(fallback.Inspect(0,middle).relation==Relation::Unknown);
     }
 }
 
@@ -214,11 +404,11 @@ static void IndexedPressureTests() {
     CheckConservative(indexed,exact,0,untouched);CheckConservative(indexed,exact,0,affected);
     assert(legacy.Inspect(0,untouched).relation==Relation::Unknown);
     assert(!indexed.GetStats().forgotten_queries && !indexed.GetStats().examined_records);
-    assert(indexed.PageIndexBytes()==16384 && indexed.GetStats().page_checks);
+    assert(indexed.PageIndexBytes()==16640 && indexed.GetStats().page_checks);
 
     // Invalid configuration uses the exact legacy path instead of allocating
     // outside the fixed 64 GiB extent bound. Allocation failure uses that same
-    // permanently disabled mode (the actual bad_alloc branch is source-reviewed).
+    // permanently disabled mode (both bad_alloc sites are exercised above).
     J fallback(1,0,J::kMaximumIndexedExtent+1);
     fallback.Publish(affected);fallback.Publish(untouched);
     assert(!fallback.PageIndexActive() && !fallback.PageIndexBytes());
@@ -306,7 +496,7 @@ static void ReverseAndPartialEpochTests() {
 int main() {
     using J=TextureWriteJournal;
     ConfigurationTests();PressureTests();ReverseAndPartialEpochTests();
-    PageIndexTests();RandomizedPageIndexTests();IndexedPressureTests();
+    PageIndexTests();RandomizedPageIndexTests();BlockSummaryTests();IndexedPressureTests();BoundedIndexTests();
     assert(!J::Enabled(false,nullptr));assert(!J::Enabled(false,"1"));
     assert(J::Enabled(true,nullptr));assert(J::Enabled(true,"1"));
     assert(!J::Enabled(true,"0"));assert(!J::Enabled(true,"invalid"));

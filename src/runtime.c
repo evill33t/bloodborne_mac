@@ -1,6 +1,7 @@
 /* Narrow, explicit PS4 libc contracts. No automatic success stubs. */
 #define _CRT_RAND_S
 #include "runtime.h"
+#include "runtime_modules.h"
 #ifdef BB_CPU_TRANSLATOR
 #include "cpu/bbcpu.h"
 #include <sys/mman.h>
@@ -104,6 +105,7 @@ uint64_t runtime_checkpoint_module_tls_size(unsigned module) {return module<TLS_
 
 void runtime_start(uint64_t flags) {
     capabilities = flags;
+    runtime_modules_install(NULL,0);
     if (!(flags & 1)) return;
 #ifdef _WIN32
     unsigned int halves[2];
@@ -119,6 +121,7 @@ void runtime_start(uint64_t flags) {
     stack_canary &= ~UINT64_C(255);
 }
 void runtime_report(void) {
+    runtime_modules_report();
     printf("Runtime: _init_env=%zu, atexit=%zu, __cxa_atexit=%zu, registered handlers=%zu\n",
            calls_init, calls_atexit, calls_cxa, handler_count);
     printf("Runtime: static guards acquired=%zu, released=%zu\n", (size_t)guards_acquired, (size_t)guards_released);

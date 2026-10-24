@@ -47,6 +47,24 @@ int main() {
     auto decision=decide();assert(decision.plan && decision.reason==C::Reject::None);
     assert(decision.plan->target==Depth && decision.plan->metadata==Meta && decision.plan->generation==Generation);
     assert(decision.plan->depth_clear_word==0x3f800000);
+    C::GpuReadProof gpu_uniform{Uniform,8,Generation,Generation,true};
+    C::GpuReadProof gpu_metadata{Meta,C::MetadataBytes,Generation,Generation,true};
+    const auto gpu_decide=[&] {return C::RecognizeGpu(program,user,groups,threads,indirect,surface,gpu_uniform,gpu_metadata);};
+    assert(gpu_decide().plan);
+    gpu_metadata.ready=false;assert(gpu_decide().reason==C::Reject::Readiness);gpu_metadata.ready=true;
+    gpu_uniform.ready=false;assert(gpu_decide().reason==C::Reject::Readiness);gpu_uniform.ready=true;
+    --gpu_metadata.bytes;assert(gpu_decide().reason==C::Reject::Readiness);++gpu_metadata.bytes;
+    ++gpu_uniform.address;assert(gpu_decide().reason==C::Reject::Readiness);--gpu_uniform.address;
+    ++gpu_metadata.generation_after;assert(gpu_decide().reason==C::Reject::Readiness);--gpu_metadata.generation_after;
+    ++gpu_uniform.generation_before;assert(gpu_decide().reason==C::Reject::Readiness);--gpu_uniform.generation_before;
+    surface.mapping_generation++;assert(gpu_decide().reason==C::Reject::Readiness);surface=original_surface;
+    program.code[11].op++;assert(gpu_decide().reason==C::Reject::Program);program=original;
+    user[7]^=1;assert(gpu_decide().reason==C::Reject::MetadataDescriptor);user=original_user;
+    indirect=true;assert(gpu_decide().reason==C::Reject::Dispatch);indirect=false;
+    user[8]=Word(Meta);user[9]=0x00108000u|Word(Meta>>32);
+    assert(decide().reason==C::Reject::InputAlias && gpu_decide().reason==C::Reject::InputAlias);user=original_user;
+    user[8]=Word(Meta+C::MetadataBytes-16);user[9]=0x00108000u|Word(Meta>>32);
+    assert(decide().reason==C::Reject::InputAlias && gpu_decide().reason==C::Reject::InputAlias);user=original_user;
     for(unsigned at:std::array<unsigned,3>{0,C::Words/2,C::Words-1}) {
         const auto before=metadata[at];metadata[at]=0xfffffffd;
         assert(!decide().plan && decide().reason==C::Reject::PreservedTiles);metadata[at]=before;

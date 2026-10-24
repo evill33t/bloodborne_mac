@@ -24,14 +24,21 @@ public:
         std::uint64_t evicted_records=0,queries=0,queried_source_bytes=0;
         std::uint64_t forgotten_queries=0,forgotten_source_bytes=0,examined_records=0;
         std::uint64_t indexed_queries=0,page_checks=0,page_updates=0,index_allocation_failures=0;
+        std::uint64_t block_checks=0,block_updates=0;
     };
     static constexpr std::size_t kLimit=512;
     static constexpr std::size_t kMaximumRecords=8192;
     static constexpr std::uint64_t kPageBytes=16384;
+    static constexpr std::uint64_t kBlockPages=64;
     static constexpr std::uint64_t kMaximumIndexedExtent=64ull<<30;
     // Separate, strictly opt-in experiment. The renderer supplies the actual
     // direct-pool extent; no virtual addresses or guessed pool size enter it.
-    static bool PageIndexEnabled(const char* value) {return value && !std::strcmp(value,"1");}
+    static bool PageIndexEnabled(const char* value) {
+        return value && (!std::strcmp(value,"1") || !std::strcmp(value,"2"));
+    }
+    // Mode2 accelerates queries only while the original bounded history is
+    // complete. It preserves every legacy forgotten-history full check.
+    static bool PageIndexUsesBoundedHistory(const char* value) {return value && !std::strcmp(value,"2");}
     // The renderer reads the environment once. Only a complete unsigned
     // decimal in [1,8192] is accepted; invalid values retain the default.
     static std::size_t ConfiguredLimit(const char* value) {
@@ -49,10 +56,10 @@ public:
         return native && (!value || !std::strcmp(value,"1"));
     }
     explicit TextureWriteJournal(std::size_t limit=kLimit,std::uint64_t initial_epoch=0,
-                                 std::uint64_t indexed_extent=0)
+                                 std::uint64_t indexed_extent=0,bool bounded_history=false)
         : capacity(std::min(limit,kMaximumRecords)),epoch(initial_epoch),
           index_extent(indexed_extent<=kMaximumIndexedExtent ? indexed_extent : 0),
-          unknown_epoch(initial_epoch),unknown_cpu_epoch(initial_epoch) {}
+          unknown_epoch(initial_epoch),unknown_cpu_epoch(initial_epoch),bounded_index(bounded_history) {}
     std::uint64_t Epoch() const {return epoch;}
     bool Current(std::uint64_t checked) const {return !saturated && checked==epoch;}
     std::size_t Size() const {return records.size();}
@@ -61,7 +68,12 @@ public:
     std::uint64_t ForgottenThrough() const {return forgotten;}
     bool PageIndexActive() const {return index_extent!=0;}
     std::uint64_t PageIndexExtent() const {return index_extent;}
-    std::size_t PageIndexBytes() const {return page_epochs.size()*sizeof(PageEpoch);}
+    std::size_t PageIndexBytes() const {return (page_epochs.size()+block_epochs.size())*sizeof(PageEpoch);}
+    // The persistent index retains exact page history across deque eviction. A
+    // renderer must still inspect every byte on first use in each frame: this
+    // journal describes published CPU/GPU writes, not raw guest CPU stores.
+    // The bounded index keeps legacy full checks and its old chunk policy.
+    bool FullFrameValidation() const {return PageIndexActive() && !bounded_index;}
     void Publish(std::span<const Range> physical,bool unknown=false,bool deferred_cpu=false) {
         bool nonempty=unknown;
         for(const auto& range:physical) {
@@ -102,11 +114,12 @@ public:
         for(const auto& range:source)Count(source_bytes,range.bytes);
         Count(stats.queries,1);Count(stats.queried_source_bytes,source_bytes);
         if(saturated || checked>epoch)return {Relation::Unknown,true};
-        if(index_extent)return IndexInspect(checked,source,complete);
+        if(index_extent && !bounded_index)return IndexInspect(checked,source,complete);
         if(checked<forgotten) {
             Count(stats.forgotten_queries,1);Count(stats.forgotten_source_bytes,source_bytes);
             return {Relation::Unknown,true};
         }
+        if(index_extent)return IndexInspect(checked,source,complete);
         if(checked==epoch)return {Relation::Unchanged,false};
         if(!complete)return {Relation::Unknown,true};
         Query answer{Relation::Disjoint,false};
@@ -149,16 +162,30 @@ private:
         // restores the unchanged bounded deque path, including its forgotten
         // watermark. No partially constructed index can answer a query.
         if(page_epochs.empty()) {
-            try {page_epochs.resize(static_cast<std::size_t>((index_extent+kPageBytes-1)/kPageBytes));}
+            try {
+                const auto pages=static_cast<std::size_t>((index_extent+kPageBytes-1)/kPageBytes);
+                page_epochs.resize(pages);
+                block_epochs.resize((pages+kBlockPages-1)/kBlockPages);
+            }
             catch(const std::bad_alloc&) {
-                // A nonzero initial epoch may describe history absent from
-                // the deque. Preserve that uncertainty when abandoning the
-                // index, including the allocation-triggering publish.
-                forgotten=epoch;index_extent=0;Count(stats.index_allocation_failures,1);return;
+                std::vector<PageEpoch>().swap(page_epochs);std::vector<PageEpoch>().swap(block_epochs);
+                // Persistent history can be absent from the deque; invalidate
+                // that proof. Bounded mode has never used history outside it,
+                // so preserve the exact legacy watermark on fallback too.
+                if(!bounded_index)forgotten=epoch;
+                index_extent=0;Count(stats.index_allocation_failures,1);return;
             }
         }
         for(const auto& range:physical)if(range.bytes) {
             const auto last=(range.address+range.bytes-1)/kPageBytes;
+            // Each summary is the maximum of its pages, separately retaining
+            // older deferred CPU effects. Only wholly covered blocks may be
+            // queried through it; partial edges retain exact page resolution.
+            for(auto block=(range.address/kPageBytes)/kBlockPages;block<=last/kBlockPages;++block) {
+                auto& latest=block_epochs[static_cast<std::size_t>(block)];latest.write=epoch;
+                if(deferred_cpu)latest.cpu=epoch;
+                Count(stats.block_updates,1);
+            }
             for(auto page=range.address/kPageBytes;page<=last;++page) {
                 auto& latest=page_epochs[static_cast<std::size_t>(page)];latest.write=epoch;
                 if(deferred_cpu)latest.cpu=epoch;
@@ -174,10 +201,13 @@ private:
         Query answer{unknown_epoch>checked ? Relation::Unknown : Relation::Disjoint,unknown_cpu_epoch>checked};
         for(const auto& range:source) {
             const auto last=(range.address+range.bytes-1)/kPageBytes;
-            for(auto page=range.address/kPageBytes;page<=last;++page) {
-                Count(stats.page_checks,1);
+            for(auto page=range.address/kPageBytes;page<=last;) {
+                const bool block=page%kBlockPages==0 && last-page>=kBlockPages-1;
+                if(block)Count(stats.block_checks,1);else Count(stats.page_checks,1);
+                const auto at=page;page+=block ? kBlockPages : 1;
                 if(page_epochs.empty())continue; // only global unknown writes so far
-                const auto& latest=page_epochs[static_cast<std::size_t>(page)];
+                const auto& latest=block ? block_epochs[static_cast<std::size_t>(at/kBlockPages)]
+                    : page_epochs[static_cast<std::size_t>(at)];
                 if(latest.write>checked && answer.relation!=Relation::Unknown)answer.relation=Relation::Overlap;
                 answer.cpu_callbacks|=latest.cpu>checked;
             }
@@ -191,7 +221,9 @@ private:
     // These epochs survive deque eviction and completion. Per-page overlap
     // may conservatively include unrelated bytes on the same physical page.
     std::uint64_t index_extent=0,unknown_epoch=0,unknown_cpu_epoch=0;
+    bool bounded_index=false;
     std::vector<PageEpoch> page_epochs;
+    std::vector<PageEpoch> block_epochs;
     mutable Stats stats; // renderer-thread metadata only, like the journal
 };
 } // namespace Gpu::Metal

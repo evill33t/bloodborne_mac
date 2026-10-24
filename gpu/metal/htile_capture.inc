@@ -38,6 +38,7 @@ void ObserveHtileCaptureLayout(const RegFile& r,u64 target,u32 width,u32 height)
   binding.pitch=((size&0x7ff)+1)*8;binding.padded_height=(((size>>11)&0x7ff)+1)*8;
   binding.depth_clear_word=r[Reg::DB_DEPTH_CLEAR];
   shadow_htile_clear_surfaces[meta]=binding;
+  ObserveShadowHtileBindingProof(binding);
   if(capture_root.empty()) return;
   HtileCaptureLayout layout;
   layout.target=target; layout.width=width; layout.height=height;

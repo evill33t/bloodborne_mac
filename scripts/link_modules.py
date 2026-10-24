@@ -9,7 +9,7 @@ Exports are matched by (NID, library identity, module identity). Imports of
 libSceLibcInternal are served by libc.prx's same-NID exports: the internal
 library is not shipped with the game and exposes the same functions.
 On Windows the eboot's red-zone leaf stores then run red-zone-safe (patches/redzone.json).
-Output: out/boot-linked.bin (format BBPROBE5) and out/link.json.
+Output: out/boot-linked.bin (format BBPROBE6) and out/link.json.
 """
 import bisect
 import collections
@@ -28,6 +28,99 @@ RED_ZONE_SITES = Path(__file__).resolve().parent.parent / 'patches' / 'redzone.j
 LEA_DOWN = bytes.fromhex('488d642480')        # lea rsp, [rsp-0x80]
 LEA_UP = bytes.fromhex('488da42480000000')    # lea rsp, [rsp+0x80]
 MAX_INSTRUCTION = 15
+MODULE_INFO_SIZE = 424
+
+
+def module_info(m, name, base, module_id, tls_index):
+    """Immutable loaded-image metadata, including actual guest unwind tables.
+
+    The file keeps RVAs; probe.c checks them against its loaded segments before
+    rebasing. Never infer unwind tables by scanning arbitrary instruction data.
+    """
+    loads = [p for p in m['ph'] if p['type'] in (1, 0x61000010)]
+    if not 0 < len(loads) <= 4 or len(name.encode('utf-8')) >= 256:
+        raise ValueError('unsupported module-info name/segment count')
+    for p in loads:
+        if not 0 < p['memsz'] <= 0xffffffff or p['filesz'] > p['memsz']:
+            raise ValueError('unsupported module-info segment size')
+
+    def file_span(address, size):
+        for p in loads:
+            if p['vaddr'] <= address and address + size <= p['vaddr'] + p['filesz']:
+                return span(m['elf'], p['offset'] + address - p['vaddr'], size)
+        raise ValueError('unmapped module unwind metadata')
+
+    eh_hdr = next((p for p in m['ph'] if p['type'] == 0x6474e550), None)
+    hdr_addr = hdr_size = frame_addr = frame_size = 0
+    if eh_hdr:
+        hdr_addr, hdr_size = eh_hdr['vaddr'], eh_hdr['memsz']
+        if not 8 <= hdr_size <= 0xffffffff:
+            raise ValueError('unsupported EH frame header size')
+        header = file_span(hdr_addr, hdr_size)
+        encoding = header[1]
+        formats = {0x00:'<Q', 0x03:'<I', 0x04:'<Q', 0x0b:'<i', 0x0c:'<q'}
+        fmt = formats.get(encoding & 15)
+        if header[0] != 1 or encoding & 0x80 or fmt is None or (encoding & 0x70) not in (0, 0x10, 0x30):
+            raise ValueError('unsupported EH frame pointer encoding')
+        frame_addr, = unpack(fmt, header, 4)
+        frame_addr += {0:0, 0x10:hdr_addr + 4, 0x30:hdr_addr}[encoding & 0x70]
+        containing = next((p for p in loads if p['vaddr'] <= frame_addr < p['vaddr'] + p['filesz']), None)
+        if not containing:
+            raise ValueError('unmapped EH frame pointer')
+        limit = containing['vaddr'] + containing['filesz']
+        if frame_addr < hdr_addr < limit:
+            limit = hdr_addr
+        # Record lengths establish the actual extent through the terminating
+        # zero record, or the bounded end when a linker omits that terminator.
+        cursor = frame_addr
+        while cursor < limit:
+            if limit - cursor < 4:
+                raise ValueError('truncated EH frame record')
+            length, = struct.unpack('<I', file_span(cursor, 4))
+            prefix = 4
+            if length == 0xffffffff:
+                if limit - cursor < 12:
+                    raise ValueError('truncated wide EH frame record')
+                length, = struct.unpack('<Q', file_span(cursor + 4, 8))
+                prefix = 12
+            if length == 0:
+                cursor += prefix
+                break
+            if length < (8 if prefix == 12 else 4) or length > limit - cursor - prefix:
+                raise ValueError('invalid EH frame record length')
+            cursor += prefix + length
+        frame_size = cursor - frame_addr
+        if not 0 < frame_size <= 0xffffffff:
+            raise ValueError('unsupported EH frame size')
+    tls = next((p for p in m['ph'] if p['type'] == 7), None)
+    tags = m.get('tags', {})
+    return dict(size=MODULE_INFO_SIZE, name=name, id=module_id,
+                tls_index=tls_index if tls else 0,
+                tls_init_addr=base + tls['vaddr'] if tls else 0,
+                tls_init_size=tls['filesz'] if tls else 0,
+                tls_size=tls['memsz'] if tls else 0, tls_offset=0,
+                tls_align=tls.get('align', 0) if tls else 0,
+                init_proc_addr=base + tags[12] if 12 in tags else 0,
+                fini_proc_addr=base + tags[13] if 13 in tags else 0,
+                eh_frame_hdr_addr=base + hdr_addr if eh_hdr else 0,
+                eh_frame_addr=base + frame_addr if eh_hdr else 0,
+                eh_frame_hdr_size=hdr_size, eh_frame_size=frame_size,
+                segments=[(base + p['vaddr'], p['memsz'], p['flags']) for p in loads])
+
+
+def pack_module_info(m):
+    """PS4's 424-byte ModuleInfoEx, with prepared-image-relative addresses."""
+    data = struct.pack('<Q256siIQIIIIQQQQQQII', m['size'], m['name'].encode('utf-8'),
+                       m['id'], m['tls_index'], m['tls_init_addr'], m['tls_init_size'],
+                       m['tls_size'], m['tls_offset'], m['tls_align'], m['init_proc_addr'],
+                       m['fini_proc_addr'], 0, 0, m['eh_frame_hdr_addr'], m['eh_frame_addr'],
+                       m['eh_frame_hdr_size'], m['eh_frame_size'])
+    data += b''.join(struct.pack('<QIi', *s) for s in m['segments'])
+    data += bytes((4 - len(m['segments'])) * 16)
+    data += struct.pack('<II', len(m['segments']), 1)
+    if len(data) != MODULE_INFO_SIZE:
+        raise ValueError('invalid module-info ABI serialization')
+    return data
 
 
 def module(path):
@@ -200,6 +293,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
 
     exports, by_nid = {}, collections.defaultdict(list)
     table = []
+    debug_modules = [module_info(main, 'eboot.bin', 0, 0, 1)]
     libc_changes = []
     base = (size + 65535) & ~65535
     fs_patched = patch_fs_loads(image, main['ph'], 0)
@@ -228,6 +322,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
                 raise ValueError(f'{filename}: unsupported TLS layout')
             module_id = tls_module
             tls_module += 1
+        debug_modules.append(module_info(m, filename, base, len(debug_modules), module_id))
         tls_relocations = 0
         for target, kind, symid, addend in m['relocs']:
             if not mapped(target):
@@ -297,7 +392,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
     cpu_compat['libc'] = libc_changes
     red_zone = protect_image(image, segments, untranslated, relocs)
     with atomic_output(out / 'boot-linked.bin') as f:
-        f.write(struct.pack('<8s6Q', b'BBPROBE5', len(image), entry, len(segments), len(relocs), len(names), flags))
+        f.write(struct.pack('<8s6Q', b'BBPROBE6', len(image), entry, len(segments), len(relocs), len(names), flags))
         f.write(struct.pack('<Q', procparam['vaddr']))
         f.write(struct.pack('<4Q', *main_tls_values))
         f.write(struct.pack('<Q', len(table)))
@@ -307,6 +402,9 @@ def link(game, out, module_names=DEFAULT_MODULES):
         f.write(struct.pack('<Q', len(bindings)))
         for binding in bindings:
             f.write(struct.pack('<3Q', *binding))
+        f.write(struct.pack('<Q', len(debug_modules)))
+        for description in debug_modules:
+            f.write(pack_module_info(description))
         for segment in segments:
             f.write(struct.pack('<3Q', *segment))
         for name in names:
@@ -320,6 +418,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
                   bindings=len(bindings), imports=len(names), fs_loads_patched=fs_patched,
                   main_tls=dict(zip(('vaddr', 'filesz', 'memsz', 'align'), main_tls_values)),
                   unresolved_imports=unresolved, cpu_compat=cpu_compat, red_zone=red_zone)
+    report.update(boot_format='BBPROBE6', module_info=debug_modules)
     with atomic_output(out / 'link.json') as f:
         f.write((json.dumps(report, indent=2) + '\n').encode('utf-8'))
     if cpu_compat['enabled']:

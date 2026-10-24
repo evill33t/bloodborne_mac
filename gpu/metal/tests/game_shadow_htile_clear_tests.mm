@@ -28,6 +28,7 @@
 #include <vector>
 
 extern "C" void runtime_restart() {std::abort();}
+extern "C" std::uintptr_t runtime_memory_resolve(const char*);
 namespace {
 using namespace Gpu;
 using namespace Gpu::Liverpool;
@@ -100,7 +101,7 @@ void CheckDepth(Renderer& renderer,Gpu::Metal::Device& device,u64 address,u64 me
     Require(registered,"Synthetic HTILE was not registered to the actual depth target");
     unsigned matches=0;
     for(unsigned target=0;target<count;++target) {
-        const auto at=116+std::size_t(target)*112;if(Qword(bytes,at)!=address)continue;++matches;
+        const auto at=116+std::size_t(target)*112;if(Qword(bytes,at)!=address || !(Word(bytes,at+16)&1u))continue;++matches;
         const auto flags=Word(bytes,at+16);
         Require((flags&3u)==3u && !(flags&4u),"Depth target is uninitialized or still has an unapplied clear");
         Raw::Descriptor description{Word(bytes,at+36),Word(bytes,at+40),Word(bytes,at+44),Word(bytes,at+48),
@@ -129,8 +130,27 @@ void CheckDepth(Renderer& renderer,Gpu::Metal::Device& device,u64 address,u64 me
     }
     Require(matches==1,"Ambiguous/missing4096D32 target");
 }
-void Run(const std::filesystem::path& original,u32 replacement,bool proof_enabled,bool lease_enabled) {
+std::array<u64,2> TargetVersions(Renderer& renderer,u64 depth,u64 color) {
+    std::string error;auto capture=renderer.CaptureCheckpoint(Deadline(),error);Require(bool(capture),"Version checkpoint: "+error);
+    const auto& chunks=capture->Chunks();
+    const auto header=std::find_if(chunks.begin(),chunks.end(),[](const auto& chunk){return chunk.id==0x1000;});
+    Require(header!=chunks.end() && header->size<65536,"Missing target version metadata");
+    std::vector<u8> bytes(header->size);Require(header->read(0,bytes,error),"Cannot read target versions: "+error);
+    const auto count=Word(bytes,92);Require(116+u64(count)*112<=bytes.size(),"Short target version table");
+    std::array<u64,2> versions{};std::array<unsigned,2> matches{};
+    for(unsigned n=0;n<count;++n) {
+        const auto at=116+std::size_t(n)*112;const bool is_depth=Word(bytes,at+16)&1u;
+        if(Qword(bytes,at)!=(is_depth ? depth : color))continue;
+        const unsigned slot=is_depth ? 0 : 1;versions[slot]=Qword(bytes,at+8);++matches[slot];
+    }
+    Require(matches==std::array<unsigned,2>{1,1},"Ambiguous/missing colour/depth owner versions");return versions;
+}
+void Run(const std::filesystem::path& original,u32 replacement,bool proof_enabled,bool lease_enabled,bool gpu_enabled,
+    bool gpu_disabled_control) {
     const auto code=Original(original);PrivateData private_data;
+    setenv("BB_METAL_SHADOW_HTILE_GPU",gpu_enabled ? "1" : "0",1);
+    setenv("BB_METAL_SHADOW_HTILE_REBIND",gpu_enabled ? "1" : "0",1);
+    setenv("BB_METAL_SHADOW_HTILE_AUDIT","1",1);
     if(!proof_enabled)setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","0",1);
     u64 physical=0;std::uintptr_t address=0;
     Require(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),AllocationBytes,16384,0,&physical),"Cannot allocate fixture guest backing");
@@ -195,6 +215,11 @@ void Run(const std::filesystem::path& original,u32 replacement,bool proof_enable
     Require(decoded && decoded->hash==ShaderHash && decoded->unsupported.empty() &&
         decoded->compute_rsrc2==Rsrc2 && decoded->num_user_sgprs==12,"Original CS/register ABI proof failed");
     Gpu::Metal::Device device;Renderer renderer(device);
+    const auto Dispatch=[&] {
+        if(gpu_enabled || gpu_disabled_control)Require(renderer.DmaData(0,metadata+MetadataBytes-4,2,before.back(),4),
+            "Cannot encode pending same-queue final metadata writer");
+        renderer.Dispatch(compute,4096,1,1);
+    };
     // This fixture owns all synthetic memory, installs no deferred CP stores,
     // and never mutates the scalar leaf. Renderer GPU/callback/map proofs still
     // run; the nonempty CP predicate models the absence of pending CP writes.
@@ -202,13 +227,14 @@ void Run(const std::filesystem::path& original,u32 replacement,bool proof_enable
     draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32(address>>32);
     renderer.Draw(draw,DrawCall{.count=3});
     CheckDepth(renderer,device,depth,metadata,.2f,"first pass");
-    renderer.Dispatch(compute,4096,1,1);
+    Dispatch();
     draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address+64);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32((address+64)>>32);
     renderer.Draw(draw,DrawCall{.count=3});
     // Checkpoint drains both commands, but reads only actual native depth.
     // Without the recurring-clear notification LESS retains stale .2 here.
-    CheckDepth(renderer,device,depth,metadata,proof_enabled ? .8f : .2f,
-        proof_enabled ? "after original HTILE RMW clear" : "proof mode OFF must reject native clear");
+    const bool expect_clear=proof_enabled && !gpu_disabled_control;
+    CheckDepth(renderer,device,depth,metadata,expect_clear ? .8f : .2f,
+        expect_clear ? "after original HTILE RMW clear" : "disabled proof/candidate must reject native clear");
     const auto CheckMetadata=[&](unsigned expected_preserved,bool uniform_unchanged=true,std::optional<u32> last_override={}) {
         unsigned preserved=0,replaced=0;
         for(unsigned k=0;k<MetadataWords;++k) {
@@ -239,7 +265,7 @@ void Run(const std::filesystem::path& original,u32 replacement,bool proof_enable
     draw[Reg::DB_DEPTH_CONTROL]=0x76; // ALWAYS + writes seeds the same target .2.
     renderer.Draw(draw,DrawCall{.count=3});
     CheckDepth(renderer,device,depth,metadata,.2f,"lowNibble13 negative seed");
-    renderer.Dispatch(compute,4096,1,1);
+    Dispatch();
     draw[Reg::DB_DEPTH_CONTROL]=0x16;
     draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address+64);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32((address+64)>>32);
     renderer.Draw(draw,DrawCall{.count=3});
@@ -267,7 +293,7 @@ void Run(const std::filesystem::path& original,u32 replacement,bool proof_enable
             // All previous renderer commands were drained by CheckDepth.
             // Thus a correct ticket belongs to THIS actual consumer command,
             // not to an older completed command or an eligibility-only plan.
-            renderer.Dispatch(compute,4096,1,1);
+            Dispatch();
             const auto waits=renderer.IndirectCpuWriteWaitCount();
             std::atomic<bool> entered{false},finished{false};
             std::jthread writer([&] {
@@ -310,20 +336,143 @@ void Run(const std::filesystem::path& original,u32 replacement,bool proof_enable
         // Do not infer post-write tile13 depth semantics. Only the ordered CS
         // output, completed alias mutation, and full-range read-ticket wait
         // are asserted here; native clear behavior was checked above.
+        if(gpu_enabled) {
+            Seed();std::uintptr_t extra_alias=0;
+            Require(!runtime_gpu_memory_map(&extra_alias,AllocationBytes,3,0,physical,16384),"Cannot create unrelated mapping for rebound lease");
+            WaitForConsumer(alias+DepthOffset+u64(Atlas)*Atlas*4-4,0x3f123456u,"rebound depth64MiB");
+            CheckMetadata(0);
+        }
         std::puts("Original HTILE read leases: blocked consuming command protects uniform8B and complete1MiB metadata through physical aliases");
+    }
+    if(gpu_enabled) {
+        // The source uniform can also have a queued GPU writer. Its value
+        // must be consumed on the GPU, never speculatively copied on the CPU.
+        FillMetadata(false);renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+        renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+        draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32(address>>32);
+        draw[Reg::DB_DEPTH_CONTROL]=0x76;renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"GPU uniform rejection seed");
+        Require(renderer.DmaData(0,leaf+4,2,0xfffc000fu,4),"Cannot encode pending uniform writer");
+        Dispatch();draw[Reg::DB_DEPTH_CONTROL]=0x16;
+        draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address+64);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32((address+64)>>32);
+        renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"GPU invalid uniform must suppress native clear");
+        for(unsigned k=0;k<MetadataWords;++k)Require(words[k]==0xfffc000fu,"GPU invalid-uniform fallback skipped original RMW");
+        renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+        renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+        Require(renderer.DmaData(0,leaf,2,MetadataWords-1,4),"Cannot encode pending uniform count writer");
+        Dispatch();renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"GPU partial uniform count must suppress native clear");
+        for(unsigned k=0;k<MetadataWords;++k)Require(words[k]==(k==MetadataWords-1 ? before[k] : ObservedReplacement),
+            "GPU partial-count fallback changed original RMW bounds");
+        // The same queued GPU writer does not authorize a read over a pending
+        // CP-side write. Only the exact source-overlap check is rejected, so
+        // the original shader still executes and its output remains testable.
+        renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+        renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+        renderer.SetCpuReadGuard([&](GuestAddr at,std::size_t bytes) {
+            return at>=metadata+MetadataBytes || at+bytes<=metadata;
+        });
+        Dispatch();renderer.SetCpuReadGuard([](GuestAddr,std::size_t){return true;});
+        renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"pending CP input must reject GPU clear candidate");
+        CheckMetadata(0);
+        // Unrelated map edits can recover the observed association only after
+        // proving the complete metadata+depth physical spans and VMA lifetime
+        // identities still refer to this exact target/texture.
+        renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+        renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+        std::uintptr_t later_alias=0;
+        Require(!runtime_gpu_memory_map(&later_alias,AllocationBytes,3,0,physical,16384),"Cannot change fixture map generation");
+        Dispatch();renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.8f,"unchanged complete association must recover after unrelated map change");
+        CheckMetadata(0);
+        for(bool pending_gpu:{false,true})for(bool physical_alias:{false,true}) {
+            FillMetadata(false);before[0]=MetadataWords;before[1]=ObservedReplacement;
+            renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+            draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32(address>>32);
+            draw[Reg::DB_DEPTH_CONTROL]=0x76;renderer.Draw(draw,DrawCall{.count=3});
+            CheckDepth(renderer,device,depth,metadata,.2f,"input-alias negative seed");
+            const auto alias_leaf=Descriptor(physical_alias ? alias+MetadataOffset : metadata,16,1,0x77facu,0x8000u);
+            for(unsigned k=0;k<4;++k)compute[Reg::COMPUTE_USER_DATA_0+8+k]=alias_leaf[k];
+            if(pending_gpu)Dispatch();else renderer.Dispatch(compute,4096,1,1);
+            draw[Reg::DB_DEPTH_CONTROL]=0x16;
+            draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address+64);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32((address+64)>>32);
+            renderer.Draw(draw,DrawCall{.count=3});
+            CheckDepth(renderer,device,depth,metadata,.2f,physical_alias ? "physical input alias must reject native clear" : "direct input alias must reject native clear");
+            CheckMetadata(0);
+        }
+        for(unsigned k=0;k<4;++k)compute[Reg::COMPUTE_USER_DATA_0+8+k]=leaf_descriptor[k];
+        constexpr std::array<u32,7> pixel_code{0x7e0002f2,0x7e020280,0x7e040280,0x7e0602f2,0xf800080f,0x03020100,0xbf810000};
+        renderer.CpuWrite(address+12288,pixel_code.data(),sizeof(pixel_code),false);
+        for(bool physical_alias:{false,true}) {
+            FillMetadata(true);renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+            renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+            draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32(address>>32);
+            draw[Reg::DB_DEPTH_CONTROL]=0x76;renderer.Draw(draw,DrawCall{.count=3});
+            CheckDepth(renderer,device,depth,metadata,.2f,"newer-colour-alias negative seed");
+            const u64 color_address=physical_alias ? alias+DepthOffset : depth;
+            auto color=draw;color[Reg::DB_Z_INFO]=color[Reg::DB_DEPTH_CONTROL]=0;
+            color[Reg::CB_COLOR0_BASE+Reg::CB_BASE]=u32(color_address>>8);
+            color[Reg::CB_COLOR0_BASE+Reg::CB_PITCH]=Atlas/8-1;
+            color[Reg::CB_COLOR0_BASE+Reg::CB_SLICE]=Atlas*Atlas/64-1;
+            color[Reg::CB_COLOR0_BASE+Reg::CB_INFO]=(10u<<2)|(1u<<11);
+            color[Reg::CB_COLOR_CONTROL]=1u<<4;color[Reg::CB_TARGET_MASK]=color[Reg::CB_SHADER_MASK]=15;
+            color[Reg::SPI_SHADER_COL_FORMAT]=9;
+            color[Reg::SPI_SHADER_PGM_LO_PS]=u32((address+12288)>>8);color[Reg::SPI_SHADER_PGM_HI_PS]=u32((address+12288)>>40);
+            renderer.Draw(color,DrawCall{.count=3});
+            const auto versions=TargetVersions(renderer,depth,color_address);
+            Require(versions[1]>versions[0],"Colour alias did not become the newer owner");
+            Dispatch();
+            Require(TargetVersions(renderer,depth,color_address)==versions,"Suppressed conditional clear promoted old depth over newer colour alias");
+            CheckDepth(renderer,device,depth,metadata,.2f,"newer colour alias must preserve native depth and owner");
+            CheckMetadata(1);
+        }
+        FillMetadata(false);
+        const auto unmap=reinterpret_cast<int(*)(void*,u64)>(runtime_memory_resolve("cQke9UuBQOk#p#J"));
+        Require(unmap,"Cannot resolve fixture unmap");
+        u64 new_physical=0;
+        Require(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),AllocationBytes,16384,0,&new_physical),"Cannot allocate alternate fixture backing");
+        const auto SeedDepth=[&] {
+            renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+            renderer.CpuWrite(leaf,constants.data(),sizeof(constants),false);
+            draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32(address>>32);
+            draw[Reg::DB_DEPTH_CONTROL]=0x76;renderer.Draw(draw,DrawCall{.count=3});
+            CheckDepth(renderer,device,depth,metadata,.2f,"mapping rejection seed");
+            draw[Reg::DB_DEPTH_CONTROL]=0x16;
+            draw[Reg::SPI_SHADER_USER_DATA_VS_0]=u32(address+64);draw[Reg::SPI_SHADER_USER_DATA_VS_0+1]=u32((address+64)>>32);
+        };
+        const auto Remap=[&](u64 destination,u64 bytes,u64 physical_at) {
+            Require(!unmap(reinterpret_cast<void*>(destination),bytes),"Cannot unmap fixture subrange");
+            std::uintptr_t fixed=destination;
+            Require(!runtime_gpu_memory_map(&fixed,bytes,3,0x10,physical_at,16384) && fixed==destination,"Cannot replace fixture subrange mapping");
+        };
+        SeedDepth();Remap(metadata,MetadataBytes,new_physical+MetadataOffset);
+        renderer.CpuWrite(metadata,before.data(),MetadataBytes,false);
+        Dispatch();renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"changed metadata physical backing must reject rebound");CheckMetadata(0);
+        SeedDepth();Remap(depth,u64(Atlas)*Atlas*4,new_physical+DepthOffset);
+        Dispatch();renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"changed depth physical backing must reject rebound");CheckMetadata(0);
+        SeedDepth();Remap(metadata,MetadataBytes,new_physical+MetadataOffset);
+        Dispatch();renderer.Draw(draw,DrawCall{.count=3});
+        CheckDepth(renderer,device,depth,metadata,.2f,"same physical address with new VMA identity must reject ABA rebound");CheckMetadata(0);
+        std::puts("GPU conditional HTILE: pre-RMW inputs, invalid count/value/final-word13, CPU/GPU direct/physical input aliases, newer colour ownership, complete leases, CP guard, unchanged-binding recovery and metadata/depth/ABA rejection passed");
     }
     renderer.SetCpuReadGuard({});
     std::printf("Original HTILE CS:4096D32 %s; final-word13 rejects blanket clear; all262144 RMW words, guards and uniform leaf checked (clear=%08x).\n",
-        proof_enabled ? ".2->.8 only for full clear" : "proof mode OFF keeps .2",replacement);
+        expect_clear ? ".2->.8 only for full clear" : "disabled proof/candidate keeps .2",replacement);
 }
 } // namespace
 int main(int argc,char** argv) {
     if(argc==1){std::puts("Private original HTILE CS required; skipped");return 77;}
-    if(argc!=2 && argc!=3){std::fprintf(stderr,"usage:%s /absolute/path/to/original-CS.bin [--proof-off|--lease|0xfffffff0]\n",argv[0]);return 2;}
-    u32 replacement=ObservedReplacement;bool proof_enabled=true,lease_enabled=false;
+    if(argc!=2 && argc!=3){std::fprintf(stderr,"usage:%s /absolute/path/to/original-CS.bin [--proof-off|--lease|--gpu|--gpu-off|0xfffffff0]\n",argv[0]);return 2;}
+    u32 replacement=ObservedReplacement;bool proof_enabled=true,lease_enabled=false,gpu_enabled=false,gpu_disabled_control=false;
     if(argc==3) {
         if(!std::strcmp(argv[2],"--proof-off"))proof_enabled=false;
         else if(!std::strcmp(argv[2],"--lease"))lease_enabled=true;
+        else if(!std::strcmp(argv[2],"--gpu")){gpu_enabled=true;lease_enabled=true;}
+        else if(!std::strcmp(argv[2],"--gpu-off"))gpu_disabled_control=true;
         else {
             char* end=nullptr;const auto parsed=std::strtoull(argv[2],&end,0);
             if(!argv[2][0] || !end || *end || parsed!=ObservedReplacement)return 2;
@@ -332,7 +481,7 @@ int main(int argc,char** argv) {
     }
     @autoreleasepool {
         if(!MTLCreateSystemDefaultDevice())return 77;
-        try {Run(argv[1],replacement,proof_enabled,lease_enabled);return 0;}
+        try {Run(argv[1],replacement,proof_enabled,lease_enabled,gpu_enabled,gpu_disabled_control);return 0;}
         catch(const std::exception& error){std::fprintf(stderr,"Shadow HTILE regression:%s\n",error.what());return 1;}
     }
 }

@@ -1,7 +1,8 @@
-// Included inside MetalRenderer::Impl. Only Draw's identity bindings use this
-// cache. User data, diagnostic buffers, tessellation inputs and depth bounds
-// remain unconditional. A command buffer retaining references keeps raw keys
-// alive until its encoder ends; every encoder boundary advances the epoch.
+// Included inside MetalRenderer::Impl. Draw-only encoder state cache.
+// Inline user data and draw constants use exact copied-byte keys;
+// diagnostic buffers, tessellation inputs and depth bounds remain unconditional.
+// A command buffer retaining references keeps raw identity keys alive until its
+// encoder ends; every encoder boundary advances the epoch.
 struct DrawBindingCache {
   struct Key {
     const void* object=nullptr;
@@ -10,9 +11,18 @@ struct DrawBindingCache {
   struct Counts {
     u64 intended=0,emitted=0,skipped=0;
   };
+  struct InlineKey {
+    std::array<unsigned char,64> bytes{};
+    u64 epoch=0;
+    u32 size=0;
+  };
   bool enabled=[] {
     const char* value=std::getenv("BB_METAL_BINDING_CACHE");
-    return value && !std::strcmp(value,"1");
+    return value && (!std::strcmp(value,"1") || !std::strcmp(value,"2"));
+  }();
+  bool inline_enabled=[] {
+    const char* value=std::getenv("BB_METAL_BINDING_CACHE");
+    return value && !std::strcmp(value,"2");
   }();
   bool active=false;
   u64 epoch=0;
@@ -21,13 +31,16 @@ struct DrawBindingCache {
   std::array<std::array<Key,3>,2> buffers{};
   std::array<std::array<Key,128>,2> textures{};
   std::array<std::array<Key,16>,2> samplers{};
-  Counts buffer_counts,texture_counts,sampler_counts;
+  // Only these slots are set exclusively through Bytes in Draw. Other inline
+  // bindings can be overwritten by diagnostic or primitive-specific paths.
+  std::array<InlineKey,3> inline_data{};
+  Counts buffer_counts,texture_counts,sampler_counts,inline_counts;
 
   void Reset(bool retained=false) {
     active=enabled && retained;
     if (!enabled) return;
     if (++epoch==0) {
-      buffers={};textures={};samplers={};
+      buffers={};textures={};samplers={};inline_data={};
       ++epoch;
     }
   }
@@ -57,5 +70,28 @@ struct DrawBindingCache {
   bool Sampler(bool fragment,u32 slot,const void* object) {
     Key* key=slot<samplers[fragment].size() ? &samplers[fragment][slot] : nullptr;
     return Need(key,object,sampler_counts);
+  }
+  bool Bytes(bool fragment,u32 slot,const void* data,u32 size) {
+    if(!enabled || !inline_enabled)return true;
+    ++inline_counts.intended;
+    InlineKey* key=slot==Shader::Binding::UserData ? &inline_data[fragment] :
+        !fragment && slot==Shader::Binding::Draw ? &inline_data[2] : nullptr;
+    if(active && key && data && size && size<=key->bytes.size()) {
+      // The pointer is not an identity: stack addresses are reused for changed
+      // user data, and distinct sources can hold the same exact Metal payload.
+      if(key->epoch==epoch && key->size==size && !std::memcmp(key->bytes.data(),data,size)) {
+        ++inline_counts.skipped;
+        return false;
+      }
+      std::memcpy(key->bytes.data(),data,size);
+      key->size=size;
+      key->epoch=epoch;
+    } else if(key) {
+      // An unconditional/unsupported write still replaces this slot's encoder
+      // state. It must not leave an older eligible payload reusable afterward.
+      key->epoch=0;
+    }
+    ++inline_counts.emitted;
+    return true;
   }
 } binding_cache;

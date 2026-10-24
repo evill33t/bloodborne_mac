@@ -9,6 +9,7 @@
 #include "gpu/liverpool/tiling.h"
 #include "common/content_hash.h"
 #include "src/runtime_gpu_memory.h"
+#include "gpu/metal/texture_write_journal.h"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -44,8 +45,10 @@ struct FixtureCpBinding {
 };
 }
 int main(int argc,char** argv) {
+    const bool page_index=argc==2 && !std::strcmp(argv[1],"--page-index");
+    const bool bounded_index=argc==2 && !std::strcmp(argv[1],"--bounded-page-index");
     const bool parallel_hash=argc==2 && !std::strcmp(argv[1],"--parallel-hash");
-    const bool exact_compare=argc==2 && !std::strcmp(argv[1],"--exact-compare");
+    const bool exact_compare=page_index || bounded_index || (argc==2 && !std::strcmp(argv[1],"--exact-compare"));
     if(argc!=1 && !parallel_hash && !exact_compare)return 2;
     if(parallel_hash || exact_compare) {
         setenv("BB_METAL_NATIVE_INDIRECT","1",1);
@@ -53,6 +56,8 @@ int main(int argc,char** argv) {
         setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","1",1);
         setenv("BB_METAL_PARALLEL_TEXTURE_HASH",parallel_hash ? "4" : "0",1);
         if(exact_compare)setenv("BB_METAL_EXACT_TEXTURE_COMPARE_MB","4",1);
+        if(page_index)setenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX","1",1);
+        if(bounded_index)setenv("BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX","2",1);
     }
     @autoreleasepool {
         if (!MTLCreateSystemDefaultDevice()) return 77;
@@ -190,7 +195,37 @@ int main(int argc,char** argv) {
         regs[Reg::SPI_SHADER_USER_DATA_PS_0+13]=std::bit_cast<uint32_t>((large_height-.5f)/large_height);
         id<MTLTexture> warm_large=draw();renderer.WaitIdle();
         if(!check(warm_large,0))return 1;
-        if(exact_compare) {
+        if(page_index) {
+            // A cold texture has never changed. A raw unmarked write in its
+            // final partial chunk still has to appear on the NEXT frame;
+            // the page journal is not permission to rotate/skip CPU checks.
+            auto before=renderer.ExactTextureDifferentCount();
+            large_source[last_pixel_offset/4]=0xff00ff00u;
+            auto tail=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureDifferentCount()==before+1 && check(tail,1));
+            large_source[last_pixel_offset/4]=0xff0000ffu;
+            tail=draw();renderer.WaitIdle();assert(check(tail,0));
+            // In one frame, pressure from unrelated published writes must
+            // not invalidate this source. An actual overlapping CPU write
+            // then has to revalidate immediately, before the next Flip.
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            const auto unchanged=renderer.ExactTextureEqualCount();
+            const uint32_t scratch=0x73;
+            for(unsigned k=0;k<Gpu::Metal::TextureWriteJournal::kMaximumRecords+1;++k)
+                renderer.CpuWrite(address+24576,&scratch,sizeof(scratch),false);
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            assert(renderer.ExactTextureEqualCount()==unchanged);
+            before=renderer.ExactTextureDifferentCount();const uint32_t green=0xff00ff00u;
+            renderer.CpuWrite(large_address+last_pixel_offset,&green,sizeof(green),false);
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            assert(renderer.ExactTextureDifferentCount()==before+1);
+            renderer.Flip(Gpu::FlipInfo{.address=address+32768,.width=8,.height=8,.pitch=8});
+            tail=(__bridge id<MTLTexture>)renderer.LatestFrame();renderer.WaitIdle();assert(check(tail,1));
+            large_source[last_pixel_offset/4]=0xff0000ffu;
+            tail=draw();renderer.WaitIdle();assert(check(tail,0));
+            puts("Indexed texture coherence: full cold tail validation, unrelated dropped-history reuse and same-frame overlapping CPU invalidation passed");
+        }
+        if(exact_compare && !page_index) {
             // An untouched cold entry compares only its next64KiB chunk.
             // Then make it hot and prove a full unchanged exact comparison.
             const auto cold=renderer.ExactTextureEqualCount();
@@ -258,7 +293,7 @@ int main(int argc,char** argv) {
             alias_pixels[last_pixel_offset/4]=0xff00ff00u;
             rebound=draw();renderer.WaitIdle();
             assert(renderer.ExactTextureDifferentCount()==alias_before+1 && check(rebound,1));
-            puts("Exact texture comparison: actual CP guard, cold chunk/full hot hits, first/final-partial unmarked edits and immutable queued versions passed");
+            puts("Exact texture comparison: actual CP guard, first/final-partial unmarked edits and immutable queued versions passed");
             puts("Exact texture comparison: same-VA remap rejects old source identity; unmarked physical-alias tail edit reaches next frame");
         }
         puts("Metal snapshot hashes: next-draw changes in first and final partial chunks regenerate immutable queued versions");

@@ -10,6 +10,7 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,7 @@ static void CpuContracts() {
     CacheFixture fixture;
     auto& cache=fixture.binding_cache;
     cache.enabled=true;
+    cache.inline_enabled=true;
     int a=0,b=0;
     cache.Reset(true);
     for(bool fragment:{false,true}) {
@@ -61,9 +63,48 @@ static void CpuContracts() {
     assert(cache.buffer_counts.intended==cache.buffer_counts.emitted+cache.buffer_counts.skipped);
     assert(cache.texture_counts.intended==cache.texture_counts.emitted+cache.texture_counts.skipped);
     assert(cache.sampler_counts.intended==cache.sampler_counts.emitted+cache.sampler_counts.skipped);
+    std::array<unsigned char,65> data{},copy{};
+    for(bool fragment:{false,true}) {
+        assert(cache.Bytes(fragment,Shader::Binding::UserData,data.data(),64));
+        assert(!cache.Bytes(fragment,Shader::Binding::UserData,copy.data(),64));
+        data[63]=1;
+        assert(cache.Bytes(fragment,Shader::Binding::UserData,data.data(),64));
+        assert(!cache.Bytes(fragment,Shader::Binding::UserData,data.data(),64));
+        data[63]=0;
+        assert(cache.Bytes(fragment,Shader::Binding::UserData,data.data(),64));
+    }
+    assert(cache.Bytes(false,Shader::Binding::Draw,data.data(),48));
+    assert(!cache.Bytes(false,Shader::Binding::Draw,data.data(),48));
+    assert(cache.Bytes(false,Shader::Binding::Draw,data.data(),32));
+    assert(cache.Bytes(false,Shader::Binding::Draw,data.data(),48));
+    // A larger unsupported binding overwrites Metal state, invalidating the
+    // preceding eligible payload even if its first64 bytes are identical.
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),65));
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(cache.Bytes(true,Shader::Binding::Draw,data.data(),48));
+    assert(cache.Bytes(true,Shader::Binding::Draw,data.data(),48));
+    assert(cache.Bytes(false,Shader::Binding::StaticSmrd,data.data(),64));
+    assert(cache.Bytes(false,Shader::Binding::StaticSmrd,data.data(),64));
+    cache.Reset();
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    cache.Reset(true);
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(!cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    cache.epoch=std::numeric_limits<u64>::max();
+    cache.Reset(true);
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(!cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(cache.inline_counts.intended==cache.inline_counts.emitted+cache.inline_counts.skipped);
+    cache.inline_enabled=false;
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    cache.inline_enabled=true;
     cache.enabled=false;
     assert(cache.Texture(true,0,&b) && cache.Texture(true,0,&b));
-    puts("Binding cache epochs, per-stage map identity, unretained bypass and reserved-slot contracts passed");
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    assert(cache.Bytes(false,Shader::Binding::UserData,data.data(),64));
+    puts("Binding cache identity/exact bytes, per-stage keys, encoder epochs, unretained/unsupported bypass contracts passed");
 }
 
 static int ProductionPixels() {
@@ -162,6 +203,16 @@ static int ProductionPixels() {
             regs[Reg::PA_SC_GENERIC_SCISSOR_TL]=k*2;
             regs[Reg::PA_SC_GENERIC_SCISSOR_BR]=(k*2+2)|(height<<16);
             renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            // Identical draws may suppress all three inline payloads. A changed
+            // viewport then collapses the geometry to a line; stale Draw
+            // constants would wrongly overwrite the stripe with another color.
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            const auto previous_scale=regs[Reg::PA_CL_VPORT_XSCALE];
+            regs[Reg::PA_CL_VPORT_XSCALE]=0;
+            regs[Reg::SPI_SHADER_USER_DATA_PS_0]^=16u; // other texture, same coordinate
+            renderer.Draw(regs,Gpu::DrawCall{.count=3});
+            regs[Reg::SPI_SHADER_USER_DATA_PS_0]^=16u;
+            regs[Reg::PA_CL_VPORT_XSCALE]=previous_scale;
         }
         renderer.Flip(Gpu::FlipInfo{.address=address+target_offset+pass*4096,.width=width,.height=height,.pitch=width});
         renderer.WaitIdle();
@@ -183,7 +234,64 @@ static int ProductionPixels() {
             }
         }
     }
-    puts("Production binding cache: same-pass texture/sampler/UD changes, both-stage map refresh and new-encoder reset preserve every pixel");
+    puts("Production binding cache: repeated/changed inline data, viewport changes, texture/sampler changes, map refresh and new-encoder reset preserve every pixel");
+    return 0;
+}
+
+// Isolate CPU encoding overhead, not gameplay throughput. Both modes call the
+// actual Metal inline binding API on the same encoder; only the exact-byte
+// cache differs. There are no GPU draws, texture checks or presentation here.
+static int EncodingBenchmark() {
+    auto device=MTLCreateSystemDefaultDevice();
+    if(!device)return 77;
+    auto queue=[device newCommandQueue];
+    auto descriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+        width:16 height:8 mipmapped:NO];
+    descriptor.usage=MTLTextureUsageRenderTarget;
+    descriptor.storageMode=MTLStorageModePrivate;
+    auto target=[device newTextureWithDescriptor:descriptor];
+    assert(target);
+    const auto run=[&](bool cached,unsigned count,bool every_binding_changes,bool report) {
+        CacheFixture fixture;
+        auto& cache=fixture.binding_cache;
+        cache.enabled=true;cache.inline_enabled=cached;cache.Reset(true);
+        auto command=[queue commandBuffer];
+        auto pass=[MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture=target;
+        pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction=MTLStoreActionDontCare;
+        auto encoder=[command renderCommandEncoderWithDescriptor:pass];
+        assert(encoder);
+        std::array<uint32_t,16> vertex{},fragment{};
+        auto draw=Shader::MakeDrawConsts(0x43f,{8,8,-4,4,1,0},16,8);
+        const auto begin=std::chrono::steady_clock::now();
+        for(unsigned k=0;k<count;++k) {
+            // Fixed per-pass viewport plus changing per-object user data.
+            vertex[15]=k/(every_binding_changes ? 1 : 16);
+            fragment[15]=k/(every_binding_changes ? 1 : 8);
+            if(every_binding_changes)draw.pad=k;
+            if(cache.Bytes(false,Shader::Binding::UserData,vertex.data(),64))
+                [encoder setVertexBytes:vertex.data() length:64 atIndex:Shader::Binding::UserData];
+            if(cache.Bytes(false,Shader::Binding::Draw,&draw,sizeof(draw)))
+                [encoder setVertexBytes:&draw length:sizeof(draw) atIndex:Shader::Binding::Draw];
+            if(cache.Bytes(true,Shader::Binding::UserData,fragment.data(),64))
+                [encoder setFragmentBytes:fragment.data() length:64 atIndex:Shader::Binding::UserData];
+        }
+        const auto end=std::chrono::steady_clock::now();
+        [encoder endEncoding];[command commit];[command waitUntilCompleted];
+        assert(command.status==MTLCommandBufferStatusCompleted && !command.error);
+        const unsigned expected=every_binding_changes ? count*3 : (count+15)/16+1+(count+7)/8;
+        if(cached)assert(cache.inline_counts.emitted==expected);
+        if(report)printf("Inline binding CPU encoding cache=%u pattern=%s iterations=%u time_ms=%.6f Metal_API_calls=%llu skipped=%llu\n",
+            cached,every_binding_changes ? "all-change" : "repeated",count,
+            std::chrono::duration<double,std::milli>(end-begin).count(),
+            cached ? cache.inline_counts.emitted : uint64_t(count)*3,
+            cache.inline_counts.skipped);
+    };
+    run(false,100000,false,false);run(true,100000,false,false);
+    for(bool changing:{false,true})
+        for(unsigned repeat=0;repeat<2;++repeat)
+            for(bool cached:{false,true,true,false})run(cached,100000,changing,true);
     return 0;
 }
 
@@ -191,5 +299,8 @@ int main(int argc,char** argv) {
     if(!std::getenv("BB_METAL_BINDING_CACHE"))setenv("BB_METAL_BINDING_CACHE","1",1);
     CpuContracts();
     if(argc>1 && !std::strcmp(argv[1],"--cpu-only"))return 0;
+    if(argc>1 && !std::strcmp(argv[1],"--benchmark")) {
+        @autoreleasepool {return EncodingBenchmark();}
+    }
     @autoreleasepool {return ProductionPixels();}
 }

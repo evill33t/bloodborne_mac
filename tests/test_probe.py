@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 import os
+from link_modules import pack_module_info
 
 EXE = Path(os.environ.get('BB_PROBE', str(ROOT / 'out/bb-probe')))
 
@@ -32,6 +33,48 @@ def native_package(name='fixture-native', binding_address=4112, binding_kind=1,
             + struct.pack('<9Q',0,4096,5,4096,4096,lib_flags,8192,4096,6)
             + name.encode().ljust(128,b'\0') + b'after-native'.ljust(128,b'\0')
             + struct.pack('<8Q',32,1,0,0,40,1,1,0) + image)
+
+
+def module_info_package(mutate=None, legacy=False, output_address=8256, check_fields=True):
+    """Guest x86 code calls the real NID/bridge and checks rebased EH metadata."""
+    code=bytearray(b'\x48\x83\xec\x08')
+    def rip(opcode,target):
+        code.extend(opcode)
+        code.extend(struct.pack('<i',target-(len(code)+4)))
+    rip(b'\x48\x8d\x3d',4112) # query an address inside the linked image
+    code.extend(b'\x31\xf6')
+    rip(b'\x48\x8d\x15',output_address)
+    rip(b'\xff\x15',128)
+    code.extend(b'\x89\xc3') # keep kernel result in EBX
+    if check_fields:
+        rip(b'\x48\x8d\x15',output_address)
+        rip(b'\x48\x8d\x0d',4608)
+        code.extend(bytes.fromhex('48398a500100007405bb01040000')) # EH frame address
+        code.extend(bytes.fromhex('83ba08010000017405bb02040000')) # module id1
+    code.extend(bytes.fromhex('89df4883c408'))
+    rip(b'\xff\x25',136)
+    assert len(code)<128
+    image=bytearray(12288);image[:len(code)]=code;image[4096:4099]=b'\x31\xc0\xc3'
+    struct.pack_into('<Q',image,output_address,424)
+    common=dict(size=424,tls_init_size=0,tls_size=0,tls_offset=0,tls_align=0,
+                tls_index=0,tls_init_addr=0,init_proc_addr=0,fini_proc_addr=0,
+                eh_frame_hdr_addr=0,eh_frame_addr=0,eh_frame_hdr_size=0,eh_frame_size=0)
+    main=dict(common,name='eboot.bin',id=0,segments=[(0,4096,5)])
+    linked=dict(common,name='fixture.prx',id=1,segments=[(4096,4096,5),(8192,4096,6)])
+    linked.update(tls_index=2,tls_init_addr=8192,tls_init_size=4,tls_size=32,tls_align=16,
+                  init_proc_addr=4096,eh_frame_hdr_addr=5120,eh_frame_hdr_size=8,
+                  eh_frame_addr=4608,eh_frame_size=4)
+    descriptions=[main,linked]
+    if mutate:mutate(descriptions)
+    description_blob=struct.pack('<Q',2)+b''.join(pack_module_info(m) for m in descriptions)
+    header=struct.pack('<8s6Q',b'BBPROBE5' if legacy else b'BBPROBE6',12288,0,3,2,2,1)
+    metadata=struct.pack('<7Q',256,0,0,0,0,1,4096)+struct.pack('<6Q',8192,4096,8192,32,4,2)+struct.pack('<Q',0)
+    # metadata: procparam, four main TLS fields, module count, one seven-Q
+    # module record, binding count. Keep the ordinary v5 section unchanged.
+    return (header+metadata+(b'' if legacy else description_blob)+
+            struct.pack('<9Q',0,4096,5,4096,4096,5,8192,4096,6)+
+            b'f7KBOafysXo#p#J'.ljust(128,b'\0')+b'after-module-info'.ljust(128,b'\0')+
+            struct.pack('<8Q',128,1,0,0,136,1,1,0)+image)
 
 
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
@@ -65,6 +108,58 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(r.returncode,20,r.stdout+r.stderr)
         self.assertIn('Module 0 initializer returned 0',r.stdout)
         self.assertIn('first unsupported PS4 import: after-native',r.stdout)
+
+    def test_v6_module_info_has_rebased_unwind_metadata_through_real_import(self):
+        r=self.run_image(module_info_package())
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('Loaded 2 module-info records',r.stdout)
+        self.assertIn('first unsupported PS4 import: after-module-info',r.stdout)
+        self.assertIn('first argument: 0x0',r.stdout)
+
+    def test_legacy_v5_does_not_claim_unwind_metadata_ready(self):
+        r=self.run_image(module_info_package(legacy=True,check_fields=False))
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('first unsupported PS4 import: after-module-info',r.stdout)
+        self.assertIn('first argument: 0x8002004e',r.stdout)
+        self.assertIn('module unwind metadata unavailable',r.stderr)
+
+    def test_module_info_readonly_guest_output_returns_fault(self):
+        r=self.run_image(module_info_package(output_address=2048,check_fields=False))
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('first argument: 0x8002000e',r.stdout)
+
+    def test_v6_module_info_ranges_and_identity_are_validated(self):
+        cases=[
+            (lambda m:m[1].update(id=0),'invalid module-info metadata'),
+            (lambda m:m[1].update(size=416),'invalid module-info metadata'),
+            (lambda m:m[1].update(segments=[(0,4096,5)]),'outside its image'),
+            (lambda m:m[1].update(segments=[(4096,4096,5)]),'incomplete module-info'),
+            (lambda m:m[1].update(segments=[(4096,4096,5),(4096,4096,5)]),'incomplete module-info'),
+            (lambda m:m[1].update(eh_frame_addr=12284,eh_frame_size=8),'unmapped module-info unwind'),
+            (lambda m:m[1].update(eh_frame_addr=512,eh_frame_size=8),'unmapped module-info unwind'),
+            (lambda m:m[1].update(tls_index=7),'module-info TLS metadata mismatch'),
+        ]
+        for mutate,message in cases:
+            with self.subTest(message=message):
+                r=self.run_image(module_info_package(mutate))
+                self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+                self.assertIn(message,r.stderr)
+
+    def test_v6_module_info_count_bounds_and_truncation(self):
+        data=bytearray(module_info_package());table=56+14*8
+        for count in (0,18):
+            with self.subTest(count=count):
+                bad=bytearray(data);struct.pack_into('<Q',bad,table,count)
+                r=self.run_image(bad)
+                self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+                self.assertIn('invalid module-info count',r.stderr)
+        bad=bytearray(data);struct.pack_into('<I',bad,table+8+424+416,5)
+        r=self.run_image(bad)
+        self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+        self.assertIn('invalid module-info metadata',r.stderr)
+        r=self.run_image(data[:table+8+423])
+        self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+        self.assertIn('truncated module-info table',r.stderr)
 
     def test_host_contract_takes_priority_over_native_export(self):
         r=self.run_image(native_package(name='bzQExy189ZI#q#q',native=b'\x0f\x0b'))
