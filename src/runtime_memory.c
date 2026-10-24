@@ -169,7 +169,7 @@ static int32_t memory_failure(MemoryFailureRequest request,const char *reason,
                 " bytes=%" PRIu64 " alignment=%" PRIu64 " low=%" PRId64 " high=%" PRId64
                 " prot=%#x flags=%#x type=%d fd=%d offset=%" PRId64 " result=%#x"
                 " host_errno_checked=%d host_errno=%d direct_live=%" PRIu64 " direct_budget=%" PRIu64
-                " flexible_live=%" PRIu64 " flexible_budget=%" PRIu64 " overwritten_flexible=%" PRIu64
+                " flexible_live=%" PRIu64 " flexible_budget=%" PRIu64 " overlap_flexible=%" PRIu64
                 " regions=%zu\n",row,request.operation,reason,thread,request.address_known,request.address,
                 request.output,request.bytes,request.alignment,request.low,request.high,request.prot,
                 request.flags,request.type,request.fd,request.offset,(unsigned)result,host.checked,
@@ -537,13 +537,13 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
         if(request.address<USER_MIN || request.address>=USER_MAX || size>USER_MAX-request.address)
             return memory_failure(request,"fixed-address-outside-guest-range",NO_MEMORY,(HostMemoryError){0});
         const uintptr_t end=request.address+size;
-        if((flags&MAP_NO_OVERWRITE) && overlaps(request.address,end,1))
-            return memory_failure(request,"no-overwrite",NO_MEMORY,(HostMemoryError){0});
         for(size_t i=vma_index(request.address);i<vma_count && vmas[i].start<end;++i)if(vmas[i].kind==KIND_FLEXIBLE) {
             const uintptr_t first=vmas[i].start>request.address ? vmas[i].start : request.address;
             const uintptr_t last=vmas[i].end<end ? vmas[i].end : end;
             request.overlap+=last-first;
         }
+        if((flags&MAP_NO_OVERWRITE) && overlaps(request.address,end,1))
+            return memory_failure(request,"no-overwrite",NO_MEMORY,(HostMemoryError){0});
     }
     // Replacement consumes only its net additional flexible bytes. Direct or
     // reserved mappings do not contribute quota credit; do not drop or alter
