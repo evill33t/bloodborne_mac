@@ -19,11 +19,11 @@ id<MTLRenderPipelineState> shadow_htile_depth_pipeline=nil;
 id<MTLDepthStencilState> shadow_htile_depth_state=nil;
 bool shadow_htile_gpu_enabled=[] {
   const char* value=std::getenv("BB_METAL_SHADOW_HTILE_GPU");
-  return value && !std::strcmp(value,"1");
+  return !value || !std::strcmp(value,"1");
 }();
 bool shadow_htile_rebind_enabled=[] {
   const char* value=std::getenv("BB_METAL_SHADOW_HTILE_REBIND");
-  return value && !std::strcmp(value,"1");
+  return !value || !std::strcmp(value,"1");
 }();
 struct ShadowHtileGpuCounts {std::atomic<u64> encoded{0},cleared{0};};
 std::shared_ptr<ShadowHtileGpuCounts> shadow_htile_gpu_counts=std::make_shared<ShadowHtileGpuCounts>();

@@ -76,7 +76,9 @@ texture lifetime hook or broad PM4-submit coalescing is claimed.
   those complete spans. Metadata/depth remaps and same-physical ABA reuse
   reject; merely rewriting a generation number is insufficient.
 
-All candidates initially remain optional pending matched gameplay assessment.
+The texture and binding candidates remain optional. Both shadow corrections
+now default on; setting either corresponding variable to0 restores its old
+path. The final-default gameplay validation is recorded below.
 Conditional depth draws add GPU work; they are a correctness correction, not
 an assumed FPS optimization.
 
@@ -184,5 +186,53 @@ implementation exists in the three upstream commits since our pin. The
 [assessment](MACOS_RECOMP_REVIEW_2026-10-24.md) separates useful mapping/replay
 tools from unproven whole-game AOT performance claims.
 
-Long post-fix travel, live shadow/foliage quality and matched clean FPS results
-are still pending. No native60FPS lock is established by the current results.
+## Image validation and stability continuation
+
+The dedicated arch camera replay completes60seconds on AC at native1080p,
+TAA/shadows/SSAO enabled and frame generation off, without GPU failures or
+missing presentation timestamps. Its raw capture contains20 phase records over
+four frames spaced30frames apart; every record's camera matches its frame.
+Across4,448,219 accepted static-depth samples, camera-registered mean absolute
+drift is0.514/255 for raw shadow alpha,0.533 before host TAA,0.425 after TAA,
+and2.603 in final scanout. Final postprocessing/particles/HUD are not all world
+registered. Right-side raw-shadow tiles reach1.44/255; the highest3.88/255 tile
+is near the character's lower image region. These are bounded observations,
+not proof that every camera-dependent artifact is eliminated or an isolated
+before/after improvement. Capture/video timings are excluded from clean FPS.
+
+The Hunter's Dream replay completes35seconds with no GPU failure or missing
+presentation timestamp. Its current-schema WINDOBS5 parser validates all240
+records: all sampled fixed original vertex stages are uniform within each draw;
+no sampled W140 variation or sampled wind/view/camera null read is observed.
+Two descriptor groups are covered. The first older W140-only parser correctly
+rejected this newer format; it is not evidence of a rendering failure.
+Videos include a stationary opening and a camera-turn interval. Recording,
+shader diagnostics and a concurrent build exclude timing/FPS conclusions.
+Sparse fixed-vertex sampling does not prove every vertex or animation speed;
+typed matrix mapping-null status remains unobserved.
+
+The later600-second V6 movement attempt fails after546.149seconds to its last
+submission, with31,037 submitted frames after the start and no missing
+presentation timestamp. All four travel requests occur. The module query
+succeeds (`queries=1`, unknown/unavailable=0), then the previously unimplemented
+POSIX `msync` import stops the process. It records6,540 positive conditional
+clears,4 binding revalidations, no readiness rejection and no reported GPU
+failure. This is another failed stability interval, not a completed soak.
+
+The runtime now implements actual host memory synchronization with guest16KiB
+rounding, FreeBSD flag/errno translation, reservation/hole checks and real
+error propagation. Native/Rosetta syscall fixtures and20 loader tests per
+architecture pass, including an actual-NID4KiB-aligned probe. See the
+[msync report](MACOS_MSYNC_2026-10-24.md).
+
+The combined default build succeeds. The43-test native suite initially has a
+display-update timing assertion in the presentation test and a display-link
+skip; both pass in isolation afterward. This yields41 distinct passing native
+CTest paths and2 private-input skips. The supplied original HTILE GPU,
+GPU-off and lease regressions also pass with the combined default build.
+
+A720-second movement/travel replay is running with the final binary
+`2cc5e1ae0bfc693af3f31de14102729782b158aacc15e7eadacead72dd64c511`.
+It leaves both shadow override variables unset, uses the new defaults, and
+keeps journal/binding experiments off. Its final result is pending. No
+native60FPS lock is established by the completed matched comparisons above.

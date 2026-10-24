@@ -59,6 +59,27 @@ boundaries and fences in place. Shader precompilation is a separate mechanism.
 Any FPS benefit therefore depends on the CPU portion actually limiting the
 frame; it cannot be inferred from the word “native.”
 
+Our latest light diagnostic's first90seconds, before area travel, contains
+7.72ms/frame in texture change checks, within11.92ms texture resolution and
+19.66ms producer CPU frame wall. Renderer command GPU interval union is15.08ms
+and no CPU GPU wait was requested. These are nested/elapsed diagnostic spans,
+not exclusive costs or a clean FPS comparison; the later soak stopped on a
+missing runtime API. Even with those limits, they identify substantial work
+inside our host renderer which recompiling guest CPU instructions would leave
+in place. Evidence: `partial-soak-v6-diagnostic.json` beside the resource report.
+Verified resource-creation/write hooks are a more relevant application of the
+function map than a blanket AOT enablement.
+
+Published CP/GPU writes are tracked, but the current Metal bridge's
+`bbgpu_handle_fault` returns0. There is no CPU write-fault observer in that
+bridge to turn arbitrary guest stores into a complete dirty set. Stable
+descriptors or this capture's unchanged texture comparisons cannot establish
+immutability. A future dirty-tracking path must cover raw stores, physical
+aliases, mapping lifetime changes, concurrent producers and queued GPU versions,
+with complete-validation fallback whenever its proof is unavailable. The
+mapping/record/replay tools can help establish the creation/upload boundaries;
+they do not provide that Metal coherence implementation themselves.
+
 The related runtime's
 [native renderer plan](https://github.com/bloodborne-native/bloodborne-runtime/blob/1c8f8aa1dd6dbf3588d17d979a6d549cdb787fa5/docs/NATIVE_RENDERER.md)
 is useful as a hypothesis source for encoder breaks and resource objects.

@@ -1,17 +1,21 @@
 # Native module unwind metadata, 2026-10-24
 
-The later 600-second gameplay soak stopped near 590 seconds on the previously
+The later 600-second gameplay soak stopped after 579.3307 seconds on the previously
 unimplemented `sceKernelGetModuleInfoFromAddr` import (`f7KBOafysXo#p#J`). It
 did not finish its planned stability interval. The queried guest address
-`0x70057336fa` belongs to linked `libc.prx`, at offset `0x536fa`. Parent analysis
+`0x70057336fa` belongs to linked `libc.prx`, at offset `0x536fa`. Offline analysis
 identifies the enclosing export at `0x536b0` as `_Unwind_RaiseException` by its
 exact NID. The address follows the native `getcontext` call that previously
 exposed the unsupported segment-register save. This is evidence of C++ exception
 unwinding, not proof that the underlying throw is fatal or caused by Metal.
 
 The runtime now implements the actual module-information query. No exception
-handler, terminate path or guest error is suppressed. A gameplay replay must
-still determine whether the game catches the original exception successfully.
+handler, terminate path or guest error is suppressed. A subsequent BBPROBE6
+gameplay replay executes one successful module-info query, with no unknown
+address or unavailable metadata. It then stops on the next unsupported import,
+`msync`; it is not a completed stability pass. See
+[the msync continuation](MACOS_MSYNC_2026-10-24.md). Whether the game catches the
+original exception still requires completing the unwinder's remaining path.
 
 ## Prepared metadata and runtime contract
 
@@ -66,7 +70,9 @@ invalid pointers, guarded output tails, transactional readiness and 8,000
 concurrent queries. Five synthetic Python ELF tests pass pointer encodings,
 exact frame extent, packed offsets and malformed header/range rejection.
 
-All 19 native loader tests pass. New synthetic x86 guests call the real scoped
+All 20 native and 20 Rosetta loader tests pass after the msync continuation.
+The Rosetta run uses `ROSETTA_ADVERTISE_AVX=1`; without that setting, its existing
+CPU preflight rejects execution before reaching the loader. Synthetic x86 guests call the real scoped
 NID through the native bridge and verify the rebased EH pointer and module ID.
 They also test legacy readiness, read-only output and malformed metadata counts,
 truncation, ownership ranges and TLS. These fixtures use owned temporary images;
@@ -74,5 +80,6 @@ they neither launch Bloodborne nor write original game files or master saves.
 
 Evidence is retained under `out/metal-resource-2026-10-24/` in
 `module-info-native-build.log`, `module-info-native-loader.log` and
-`module-info-cpu.log`. A post-fix original-game unwind replay, long gameplay
-stability and the Rosetta-specific build/test remain separate required checks.
+`module-info-cpu.log`; the later cross-architecture loader logs are
+`msync-native-loader.log` and `msync-x86-loader.log`. A completed original-game
+exception replay and long gameplay stability remain required checks.

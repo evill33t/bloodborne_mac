@@ -3,3 +3,8 @@ target_include_directories(bb-runtime-module-tests PRIVATE "${BB_ROOT}" "${BB_RO
 target_compile_options(bb-runtime-module-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_test(NAME darwin-runtime-module-info COMMAND bb-runtime-module-tests)
 set_tests_properties(darwin-runtime-module-info PROPERTIES TIMEOUT 15)
+add_executable(bb-runtime-msync-tests "${BB_ROOT}/tests/test_macos_msync.c")
+target_include_directories(bb-runtime-msync-tests PRIVATE "${BB_ROOT}" "${BB_ROOT}/src")
+target_compile_options(bb-runtime-msync-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-runtime-msync COMMAND bb-runtime-msync-tests)
+set_tests_properties(darwin-runtime-msync PROPERTIES TIMEOUT 15)

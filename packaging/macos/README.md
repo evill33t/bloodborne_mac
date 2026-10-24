@@ -213,9 +213,10 @@ eviction and validates complete textures on first use each frame; mode2 uses
 indexed queries only while bounded history is complete. `BB_METAL_BINDING_CACHE=2`
 also suppresses byte-identical inline bindings inside each encoder. Matched AC
 gameplay did not establish a repeatable FPS gain, so these remain disabled.
-`BB_METAL_SHADOW_HTILE_GPU=1` and `BB_METAL_SHADOW_HTILE_REBIND=1` cover known
-pending-writer and unchanged-binding shadow-clear gaps, with complete backing
-leases and conservative alias rejection. See the
+The known pending-writer and unchanged-binding shadow-clear corrections now
+default on, with complete backing leases and conservative alias rejection.
+`BB_METAL_SHADOW_HTILE_GPU=0` and `BB_METAL_SHADOW_HTILE_REBIND=0` select the
+previous paths for diagnosis. See the
 [resource and shadow report](../../docs/MACOS_METAL_RESOURCES_2026-10-24.md)
 for validation and current defaults. Native module unwinding requires newly
 prepared BBPROBE6 data; the normal launcher regenerates it. Keep frozen test

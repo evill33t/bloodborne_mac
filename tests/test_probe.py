@@ -77,6 +77,21 @@ def module_info_package(mutate=None, legacy=False, output_address=8256, check_fi
             struct.pack('<8Q',128,1,0,0,136,1,1,0)+image)
 
 
+def msync_package():
+    code=bytearray(b'\x48\x83\xec\x08')
+    def rip(opcode,target):
+        code.extend(opcode);code.extend(struct.pack('<i',target-(len(code)+4)))
+    rip(b'\x48\x8d\x3d',8192) #4KiB aligned, not16KiB aligned
+    code.extend(b'\xbe'+struct.pack('<I',4096)+b'\xba'+struct.pack('<I',1))
+    rip(b'\xff\x15',128)
+    code.extend(bytes.fromhex('89c74883c408'))
+    rip(b'\xff\x25',136)
+    image=bytes(code).ljust(16384,b'\0')
+    return (struct.pack('<8s6Q',b'BBPROBE2',len(image),0,1,2,2,1)+
+            struct.pack('<3Q',0,len(image),5)+b'tZY4+SZNFhA#p#J'.ljust(128,b'\0')+
+            b'after-msync'.ljust(128,b'\0')+struct.pack('<8Q',128,1,0,0,136,1,1,0)+image)
+
+
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
     def test_invalid_content_profile_is_rejected(self):
@@ -102,6 +117,13 @@ class LoaderTests(unittest.TestCase):
         r = self.run_image(package(b'\xff\x25\x02\0\0\0\x90\x90', [(8, 1, 0, 0)], ['fixture-import']))
         self.assertEqual(r.returncode, 20, r.stderr)
         self.assertIn('first unsupported PS4 import: fixture-import', r.stdout)
+
+    def test_ps4_msync_import_accepts_unwind_page_probe(self):
+        r=self.run_image(msync_package())
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('first unsupported PS4 import: after-msync',r.stdout)
+        self.assertIn('first argument: 0x0',r.stdout)
+        self.assertIn('guest msync calls=1',r.stdout)
 
     def test_native_initializer_and_export_return(self):
         r=self.run_image(native_package())

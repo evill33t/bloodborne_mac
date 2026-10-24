@@ -151,6 +151,7 @@ enum { HOOK_MAP, HOOK_UNMAP, HOOK_INVALIDATE };
 typedef struct { int kind; uintptr_t address; uint64_t size; } PendingHook;
 static PendingHook pending[64]; static size_t pending_count;
 static size_t allocations, maps, flexible_maps, protects, queries;
+static uint64_t msync_calls;
 static uint64_t live_bytes, flexible_bytes;
 
 static int valid_alignment(uint64_t a) { return a >= PAGE && a <= POOL_SIZE && !(a & (a-1)); }
@@ -735,6 +736,94 @@ static ABI void *posix_mmap(void *address, uint64_t size, int prot, int flags,
     *runtime_errno()=(uint32_t)result&0xffff;
     return (void *)(uintptr_t)UINTPTR_MAX;
 }
+#ifndef _WIN32
+/* FreeBSD's zero-length msync flushes the VM region containing the address.
+ * Guest direct/flexible regions use our own table; low guest stacks/images
+ * have actual anonymous host mappings and must use the host's region bounds. */
+static int msync_host_region(uintptr_t address,uintptr_t *start,uintptr_t *end) {
+#ifdef __APPLE__
+    mach_vm_address_t region=address;
+    mach_vm_size_t length=0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object=MACH_PORT_NULL;
+    kern_return_t result=mach_vm_region(mach_task_self(),&region,&length,
+        VM_REGION_BASIC_INFO_64,(vm_region_info_t)&info,&count,&object);
+    if(object!=MACH_PORT_NULL)mach_port_deallocate(mach_task_self(),object);
+    if(result!=KERN_SUCCESS || region>address || !length || region>UINTPTR_MAX-length)return 0;
+    *start=(uintptr_t)region;*end=(uintptr_t)(region+length);
+    return address<*end;
+#else
+    FILE *maps_file=fopen("/proc/self/maps","r");
+    if(!maps_file)return 0;
+    char line[512];unsigned long long low,high;
+    int found=0;
+    while(fgets(line,sizeof(line),maps_file))
+        if(sscanf(line,"%llx-%llx",&low,&high)==2 && address>=low && address<high) {
+            *start=(uintptr_t)low;*end=(uintptr_t)high;found=1;break;
+        }
+    fclose(maps_file);return found;
+#endif
+}
+#endif
+/* The PS4 inherits FreeBSD9's MS_SYNC=0, MS_ASYNC=1, MS_INVALIDATE=2.
+ * Its kernel rounds addresses (including libunwind's 4 KiB probes) to its
+ * 16 KiB pages. Passing guest flags/unaligned addresses straight to Darwin
+ * would both misinterpret sync mode and reject valid unwinder stack probes. */
+static ABI int32_t posix_msync(void *address,uint64_t size,int flags) {
+    __atomic_add_fetch(&msync_calls,1,__ATOMIC_RELAXED);
+    const uintptr_t original=(uintptr_t)address;
+    uintptr_t start=original&~(uintptr_t)(PAGE-1);
+    const uint64_t offset=original-start;
+    if(((unsigned)flags&3)==3 || size>UINTPTR_MAX-offset ||
+       size+offset>UINTPTR_MAX-(PAGE-1)) {
+        *runtime_errno()=22;return -1;
+    }
+    uint64_t length=align_up(size+offset,PAGE);
+    if(start>UINTPTR_MAX-length) {*runtime_errno()=22;return -1;}
+#ifdef _WIN32
+    /* FlushViewOfFile is not a POSIX msync substitute for anonymous/private
+     * mappings. This macOS implementation does not claim Windows support. */
+    *runtime_errno()=78;return -1;
+#else
+    read_lock();
+    int valid=1;
+    if(!length) {
+        if(start>=USER_MIN && start<USER_MAX) {
+            const size_t at=vma_index(start);
+            if(at==vma_count || vmas[at].start>start || vmas[at].kind==KIND_RESERVED)valid=0;
+            else {start=vmas[at].start;length=vmas[at].end-start;}
+        } else {
+            uintptr_t end=0;
+            valid=msync_host_region(start,&start,&end);
+            if(valid)length=end-start;
+        }
+    }
+    /* A PROT_NONE reservation is a real host mapping but not mapped guest
+     * memory. Never let host msync falsely validate that guest hole. */
+    const uintptr_t end=start+length;
+    if(valid && start<USER_MAX && end>USER_MIN) {
+        const uintptr_t checked_start=start<USER_MIN ? USER_MIN : start;
+        const uintptr_t checked_end=end>USER_MAX ? USER_MAX : end;
+        valid=covered(checked_start,checked_end,0);
+    }
+    int result=-1,host_error=EINVAL;
+    if(valid) {
+        /* FreeBSD9 ignores bits other than ASYNC/INVALIDATE. Do not forward
+         * them as Darwin KILLPAGES/DEACTIVATE flags that can discard data. */
+        int host_flags=((unsigned)flags&1) ? MS_ASYNC : MS_SYNC;
+        if((unsigned)flags&2)host_flags|=MS_INVALIDATE;
+        result=msync((void *)start,(size_t)length,host_flags);
+        if(result)host_error=errno;
+    }
+    read_unlock();
+    if(!result)return 0;
+    /* FreeBSD vm_map_sync maps an unmapped range to EINVAL; Darwin/Linux's
+     * msync return ENOMEM for that case. Other real I/O errors remain errors. */
+    *runtime_errno()=host_error==ENOMEM ? 22 : runtime_guest_errno(host_error);
+    return -1;
+#endif
+}
 static ABI int32_t posix_munmap(void *address, uint64_t size) {
     const uintptr_t start=(uintptr_t)address;
     int32_t result=start<USER_MIN || start>=USER_MAX || !size || size>USER_MAX-start
@@ -852,7 +941,7 @@ static const RuntimeExport exports[]={
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",posix_munmap},
-    {"sceKernelMmap",kernel_mmap}, {"mmap",posix_mmap},
+    {"sceKernelMmap",kernel_mmap}, {"mmap",posix_mmap}, {"msync",posix_msync},
     {"sceKernelMapFlexibleMemory",map_flexible}, {"sceKernelMapNamedFlexibleMemory",map_flexible_named},
     {"sceKernelReleaseFlexibleMemory",release_flexible}, {"sceKernelReserveVirtualRange",reserve_range},
     {"sceKernelMprotect",kernel_mprotect}, {"sceKernelQueryMemoryProtection",query_protection},
@@ -867,6 +956,7 @@ uintptr_t runtime_memory_resolve(const char *name) {
     if (!strcmp(name, "MBuItvba6z8#p#J")) return (uintptr_t)direct_release;
     if (!strcmp(name, "cQke9UuBQOk#p#J")) return (uintptr_t)direct_unmap;
     if (!strcmp(name, "BPE9s9vQQXo#p#J")) return (uintptr_t)posix_mmap;
+    if (!strcmp(name, "tZY4+SZNFhA#p#J")) return (uintptr_t)posix_msync;
     return RUNTIME_LOOKUP(exports,name);
 }
 uint64_t runtime_gpu_memory_size(void) { return POOL_SIZE; }
@@ -1329,5 +1419,6 @@ void runtime_memory_report(void) {
            allocations, maps, live_bytes, POOL_SIZE);
     printf("Runtime: flexible maps=%zu, in use=%" PRIu64 ", protects=%zu, queries=%zu, regions=%zu\n",
            flexible_maps, flexible_bytes, protects, queries, vma_count);
+    printf("Runtime: guest msync calls=%" PRIu64 "\n",__atomic_load_n(&msync_calls,__ATOMIC_RELAXED));
 }
 
