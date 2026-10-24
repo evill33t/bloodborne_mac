@@ -43,8 +43,8 @@ reporting bridge is needed before this diagnostic can report that information.
 On the native ARM translator, the same flag also installs an existing bbcpu
 observation probe at the loader's exact bound `vkuuLfhnSZI#q#q` import
 (`__cxa_throw`). Installation requires the bound function kind, a complete
-54-byte extent inside the first linked module (libc) and an executable segment, and the observed
-12-byte entry prologue. Ambiguous targets or a mismatch refuse observation
+54-byte extent inside the first linked module (libc) and an executable segment,
+and the observed 12-byte entry prologue. Ambiguous targets or a mismatch refuse observation
 without affecting the guest. This short prologue guard is not a full binary
 identity check. The current original libc export is RVA `0x60510`, size 54.
 The observer follows the bound target rather than assuming its aggregate
@@ -108,4 +108,4 @@ directory. No gameplay or GPU test was launched to validate this new observer.
 The initiating gameplay exception remains unknown until an observed replay.
 
 Native game SHA-256 with throw observation support:
-`7a74c58e44e8a57a74760f343563554e19c4931247c988a576cca16389ddce2b`.
+`a4fb58eee8668b5d0bce3bba86362e93de486cee5c0d89c94fedebcc2962665a`.
