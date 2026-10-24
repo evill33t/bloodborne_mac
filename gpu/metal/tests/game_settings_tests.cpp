@@ -33,6 +33,16 @@ int main() {
     v.matchmaking_url="http://[::1]:18671"; v.optimized_lights=true; v.model_lod=-2;
     assert(Save(path,v,error) && Load(path)==v && NeedsRestart(v,Values{}));
     for (const auto* url:{"file:///tmp/test","https://a@b","https://[","http://host:0","https://host:65536","https://host/path","https://host\r\nX:1"}) assert(!ValidServer(url));
+    v=Values{}; v.nightwatch_mode=1; v.nightwatch_players=4; v.nightwatch_port=47600;
+    v.nightwatch_name="Hunter_2"; v.nightwatch_code="BBP3-NJR0-E43N-WWN9-2C2P"; v.nightwatch_rot=true;
+    assert(Save(path,v,error) && Load(path)==v && NeedsRestart(v,Values{}));
+    for (int role:{0,1,2}) { v.nightwatch_mode=role; assert(Save(path,v,error) && Load(path)==v); }
+    for (const auto* name:{"","two hunters","x\ny","../save","12345678901234567"}) assert(!ValidNightwatchName(name));
+    for (const auto* code:{"BBP3-code\nnightwatch_mode=1","http://host","BBP3-code;comment"}) assert(!ValidNightwatchCode(code));
+    assert(ValidNightwatchCode("BBP3-CODE+6-ABCD"));
+    v.nightwatch_mode=3;v.nightwatch_players=20;v.nightwatch_port=65536;v.nightwatch_name="bad name";v.nightwatch_code="bad\ncode";
+    Validate(v); assert(v.nightwatch_mode==0 && v.nightwatch_players==3 && v.nightwatch_port==9307);
+    assert(v.nightwatch_name=="Hunter" && v.nightwatch_code.empty());
     std::ofstream(path) << "frame_cap=60junk\nrender_resolution=1x1\nsharpness=nan\n"
         "vsync=2\nfullscreen=garbage\neffect_game_aa=0\nframe_cap=90\nshow_fps=0 # comment\n";
     v=Load(path);

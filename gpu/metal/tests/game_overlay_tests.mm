@@ -108,6 +108,18 @@ int main() {
             auto scaler=(NSPopUpButton*)Find(window.contentView,@"Upscaling");
             auto res=(NSPopUpButton*)Find(window.contentView,@"Render resolution (restart required)");
             assert(cap.indexOfSelectedItem==3 && scaler.indexOfSelectedItem==1 && res.indexOfSelectedItem==1);
+            auto mode=(NSPopUpButton*)Find(window.contentView,@"Nightwatch mode · restart required");
+            auto size=(NSPopUpButton*)Find(window.contentView,@"Nightwatch party size");
+            auto name=(NSTextField*)Find(window.contentView,@"Hunter name (1–16 letters, numbers, _ or -)");
+            auto port=(NSTextField*)Find(window.contentView,@"Party port (1–65535)");
+            assert(mode && size && name && port && mode.indexOfSelectedItem==0);
+            [size selectItemAtIndex:2]; name.stringValue=@"Hunter_Mac"; port.stringValue=@"47600";
+            Invoke(Find(window.contentView,@"Apply & save"));
+            assert(restored.nightwatch_players==4 && restored.nightwatch_port==47600 && restored.nightwatch_name=="Hunter_Mac");
+            assert(MacSettings::Load(path)==restored);
+            name.stringValue=@"invalid name";
+            Invoke(Find(window.contentView,@"Apply & save"));
+            assert(MacSettings::Load(path)==restored); // bad drafts never replace saved settings
         }
         std::filesystem::remove_all(dir); SDL_DestroyWindow(sdl); SDL_Quit();
         puts("Settings overlay: real Cocoa controls, apply/save/restart, hotkeys and input capture passed");
