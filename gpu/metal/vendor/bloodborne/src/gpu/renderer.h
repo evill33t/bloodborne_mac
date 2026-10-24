@@ -6,8 +6,7 @@
 // The frontend decodes command buffers the game submits through
 // sceGnmSubmitCommandBuffers / sceGnmDingDong, tracks register state, and
 // calls into this interface only for work that touches the host GPU.
-// Backends: Metal (macOS, src/gpu/metal) and Vulkan (Windows/Linux, also
-// usable on macOS through MoltenVK; src/gpu/vulkan wraps shadPS4's renderer).
+// Backend: direct Metal on macOS (src/gpu/metal).
 
 #include <cstdint>
 #include <cstddef>

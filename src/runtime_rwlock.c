@@ -1,4 +1,4 @@
-/* Linux rwlocks behind PS4 pointer-to-handle ABI. The registry protects
+/* Darwin rwlocks behind PS4 pointer-to-handle ABI. The registry protects
    lifetime, static initialization and ownership; waiting happens outside it. */
 #define _GNU_SOURCE
 #include "runtime.h"

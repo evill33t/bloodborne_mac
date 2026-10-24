@@ -17,7 +17,7 @@ GAME_FOLDERS = {'action', 'chr', 'event', 'facegen', 'font', 'map', 'menu', 'mov
 
 def child(folder, name):
     """`name` inside `folder`, matching an existing entry case-insensitively (mods made on
-    Windows often differ from the game's lower-case names)."""
+    Other tools often differ from the game's lower-case names)."""
     folder = Path(folder)
     for entry in (folder.iterdir() if folder.is_dir() else ()):
         if entry.name.casefold() == name.casefold():
@@ -175,8 +175,7 @@ def expand(directory):
 
 
 def build_overlay(game, out, mods):
-    """beside_game: on another drive than the game, the view goes next to the game (hard links
-    reach only one volume); False keeps it in `out` (files are then copied, folders linked)."""
+    """Create a temporary symlink view in `out`, leaving all source files intact."""
     game = Path(game).resolve(strict=True)
     replacements = []
     owners = {}

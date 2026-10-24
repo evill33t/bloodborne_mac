@@ -1,11 +1,6 @@
-/* PS4 virtual memory: direct (physical) pool, flexible memory, reservations,
- * protection changes and queries. One sparse memfd backs the whole direct
- * pool, so any mapping of any physical range aliases the same storage.
- * Windows: a pagefile-backed section plays the memfd's part, and the PS4 user range is
- * reserved as one placeholder that views of the section replace (VirtualAlloc2/MapViewOfFile3,
- * as shadPS4 does); see the "host mappings" section below.
- * Guest addresses are placed below 1 TiB (PS4 user range): GPU descriptors
- * encode 40-bit addresses, so host-default 0x7f... addresses would not fit. */
+/* PS4 virtual memory: direct-memory aliases, flexible memory, reservations,
+ * protection changes and queries, backed by Darwin shared memory and Mach VM.
+ * Guest pointers stay below 1 TiB so they fit 40-bit GPU descriptors. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "runtime_gpu_memory.h"
@@ -65,8 +60,7 @@ _Static_assert(sizeof(BatchEntry)==32,"PS4 batch map entry layout");
 /* Region table lock. Lookups (GPU per-draw queries, VirtualQuery, GPU page
  * protection) share it; map/unmap/protect take it exclusively. Both nest: code
  * under the lock may write guest memory, and a GPU-tracked page then faults into
- * runtime_memory_gpu_protect on the same thread. Readers nest because glibc's
- * default rwlock prefers readers; a thread holding it exclusively skips relocking. */
+ * runtime_memory_gpu_protect on the same thread. Readers nest to preserve recursive lookups; a thread holding it exclusively skips relocking. */
 static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
@@ -1011,7 +1005,7 @@ void *runtime_low_map(size_t size, int prot) {
 /* ---- GPU library interface (gpu/shim/bbgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by
  * BB_TOGGLE_FILE, re-read every 250 ms. Bits: 1 region cache, 2 fetch shader cache,
- * 4 page tracking early exit, 8 pending-op poll limit, 16 threaded Vulkan recording,
+ * 4 page tracking early exit, 8 pending-op poll limit, 16 threaded command recording,
  * 32 texture descriptor cache, 64 lock-free upload check, 128 image lookup cache,
  * 256 buffer uploads on the recording thread, 512 barrier tracker insert memo,
  * 1024 texture binding memo, 2048 page-granular read tracking for barriers,

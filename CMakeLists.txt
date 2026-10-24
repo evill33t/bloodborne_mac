@@ -26,16 +26,16 @@ add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/bb-macos-cpu-probe"
     DEPENDS tools/macos_cpu_probe.c VERBATIM)
 add_custom_target(bb-macos-cpu-probe-build ALL DEPENDS "${CMAKE_BINARY_DIR}/bb-macos-cpu-probe")
 if(BUILD_TESTING)
-    add_executable(bb-macos-memory-tests tests/test_macos_memory.c)
+    add_executable(bb-macos-memory-tests tests/test_macos_memory.c src/runtime_errno.c)
     target_compile_features(bb-macos-memory-tests PRIVATE c_std_11)
     target_compile_options(bb-macos-memory-tests PRIVATE -Wall -Wextra -Werror)
     add_test(NAME macos-guest-memory COMMAND bb-macos-memory-tests)
     set_tests_properties(macos-guest-memory PROPERTIES TIMEOUT 30)
     add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/bb-macos-memory-tests-x86_64"
         COMMAND "${BB_XCRUN}" clang -arch x86_64 -std=c11 -O2 -Wall -Wextra -Werror
-            "${CMAKE_SOURCE_DIR}/tests/test_macos_memory.c"
+            "${CMAKE_SOURCE_DIR}/tests/test_macos_memory.c" "${CMAKE_SOURCE_DIR}/src/runtime_errno.c"
             -o "${CMAKE_BINARY_DIR}/bb-macos-memory-tests-x86_64"
-        DEPENDS tests/test_macos_memory.c src/runtime_memory.c src/runtime.h src/runtime_gpu_memory.h
+        DEPENDS tests/test_macos_memory.c src/runtime_memory.c src/runtime_errno.c src/runtime.h src/runtime_gpu_memory.h
             src/checkpoint/memory.h VERBATIM)
     add_custom_target(bb-macos-memory-tests-x86-build ALL
         DEPENDS "${CMAKE_BINARY_DIR}/bb-macos-memory-tests-x86_64")

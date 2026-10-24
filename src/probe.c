@@ -142,8 +142,8 @@ static void check_cpu(void) {
     exit(24);
 #endif
 }
-/* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
- * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
+/* Preparation marks guest TLS loads with GS. Darwin owns GS, so restore FS
+ * for the Rosetta process; bbcpu interprets the guest FS base on arm64. */
 static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     static const unsigned char load[]={0x65,0x48,0x8b,0x04,0x25,0,0,0,0};
     uint32_t displacement=0; /* Darwin guest TLS uses FS; GS belongs to libpthread. */

@@ -56,8 +56,8 @@ marker and the maximum 64-bit value. No test dereferences those PC values.
 A private external-input fixture under `out/metal-resource-2026-10-24/` also
 executes the unchanged original 90-byte consumer, its 36-byte address-space
 helper and original PLT at preserved RVAs. It supplies owned cursor storage
-and a zero initialization dword, exercising the helper's actual existing
-initialized-state path. All eight PC cases return 0 and store cursor kind 0
+and a zero initialization dword, exercising the helper's actual zero-state
+path. All eight PC cases return 0 and store cursor kind 0
 on native and Rosetta. Original procedure bodies stay in private analysis
 artifacts, outside tracked test source. Before/after source SHA-256 remains
 `6e84e6dc84305a0fcf43563ff454a2866208ae4d61f1a4ece1ba717cdc1f1170`.

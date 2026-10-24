@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Local achievements, compatible with pyL1nx/bloodborne_pc's trophies.log and
- * launcher/bbport_trophies.py (64919f7da13a24bac53578acec5f74f959fe5c4e).
+ * scripts/trophies.py (64919f7da13a24bac53578acec5f74f959fe5c4e).
  * Game calls produce durable unlocks and queued UI events; no UI on guest threads.
  */
 #include "runtime.h"

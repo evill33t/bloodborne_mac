@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// The existing bbnet resolver ABI, without the Vulkan renderer's headers.
+// Minimal bbnet symbol resolver ABI for the macOS network adapter.
 #pragma once
 #include "common/types.h"
 namespace Core::Loader {

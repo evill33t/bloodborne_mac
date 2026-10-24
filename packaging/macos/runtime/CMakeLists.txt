@@ -96,7 +96,7 @@ add_test(NAME darwin-checkpoint-semaphore COMMAND "${Python3_EXECUTABLE}"
     "${BB_ROOT}/tests/test_checkpoint_roundtrip.py" "$<TARGET_FILE:bb-checkpoint-semaphore-tests>")
 set_tests_properties(darwin-checkpoint-semaphore PROPERTIES TIMEOUT 45)
 add_executable(bb-checkpoint-memory-tests "${BB_ROOT}/tests/test_checkpoint_memory.cpp"
-    "${BB_ROOT}/tests/test_checkpoint_memory_bridge.c")
+    "${BB_ROOT}/tests/test_checkpoint_memory_bridge.c" "${BB_ROOT}/src/runtime_errno.c")
 target_compile_options(bb-checkpoint-memory-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(bb-checkpoint-memory-tests PRIVATE bb-checkpoint)
 add_test(NAME darwin-checkpoint-memory COMMAND "${Python3_EXECUTABLE}"

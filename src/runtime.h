@@ -84,7 +84,7 @@ void *runtime_low_map(size_t size, int prot);
 /* Restore-owned low allocations only. Fails if any mapping already occupies
  * the range; never replaces live host or guest memory. */
 void *runtime_low_map_at(uintptr_t address,size_t size,int prot);
-/* Windows/macOS: reserves the guest address range before fixed mappings replace it. */
+/* Reserves the Darwin guest address range before fixed mappings replace it. */
 void runtime_memory_reserve(void);
 uintptr_t runtime_ajm_resolve(const char *name);
 void runtime_ajm_report(void);

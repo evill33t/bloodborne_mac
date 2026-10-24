@@ -159,7 +159,7 @@ def link(game, out):
             s = exports[identity]
             bindings.append((index,base+s['value'],2 if s['type']==1 else 1))
     # The eboot reads its thread pointer with `mov rax, fs:[0]` (initial-exec
-    # TLS). glibc owns FS on Linux, so rewrite the segment prefix to GS; the
+    # TLS). mark the segment prefix as GS; the
     # runtime points GS at each guest thread's TCB. Only executable eboot
     # segments are scanned, and only this exact 9-byte instruction.
     fs_load = bytes.fromhex('64488b042500000000')

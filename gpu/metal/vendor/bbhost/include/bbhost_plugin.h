@@ -1,6 +1,6 @@
 /* bbhost plugin API, version 10.
  *
- * A plugin is a shared library (.so on Linux, .dll on Windows) in
+ * A plugin is a macOS shared library (.dylib) in
  * <exe dir>/plugins or <data>/plugins. The host loads every one at start and
  * calls, in this order:
  *
@@ -17,9 +17,8 @@
  * Both return 0 to stay loaded; anything else unloads the plugin with a log
  * line. Everything is plain C with the platform's default calling
  * convention, except a function handed to register_hle: the game calls it
- * with the PS4's SysV ABI, so it must carry BB_GUEST_ABI (Clang and GCC on
- * Windows; MSVC cannot express it, so register_hle is not for MSVC-built
- * plugins). Hook callbacks are ordinary C functions; the host adapts.
+ * with the PS4's SysV ABI through the runtime guest-call bridge.
+ * Hook callbacks are ordinary C functions; the host adapts.
  *
  * Addresses are Binary Ninja's for the 1.09 eboot (the image at its preferred
  * base 0x400000). guest_addr() turns one into the runtime address; the read,

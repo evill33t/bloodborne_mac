@@ -1,10 +1,7 @@
-/* Guest threads on host pthreads. Each guest thread owns a FreeBSD-style TCB
- * (variant II: static TLS below the TCB). The loader rewrites the eboot's
- * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
- * keeps FS. Priorities/affinity are recorded, not enforced by a PS4 scheduler.
- * Windows: GS is the TEB and cannot be moved. The guest TCB lives in a TLS slot of the TEB
- * instead, and the loader rewrites the load to `mov rax, gs:[0x1480+8*slot]` (TlsSlots),
- * the same 9-byte instruction with another displacement. */
+/* Guest threads on Darwin pthreads. Each thread owns a FreeBSD-style TCB
+ * (variant II: static TLS below the TCB). Preparation marks TLS loads with GS;
+ * the loader restores FS for Rosetta, while bbcpu supplies guest TLS on arm64.
+ * Priorities and affinity are recorded rather than enforced by a PS4 scheduler. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #ifdef BB_CPU_TRANSLATOR
@@ -262,7 +259,7 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
     a->guard=size; return 0;
 }
 
-/* Linux thread names hold 15 characters; longer ones would be rejected. */
+/* Keep guest diagnostic names within the shared 15-character field. */
 static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));

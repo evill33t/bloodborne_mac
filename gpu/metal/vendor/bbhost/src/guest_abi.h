@@ -3,9 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 
-// PS4 userland is SysV x86-64. Linux hosts already use that ABI.
-// Windows x64 is a different register convention, so HLE entry points that
-// the eboot calls must be annotated SysV when building with Clang.
+// PS4 userland uses SysV x86-64, supplied by Rosetta or the bbcpu call bridge.
 #define GUEST_ABI
 
 using GuestFn = int64_t(GUEST_ABI*)();

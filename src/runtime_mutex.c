@@ -1,4 +1,4 @@
-/* Linux pthread-backed opaque PS4 mutex handles. No guest threads yet. */
+/* Darwin pthread-backed opaque PS4 mutex handles. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
@@ -184,7 +184,7 @@ static ABI int32_t cond_broadcast(GuestCond **cond) {
     if (e) return e;
     ++wakeups; return orbis_error(pthread_cond_broadcast(&(*cond)->native));
 }
-/* PS4 struct timespec is {int64 sec, int64 nsec}, identical to Linux x86-64. */
+/* PS4 struct timespec is {int64 sec, int64 nsec}, identical to Darwin. */
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 static ABI int32_t cond_abs_timedwait(GuestCond **cond, GuestMutex **mutex, const GuestTimespec *abs) {
     if (!abs || abs->nsec < 0 || abs->nsec >= 1000000000) return orbis_error(EINVAL);
