@@ -161,3 +161,56 @@ attempt skips for lack of device access; the device-enabled rerun executes all
 three checks successfully. These are fixture results, not a completed gameplay
 soak or a new FPS comparison. Source inventory, executable hashes and all 16
 master saves still match the starting SSD snapshot.
+
+## Unlocked replay with the queue corrections
+
+After the user unlocked the Mac, `resource24-ssd-queue-soak` used frozen
+`afa8860e602ebdaeb44189330a8718a659b3d2210aba48aa3dfaaccc6518b68a`,
+native 1920x1080, TAA/shadows/SSAO, no frame generation, the SSD sources,
+cloned saves and AC power at both ends. Activation, initial arch pose and all
+956 prewarm-ready recipes were verified. The route made three travel requests
+at 120.166, 240.015 and 360.043 seconds, reaching map sequence
+18010000 → 15000000 → 18010000 → 18000000.
+
+The replay fails at 410.902296167 seconds to its last submission, after 24,034
+submitted frame intervals with no missing presentation timestamp. The original
+384-byte `bad_alloc` recurs on GXRenderThread. The independently tested queue
+fixes therefore do not resolve this allocation failure. No kernel allocation
+failure audit row or Metal failure row precedes it. This is not a completed
+780-second stability pass or clean FPS benchmark.
+
+The new observer captures original owner return RVA `0x2a4877d`. Two checked,
+equal but **unsynchronized** heap samples record bitmap `0x60`, free bytes
+5,696,288, live allocation count 552,827 and capacity 121,634,816. The original
+malloc/calloc/new callbacks still match. REA identifies this particular request
+as initial 16×24-byte private-data bucket storage while constructing a game
+object named `ID3D11ShaderResourceView`. The allocation core needs a 400-byte
+rounded block in bin 8 or higher; bitmap `0x60` exposes only bins 5 and 6.
+If the metadata is coherent, small-hole fragmentation explains this rejection.
+The aggregate count does not identify how many allocations are views, and the
+unsynchronized observation does not validate the block chain or bin lists.
+
+REA verifies an actual cleanup path that frees the view's storage, sentinel,
+registration node and object. Its Release depends on external/internal refs
+and a GPU EOP completion sequence. Both the complete allocator cores and the
+115-byte original Release pass isolated CPU differential tests. The latter
+matches across native JIT, interpreter and Rosetta for 32,043 calls per case,
+including four-thread atomic decrements and exact eligible cleanup ordering.
+Real completion progress, retained-object types and actual cleanup frequency
+remain unobserved. No forced retirement, arena enlargement or failure retry
+is implemented.
+
+Own-window arch and Hunter's Dream clips are retained with extracted frames.
+They verify loaded rendered scenes, movement and camera turns; still images
+do not establish foliage animation speed or eliminate sliding-shadow motion.
+The diagnostic presentation trace has seven gaps over 50 ms, maximum 100 ms;
+six occur near the three travel requests. The earlier 383 ms stall is absent
+from this partial interval. Recording/audit instrumentation and the failed
+soak exclude clean FPS or causal performance comparisons.
+
+Evidence: `queue-ssd-failure.json`, `queue-ssd-diagnostic-gaps.json`,
+`view-owner-rea-ledger.md`, `heap-wrapper-lock-audit.md`,
+`queue-ssd-heap-sync-source-review.md` and `view-release-differential-results.*`
+under the evidence root, plus this replay's separate launch log, metrics,
+cloned saves and clips. The repeated SSD integrity check passes for all source
+inventory entries, executable hashes and 16 master saves.

@@ -36,6 +36,18 @@ static int allocation_audit_image_range(uint64_t offset,size_t bytes,uint64_t fl
     return 0;
 }
 
+#include "retirement_audit.inc"
+
+static int allocation_audit_cleanup_slot(uint64_t slot,uint64_t *value,uint64_t *rva) {
+    const uint64_t base=(uintptr_t)image;
+    if(!module_count || allocation_audit_libc!=modules[0].base || slot>modules[0].size ||
+       8>modules[0].size-slot || base>UINT64_MAX-allocation_audit_libc ||
+       base+allocation_audit_libc>UINT64_MAX-slot-7 ||
+       !throw_audit_image_read(base+allocation_audit_libc+slot,value,8))return 0;
+    if(*value>=base && bbcpu_is_guest(*value))*rva=*value-base;
+    return 1;
+}
+
 /* Only the original default standard-allocator BSS object is described here.
  * Read fixed scalars, never bin heads, arena contents, or an alternate object.
  * Two equal observations are still unsynchronized, not an atomic snapshot. */
@@ -263,6 +275,12 @@ static void allocation_failure_probe(const uint64_t regs[16],uint64_t address,ui
                 callback_rvas[n]=callbacks[n]-(uintptr_t)image;
         }
     }
+    /* Preserve the existing malloc/calloc/new array and readable-bit contract.
+     * The two cleanup selectors have their own separately labeled mask. */
+    uint64_t cleanup[2]={0},cleanup_rvas[2]={UINT64_MAX,UINT64_MAX};
+    const unsigned cleanup_readable=
+        (unsigned)allocation_audit_cleanup_slot(0xba198,&cleanup[0],&cleanup_rvas[0]) |
+        ((unsigned)allocation_audit_cleanup_slot(0xbe998,&cleanup[1],&cleanup_rvas[1])<<1);
     AllocationAuditOrigin owner={.state="not-default-new-site",.caller_rva=UINT64_MAX};
     if(tag && readable)owner=allocation_audit_vector_owner(regs,caller,tag,callbacks,callback_readable);
     char request[32]="unavailable",thread[64]={0};
@@ -280,6 +298,8 @@ static void allocation_failure_probe(const uint64_t regs[16],uint64_t address,ui
         " r13=%#" PRIx64 " r14=%#" PRIx64 " r15=%#" PRIx64
         " callbacks_readable=%#x malloc=%#" PRIx64 " malloc_rva=%#" PRIx64
         " calloc=%#" PRIx64 " calloc_rva=%#" PRIx64 " new=%#" PRIx64 " new_rva=%#" PRIx64
+        " cleanup_callbacks_readable=%#x free=%#" PRIx64 " free_rva=%#" PRIx64
+        " delete=%#" PRIx64 " delete_rva=%#" PRIx64
         " origin_state=%s origin_function_rva=%#" PRIx64 " origin_slot_base=rsp"
         " origin_slot_offset=%" PRIu64 " origin_readable=%d origin=%#" PRIx64 " origin_rva=%#" PRIx64
         " owner_state=%s owner_function_rva=%#" PRIx64 " owner_slot_base=rsp"
@@ -288,9 +308,11 @@ static void allocation_failure_probe(const uint64_t regs[16],uint64_t address,ui
         address-(uintptr_t)image,request,readable,displacement,caller,caller_rva,
         regs[0],regs[4],regs[5],regs[7],regs[6],regs[2],regs[1],regs[8],regs[9],regs[3],regs[12],regs[13],regs[14],regs[15],
         callback_readable,callbacks[0],callback_rvas[0],callbacks[1],callback_rvas[1],callbacks[2],callback_rvas[2],
+        cleanup_readable,cleanup[0],cleanup_rvas[0],cleanup[1],cleanup_rvas[1],
         origin.state,origin.function_rva,origin.slot_offset,origin.readable,origin.caller,origin.caller_rva,
         owner.state,owner.function_rva,owner.slot_offset,owner.readable,owner.caller,owner.caller_rva);
     allocation_audit_heap_snapshot(sequence,callbacks,callback_readable);
+    retirement_audit_snapshot(sequence);
     if(!tag)allocation_audit_stack_words(sequence,regs[4]);
     *runtime_errno()=saved_guest_errno;errno=saved_errno;
 }
@@ -368,5 +390,6 @@ static void install_throw_audit(const Segment *segments,uint64_t count,
     fprintf(stderr,"Runtime throw audit: installed observation at image RVA %#" PRIx64
         " (64 events; guest instructions unchanged)\n",target);
     install_allocation_audit(segments,count,target);
+    install_retirement_audit();
 }
 #endif

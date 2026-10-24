@@ -294,3 +294,52 @@ The next gameplay attempt prewarms shaders but stops before loading the save:
 the Mac is locked and activation/presentation guards fail. It supplies no
 live heap snapshot and is not another allocation failure. See
 [SSD replay status](MACOS_SSD_TESTS_2026-10-24.md).
+
+## Live owner, fragmentation condition and retirement investigation
+
+The unlocked queue-corrected replay fails after 410.902296167 seconds to its
+last submission. The same 384-byte request now has validated owner return
+`0x2a4877d`. Two checked unsynchronized samples agree on bitmap `0x60`, free
+bytes 5,696,288 and live count 552,827 in the original 116 MiB arena. Current
+malloc/calloc/new callbacks remain original. The request rounds to a 400-byte
+block, requiring bin 8 or higher; bitmap `0x60` contains only bins 5 and 6.
+Conditional on valid metadata, external fragmentation explains this immediate
+rejection despite aggregate free space. No coherent bin/block traversal was
+captured and no host-RAM exhaustion is inferred.
+
+Exact REA owner/factory analysis identifies this allocation as initial
+16×24-byte bucket storage in the base constructor of the original named
+`ID3D11ShaderResourceView` object. The original factory return `0x11dda46` is
+also validated from the fixed captured slot against the complete caller frame
+and direct CALL. It is not an arbitrary code-looking stack word. The per-view
+construction has four allocations with total rounded extent 752 bytes; the
+untyped live count cannot be converted into a number of retained views.
+
+Cleanup at `0x2a48ca0`/`0x2a48d10` actually frees the vector, sentinel,
+registration node and view. Original Release `0x2a489a0` uses atomic external
+reference decrement, internal refs and a GPU EOP completion sequence to decide
+eligibility. The sequence is the qword referenced by image global `0x54b9eb0`,
+published from context+`0xc30`; submission methods increment context+`0x3400`
+and emit a 64-bit EVENT_WRITE_EOP followed by WAIT_REG_MEM for that label.
+This is a guest GPU sequence, not a host frame or wall clock. Current source
+handles that selector, but actual target-label progress remains unobserved.
+
+The unchanged 115-byte original Release passes six private differential
+cases: JIT, interpreter and Rosetta, each direct and guest-CALL entry. Each
+performs 32,043 calls with digest `9784b9217d3affc2`, covering serial unsigned
+boundaries/defer decisions and two four-thread atomic-refcount cases. Old-count
+returns, cleanup ABI/order, exactly-once eligible cleanup and guards match.
+Synthetic cleanup does not actually free the object. Real internal-reference
+mutations, cleanup/free execution and GPU progress are outside these tests.
+
+The wrapper audit also finds matching original recursive lock/unlock imports
+around malloc/calloc/free. Runtime sync helpers allocate host storage, not
+directly from this game arena. Cumulative, non-atomic mutex statistics cannot
+prove a leak or broken lock ownership.
+
+Private manifests, all five REA evidence IDs, complete original FDE/hash
+records, source references and limits are in `view-owner-rea-ledger.md`,
+`heap-wrapper-lock-audit.*`, `queue-ssd-heap-sync-source-review.md` and
+`view-release-differential-results.*` under the evidence root. Original game
+data and master saves remain unchanged. A narrow read-only counter observation
+is the next test; no retirement override or speculative allocator fix is made.

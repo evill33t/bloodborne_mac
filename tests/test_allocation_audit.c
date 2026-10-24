@@ -23,8 +23,11 @@ static int32_t *runtime_errno(void) { return &guest_errno; }
 static int bbcpu_is_guest(uint64_t address) {
     return address>=(uintptr_t)image && address-(uintptr_t)image<0x6000000;
 }
+static uint64_t probe_address;
+static unsigned probe_count;
+static void (*probe_callback)(const uint64_t[16],uint64_t,uint32_t);
 static void bbcpu_set_probe(uint64_t address,void (*callback)(const uint64_t[16],uint64_t,uint32_t),uint32_t tag) {
-    (void)address;(void)callback;(void)tag;
+    probe_address=address;probe_callback=callback;++probe_count;assert(!tag);
 }
 
 typedef struct { uint64_t address;size_t bytes;unsigned char value[512];unsigned reads; } Cell;
@@ -33,6 +36,7 @@ static unsigned cell_count,read_count;
 static uint64_t fail_address,change_address;
 static unsigned change_at;
 static uint64_t change_value;
+static void (*read_hook)(uint64_t);
 static Cell *cell(uint64_t address,size_t bytes) {
     assert(cell_count<sizeof(cells)/sizeof(cells[0]) && bytes<=sizeof(cells[0].value));
     Cell *c=&cells[cell_count++];memset(c,0,sizeof(*c));c->address=address;c->bytes=bytes;return c;
@@ -49,7 +53,9 @@ static int bb_macos_read_memory(uintptr_t address,void *out,size_t bytes) {
         if(address>=c->address && bytes<=c->bytes && address-c->address<=c->bytes-bytes) {
             ++c->reads;
             if(address==change_address && c->reads==change_at)memcpy(c->value,&change_value,8);
-            memcpy(out,c->value+address-c->address,bytes);return 1;
+            memcpy(out,c->value+address-c->address,bytes);
+            if(read_hook)read_hook(address);
+            return 1;
         }
     }
     return 0;
@@ -69,6 +75,11 @@ static void reset(void) {
     segments[3]=(Segment){libc_rva+0xb0000,0x40000,6};
     throw_audit_segments=segments;throw_audit_segment_count=4;
     cell_count=read_count=0;fail_address=change_address=UINT64_MAX;change_at=0;
+    read_hook=NULL;probe_address=probe_count=0;probe_callback=NULL;
+    atomic_store(&retirement_audit_context,0);atomic_store(&retirement_audit_installed,0);
+    atomic_store(&retirement_audit_init_seen,0);atomic_store(&retirement_audit_init_selected,0);
+    atomic_store(&allocation_audit_events,0);
+    setenv("BB_RUNTIME_EXIT_AUDIT","1",1);
     setenv("BB_MAC_EBOOT_SHA256","cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86",1);
     const unsigned char core[]={0x53,0x31,0xc0,0x48,0x39,0x77,0x18,0x0f,0x82,0x47,0x01,0,0};
     const unsigned char capacity[]={0x48,0xc7,0x83,0x78,0x04,0,0,0,0,0x40,0x07};
@@ -79,16 +90,21 @@ static void reset(void) {
     callbacks[0]=base+0x20809f0;callbacks[1]=base+0x2080cd0;callbacks[2]=base+libc_rva+0x5fe80;
     word(base+libc_rva+0xba190,callbacks[0]);word(base+libc_rva+0xba1a0,callbacks[1]);
     word(base+libc_rva+0xbe978,callbacks[2]);
+    word(base+libc_rva+0xba198,base+0x2080b70);
+    word(base+libc_rva+0xbe998,base+libc_rva+0x5fd70);
 }
-static char *snapshot(void) {
+static char *capture(unsigned kind) {
     FILE *capture=tmpfile();assert(capture);int original=dup(STDERR_FILENO);assert(original>=0);
     fflush(stderr);assert(dup2(fileno(capture),STDERR_FILENO)>=0);
-    allocation_audit_heap_snapshot(17,callbacks,7);
+    if(kind==0)allocation_audit_heap_snapshot(17,callbacks,7);
+    else if(kind==1)retirement_audit_snapshot(17);
+    else { uint64_t regs[16]={0};allocation_failure_probe(regs,base+libc_rva+0x5ebd0,0); }
     fflush(stderr);assert(dup2(original,STDERR_FILENO)>=0);close(original);
     assert(!fseek(capture,0,SEEK_END));long bytes=ftell(capture);assert(bytes>=0);
     assert(!fseek(capture,0,SEEK_SET));char *text=calloc((size_t)bytes+1,1);assert(text);
     assert(fread(text,1,(size_t)bytes,capture)==(size_t)bytes);fclose(capture);return text;
 }
+static char *snapshot(void) { return capture(0); }
 static void expect_snapshot(const char *expected) {
     char *text=snapshot();assert(strstr(text,expected));free(text);
 }
@@ -199,7 +215,117 @@ static void owner_and_stack_tests(void) {
     allocation_failure_probe(regs,base+libc_rva+0x5ebd0,0);
     assert(errno==EDOM && guest_errno==91);
 }
+/* The sparse instance is owned test data, not an original guest object. Only
+ * the short installation guards reproduce the production layout selector. */
+static const uint64_t context_address=UINT64_C(0x9000000000),label_address=UINT64_C(0xa000000000);
+static Cell *find_cell(uint64_t address) {
+    for(unsigned n=0;n<cell_count;++n)if(cells[n].address==address)return &cells[n];
+    assert(0);return NULL;
+}
+static void set_word(uint64_t address,uint64_t value) { memcpy(find_cell(address)->value,&value,8); }
+static void retirement_layout(void) {
+    const unsigned char prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x48,0x89,0xfb};
+    const unsigned char publish[]={0x48,0x8b,0x83,0x30,0x0c,0,0,
+        0x48,0x8d,0x0d,0x68,0x2b,0x2e,0x04,0x48,0x89,0x01,0x4c,0x89,0xf7};
+    memcpy(cell(base+0x11d7200,sizeof(prefix))->value,prefix,sizeof(prefix));
+    memcpy(cell(base+0x11d733a,sizeof(publish))->value,publish,sizeof(publish));
+    word(base+0x54b9eb0,label_address);
+    word(context_address+0x351c,0);word(context_address+0xc30,label_address);
+    word(context_address+0x3400,9);word(label_address,8);
+}
+static void invoke_init(uint64_t context) {
+    uint64_t regs[16]={0};regs[3]=context;
+    errno=EDOM;guest_errno=91;
+    retirement_audit_init_probe(regs,base+0x11d734b,0);
+    assert(errno==EDOM && guest_errno==91);
+}
+static void selected_retirement(void) {
+    reset();retirement_layout();install_retirement_audit();
+    assert(probe_count==1 && probe_address==base+0x11d734b && probe_callback==retirement_audit_init_probe);
+    invoke_init(context_address);
+    assert(atomic_load(&retirement_audit_context)==context_address);
+    assert(atomic_load(&retirement_audit_init_seen)==1 && atomic_load(&retirement_audit_init_selected)==1);
+    for(unsigned n=0;n<cell_count;++n)cells[n].reads=0;
+}
+static void expect_retirement(const char *expected) {
+    char *text=capture(1);assert(strstr(text,expected));free(text);
+}
+static void replace_selected_context(uint64_t address) {
+    if(address==label_address)atomic_store(&retirement_audit_context,context_address+0x10000);
+}
+static void retirement_tests(void) {
+    selected_retirement();char *text=capture(1);
+    assert(strstr(text,"state=sampled unsynchronized=1 sample_comparison=equal"));
+    assert(strstr(text,"sample0_submitted=9 sample0_completed=8 sample1_submitted=9 sample1_completed=8"));free(text);
+    selected_retirement();change_address=context_address+0x3400;change_at=2;change_value=10;
+    expect_retirement("sample_comparison=different-racy");
+    selected_retirement();change_address=label_address;change_at=2;change_value=10;
+    expect_retirement("sample1_submitted=9 sample1_completed=10");
+    selected_retirement();fail_address=context_address+0x3400;expect_retirement("reason=counter-read");
+    selected_retirement();fail_address=label_address;expect_retirement("reason=counter-read");
+    selected_retirement();set_word(context_address+0x351c,1);expect_retirement("reason=context-selection");
+    selected_retirement();set_word(context_address+0xc30,label_address+8);expect_retirement("reason=context-selection");
+    selected_retirement();set_word(base+0x54b9eb0,label_address+8);expect_retirement("reason=context-selection");
+    selected_retirement();change_address=base+0x54b9eb0;change_at=6;change_value=label_address+8;
+    expect_retirement("reason=selection-recheck");
+    selected_retirement();read_hook=replace_selected_context;expect_retirement("reason=selection-recheck");
+    selected_retirement();setenv("BB_MAC_EBOOT_SHA256","other",1);expect_retirement("reason=image-identity");
+    reset();retirement_layout();expect_retirement("reason=initialization-not-observed");
+    /* Installation refuses unknown images, missing extents and either changed
+     * local guard, without ever accepting a guessed context pointer. */
+    reset();retirement_layout();unsetenv("BB_MAC_EBOOT_SHA256");install_retirement_audit();assert(!probe_count && !read_count);
+    reset();retirement_layout();segments[0].size=0x11d7200+436;install_retirement_audit();assert(!probe_count && !read_count);
+    reset();retirement_layout();segments[1].flags=4;install_retirement_audit();assert(!probe_count && !read_count);
+    reset();retirement_layout();modules[0].base=0x54b9eb7;install_retirement_audit();assert(!probe_count && !read_count);
+    reset();retirement_layout();image=(unsigned char *)(uintptr_t)(UINT64_MAX-0x100);install_retirement_audit();assert(!probe_count && !read_count);
+    reset();retirement_layout();find_cell(base+0x11d7200)->value[0]^=1;install_retirement_audit();assert(!probe_count);
+    reset();retirement_layout();find_cell(base+0x11d733a)->value[19]^=1;install_retirement_audit();assert(!probe_count);
+    reset();retirement_layout();fail_address=base+0x11d733a;install_retirement_audit();assert(!probe_count);
+    /* An observed initializer reached by its nonzero-selector branch is not
+     * the global completion publisher. Invalid fixed fields stay unavailable. */
+    static const uint64_t invalid_contexts[]={0,1,UINT64_MAX-7,UINT64_C(0xb000000000)};
+    for(unsigned n=0;n<sizeof(invalid_contexts)/sizeof(invalid_contexts[0]);++n) {
+        reset();retirement_layout();install_retirement_audit();invoke_init(invalid_contexts[n]);
+        assert(!atomic_load(&retirement_audit_context));
+    }
+    reset();retirement_layout();install_retirement_audit();set_word(context_address+0x351c,1);invoke_init(context_address);
+    assert(!atomic_load(&retirement_audit_context) && atomic_load(&retirement_audit_init_seen)==1);
+    reset();retirement_layout();install_retirement_audit();fail_address=context_address+0x351c;invoke_init(context_address);
+    assert(!atomic_load(&retirement_audit_context));
+    reset();retirement_layout();install_retirement_audit();set_word(context_address+0xc30,label_address+8);invoke_init(context_address);
+    assert(!atomic_load(&retirement_audit_context));
+    static const uint64_t invalid_labels[]={0,1,UINT64_MAX-6};
+    for(unsigned n=0;n<sizeof(invalid_labels)/sizeof(invalid_labels[0]);++n) {
+        reset();retirement_layout();install_retirement_audit();set_word(context_address+0xc30,invalid_labels[n]);
+        set_word(base+0x54b9eb0,invalid_labels[n]);invoke_init(context_address);assert(!atomic_load(&retirement_audit_context));
+    }
+    /* A later valid initializer replaces the host selection, and snapshots
+     * read the new fixed fields rather than continuing to sample the old one. */
+    selected_retirement();const uint64_t next=context_address+0x10000,next_label=label_address+0x10000;
+    word(next+0x351c,0);word(next+0xc30,next_label);word(next+0x3400,100);word(next_label,99);
+    set_word(base+0x54b9eb0,next_label);invoke_init(next);assert(atomic_load(&retirement_audit_context)==next);
+    expect_retirement("sample0_submitted=100 sample0_completed=99");
+    reset();retirement_layout();setenv("BB_RUNTIME_EXIT_AUDIT","0",1);
+    install_retirement_audit();invoke_init(context_address);text=capture(1);assert(!*text);free(text);
+    assert(!probe_count && !read_count && !atomic_load(&retirement_audit_context));
+    /* Cleanup selectors have independent readability; existing allocation bits
+     * and callback positions remain unchanged. Whole observer restores errno. */
+    selected_retirement();errno=EDOM;guest_errno=91;text=capture(2);
+    assert(errno==EDOM && guest_errno==91);
+    assert(strstr(text,"callbacks_readable=0x7") && strstr(text,"cleanup_callbacks_readable=0x3"));
+    assert(strstr(text,"free_rva=0x2080b70") && strstr(text,"delete_rva=0x573fd70"));
+    assert(strstr(text,"Runtime retirement audit: sequence=0 state=sampled"));free(text);
+    selected_retirement();fail_address=base+libc_rva+0xba198;text=capture(2);
+    assert(strstr(text,"callbacks_readable=0x7") && strstr(text,"cleanup_callbacks_readable=0x2"));free(text);
+    reset();uint64_t value=0,rva=UINT64_MAX;
+    assert(allocation_audit_cleanup_slot(0xba198,&value,&rva) && rva==0x2080b70);
+    modules[0].size=0xba19f;assert(!allocation_audit_cleanup_slot(0xba198,&value,&rva));
+    reset();module_count=0;assert(!allocation_audit_cleanup_slot(0xba198,&value,&rva));
+    reset();image=(unsigned char *)(uintptr_t)(UINT64_MAX-4);assert(!allocation_audit_cleanup_slot(0xba198,&value,&rva));
+    reset();allocation_audit_libc++;assert(!allocation_audit_cleanup_slot(0xba198,&value,&rva));
+}
 int main(void) {
-    heap_tests();frame_tests();owner_and_stack_tests();
+    heap_tests();frame_tests();owner_and_stack_tests();retirement_tests();
     puts("allocation audit sparse scalar/frame checks passed");return 0;
 }
