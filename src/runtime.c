@@ -9,6 +9,7 @@ uint64_t bb_image_base; /* bbcpu fault diagnostics and optional record offsets *
 #endif
 #include "gpu/bbgpu.h"
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -144,6 +145,58 @@ static ABI void init_env(void) {
     puts("Runtime: _init_env returned (verified libc implementation: RET)");
 }
 static pthread_mutex_t handler_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic size_t exit_audit_rows;
+static int exit_audit_enabled(void) {
+    const char *value=getenv("BB_RUNTIME_EXIT_AUDIT");
+    return value && !strcmp(value,"1");
+}
+static void exit_audit_thread(char name[64]) {
+    name[0]=0;
+#ifdef __APPLE__
+    pthread_getname_np(pthread_self(),name,64);
+#endif
+    if(!name[0])memcpy(name,"unnamed",8);
+}
+static void audit_exit_request(int status,uintptr_t native_return) {
+    if(!exit_audit_enabled())return;
+    char thread[64];exit_audit_thread(thread);
+    size_t active=0,total=0;
+    pthread_mutex_lock(&handler_lock);
+    total=handler_count;
+    for(size_t n=0;n<total;++n)active+=handlers[n].active!=0;
+    pthread_mutex_unlock(&handler_lock);
+    uint64_t rip=0,caller=native_return,caller_rva=UINT64_MAX;
+#ifdef BB_CPU_TRANSLATOR
+    rip=bbcpu_guest_rip();caller=bbcpu_import_return();
+    if(bb_image_base && bbcpu_is_guest(caller))caller_rva=caller-bb_image_base;
+#endif
+    fprintf(stderr,"Runtime exit audit: before-finalizers status=%d thread=%s pthread=%#" PRIxPTR
+        " guest_rip=%#" PRIx64 " import_return=%#" PRIx64 " import_return_rva=%#" PRIx64
+        " active=%zu total=%zu\n",status,thread,(uintptr_t)pthread_self(),rip,caller,caller_rva,active,total);
+    /* These existing bounded reports must survive a fault in a destructor.
+     * Do not defer the first module/msync coverage evidence until after it. */
+    runtime_modules_report();runtime_memory_report();fflush(stdout);
+}
+static void audit_finalizer(size_t index,const ExitHandler *handler) {
+    if(!exit_audit_enabled())return;
+    const size_t sequence=atomic_fetch_add_explicit(&exit_audit_rows,1,memory_order_relaxed);
+    if(sequence>512)return;
+    if(sequence==512) {
+        fputs("Runtime exit audit: finalizer row limit reached (512); further rows omitted\n",stderr);
+        return;
+    }
+    const uintptr_t function=handler->with_arg ? (uintptr_t)handler->callback.with_arg :
+        (uintptr_t)handler->callback.plain;
+    uint64_t function_rva=UINT64_MAX;
+#ifdef BB_CPU_TRANSLATOR
+    if(bb_image_base && bbcpu_is_guest(function))function_rva=function-bb_image_base;
+#endif
+    char thread[64];exit_audit_thread(thread);
+    fprintf(stderr,"Runtime exit audit: finalizer sequence=%zu index=%zu thread=%s pthread=%#" PRIxPTR
+        " callback=%#" PRIxPTR " callback_rva=%#" PRIx64 " argument=%p dso=%p with_arg=%d\n",
+        sequence,index,thread,(uintptr_t)pthread_self(),function,function_rva,handler->argument,
+        handler->dso,handler->with_arg);
+}
 static int register_handler(ExitHandler value) {
     pthread_mutex_lock(&handler_lock);
     if (handler_count == handler_capacity) {
@@ -186,6 +239,7 @@ void runtime_finalize(void *dso) {
         if (!i) { pthread_mutex_unlock(&handler_lock); return; }
         ExitHandler handler = handlers[i-1]; handlers[i-1].active = 0;
         pthread_mutex_unlock(&handler_lock);
+        audit_finalizer(i-1,&handler);
         uint64_t argument=(uintptr_t)handler.argument;
         if (handler.with_arg) runtime_guest_call((const void *)handler.callback.with_arg,1,&argument);
         else runtime_guest_call((const void *)handler.callback.plain,0,NULL);
@@ -244,6 +298,7 @@ static ABI int guest_memcmp(const void *a, const void *b, size_t size) {
 static ABI size_t guest_strlen(const char *text) { return strlen(text); }
 static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     printf("Runtime: guest requested exit(%d)\n", status);
+    audit_exit_request(status,(uintptr_t)__builtin_return_address(0));
     runtime_finalize(NULL);
     runtime_report();
     exit(status);

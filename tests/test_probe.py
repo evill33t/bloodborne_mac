@@ -92,6 +92,30 @@ def msync_package():
             b'after-msync'.ljust(128,b'\0')+struct.pack('<8Q',128,1,0,0,136,1,1,0)+image)
 
 
+def exit_audit_package():
+    code=bytearray(b'\x48\x83\xec\x08')
+    def rip(opcode,target):
+        code.extend(opcode);code.extend(struct.pack('<i',target-(len(code)+4)))
+    for callback in (256,288):
+        rip(b'\x48\x8d\x3d',callback)
+        rip(b'\x48\x8d\x35',16384)
+        code.extend(b'\x31\xd2')
+        rip(b'\xff\x15',1024)
+    code.extend(b'\xbf'+struct.pack('<I',1))
+    rip(b'\xff\x15',1032)
+    exit_return=len(code)
+    code.extend(b'\x0f\x0b')
+    image=bytearray(32768);image[:len(code)]=code
+    # Shared counter proves real LIFO execution and catches duplicate callbacks
+    # with UD2, independently of the audit's printed callback order.
+    for address,expected in ((256,1),(288,0)):
+        image[address:address+10]=b'\x80\x3f'+bytes([expected])+bytes.fromhex('7503fe07c30f0b')
+    return (struct.pack('<8s6Q',b'BBPROBE2',len(image),0,2,2,2,1)+
+            struct.pack('<6Q',0,16384,5,16384,16384,6)+
+            b'tsvEmnenz48#q#q'.ljust(128,b'\0')+b'uMei1W9uyNo#q#q'.ljust(128,b'\0')+
+            struct.pack('<8Q',1024,1,0,0,1032,1,1,0)+image,exit_return)
+
+
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
     def test_invalid_content_profile_is_rejected(self):
@@ -105,12 +129,13 @@ class LoaderTests(unittest.TestCase):
                     self.assertEqual(r.returncode,1,r.stdout+r.stderr)
                     self.assertIn('content profile',r.stderr)
 
-    def run_image(self, data, *options):
+    def run_image(self, data, *options, env=None):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'boot.bin'
             path.write_bytes(data)
             return subprocess.run([str(EXE.resolve()), str(path), '--cpu-only', *options],
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  env=None if env is None else dict(os.environ,**env))
 
     def test_original_instruction_reaches_named_import(self):
         # jmp [rip+2]; two padding bytes; relocated function pointer at +8
@@ -124,6 +149,29 @@ class LoaderTests(unittest.TestCase):
         self.assertIn('first unsupported PS4 import: after-msync',r.stdout)
         self.assertIn('first argument: 0x0',r.stdout)
         self.assertIn('guest msync calls=1',r.stdout)
+
+    def test_exit_audit_preserves_status_lifo_and_single_execution(self):
+        data,caller=exit_audit_package()
+        r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':'1'})
+        self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+        self.assertIn('Runtime: guest requested exit(1)',r.stdout)
+        self.assertIn('before-finalizers status=1',r.stderr)
+        self.assertIn('active=2 total=2',r.stderr)
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+            self.assertIn(f'import_return_rva={caller:#x}',r.stderr)
+        self.assertIn('module-info queries=0',r.stdout)
+        self.assertIn('guest msync calls=0',r.stdout)
+        rows=[row for row in r.stderr.splitlines() if 'finalizer sequence=' in row]
+        self.assertEqual(len(rows),2,r.stderr)
+        self.assertIn('sequence=0 index=1',rows[0])
+        self.assertIn('sequence=1 index=0',rows[1])
+        self.assertLess(r.stderr.index('before-finalizers'),r.stderr.index('finalizer sequence='))
+
+    def test_exit_audit_is_optional(self):
+        data,_=exit_audit_package()
+        r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':'0'})
+        self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+        self.assertNotIn('Runtime exit audit:',r.stderr)
 
     def test_native_initializer_and_export_return(self):
         r=self.run_image(native_package())
