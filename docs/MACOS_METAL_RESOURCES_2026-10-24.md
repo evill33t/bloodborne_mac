@@ -54,6 +54,11 @@ texture lifetime hook or broad PM4-submit coalescing is claimed.
   a frame compares the complete texture payload, including cold textures;
   raw guest CPU stores are not falsely treated as tracked. Existing mapping,
   source-readiness, callback and immutable queued-version guards remain.
+- `BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX=2`: bounded page/block summaries speed
+  queries only while the original journal history is complete. Once history
+  has been dropped, the original unknown-history result and full-validation
+  policy remain unchanged. This alternative avoids mode1's extra first-use
+  checks on cold textures. It does not assume that raw CPU writes are tracked.
 - `BB_METAL_BINDING_CACHE=2`: exact copied-byte keys suppress repeated inline
   stage data and draw constants inside one retained render encoder. All
   encoder boundaries invalidate keys. Modes0/1 retain previous behavior.
@@ -100,6 +105,84 @@ with modes0/1/2, including changing user data, mappings, viewport and encoders.
 Shadow fixtures execute the original88-byte shader and verify full RMW words,
 pending GPU inputs, invalid uniform/count, final-word13, complete input leases,
 unrelated mapping recovery, changed depth/metadata backing and ABA rejection.
+
+Independent review added rejection of uniform/metadata input aliases, including
+physical aliases. Conditional clears also reject a newer color owner: a GPU
+decision that selects zero vertices must not promote stale depth ownership over
+a newer color target. These are conservative correctness guards, not proof that
+either alias occurred in the live scene.
+
+The final combined native CTest run executes40 checks successfully and skips
+the two tests requiring private shader input. Supplied explicitly afterward,
+the original HTILE GPU/CPU-lease cases and864 analytic original shadow-projection
+cases pass. This run includes the bounded journal and the module API below.
+
+## Interrupted soak and unwind fix
+
+The first planned600-second post-fix movement replay stopped at579.3307 seconds
+on the unimplemented `sceKernelGetModuleInfoFromAddr` import. It is a failed
+stability interval, not a completed600-second pass. Four travel requests had
+occurred. Up to the stop,3,550 GPU conditional clears and34,184 CPU clears were
+recorded, with5 binding revalidations, no readiness rejections and no GPU failure
+reported.
+
+The queried address belongs to the original libc `_Unwind_RaiseException`.
+Fresh REA/Hopper analysis of its extracted original procedure has Evidence ID
+`ev_eb1016e19d8d93ea09d72e5bfe4ac591337be0786f35842f8472991f4f6fac63`
+(156 returned assembly entries). The extracted ELF preserves the procedure's
+original RVA and bytes. External code and data are omitted, so this static
+result does not determine the cause or outcome of the throw.
+
+The runtime now returns real validated loaded-module EH information, with
+BBPROBE6 metadata derived from original ELF headers. It does not suppress
+exceptions or fake successful unwinding. See
+[module metadata and its validation](MACOS_MODULE_UNWIND_2026-10-24.md).
+An earlier comparison attempt stopped before gameplay because an old frozen
+runtime received newly generated BBPROBE6 data. That is a harness version
+mismatch, separate from the in-game579-second failure. Subsequent comparisons
+freeze the runtime and matching preparation tools together.
+
+## Initial matched performance observation
+
+One clean AC native1080p pair with both shadow fixes enabled measured40.6668
+rendered/displayed FPS for journal0/binding0 and31.1359 for journal1/binding2.
+No presentation timestamps were missing and no GPU errors were recorded in
+either run. This pair is a regression; mode1 stays optional. The reverse pair
+was interrupted by the preparation mismatch above, so this does not isolate
+which component caused the difference or establish its repeatability.
+
+The later complete frozen-BBPROBE6 ABBA comparison keeps both shadow fixes
+enabled in every case. All four are clean60-second AC runs from the same cloned
+arch save, after45-second warmup, at native1080p with TAA/shadows/SSAO on and
+frame generation off:
+
+| Order | Journal / binding mode | Rendered FPS | Displayed FPS | p99 ms | Maximum ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A1 |0 /0|53.4663|53.4663|25.0044|33.3333|
+| B1 |2 /2|43.3404|43.3404|33.3335|75.0001|
+| B2 |2 /2|54.3300|54.3469|25.0042|41.6667|
+| A2 |0 /0|45.6912|45.7081|25.0060|33.3370|
+
+No presentation timestamps are missing and no GPU failures are recorded. The
+small rendered/displayed difference is the paired counter-window boundary;
+generated FPS is zero. Means are49.5788 control versus48.8352 candidate
+(-1.50%), with much larger within-condition variation. This does not establish
+a repeatable speedup or isolate the cause of variation. Both journal variants
+and inline binding suppression remain disabled by default.
+
+Independent normalized counter review finds no evidence that coarse page hits
+caused extra full texture checks in these runs: full-check deltas track
+forgotten-history deltas. The index retains all deque updates while adding
+page/block maintenance over5.26MB metadata versus roughly16KB retained records.
+This is a hypothesis about overhead, not a measured causal attribution.
+The detailed analysis and proposed block-only negative filter are retained in
+`out/metal-resource-2026-10-24/texture-index-live-review.md`.
+
+The full-recompiler reference was also reviewed at its current public revision.
+Our CPU integration already includes its translator; no newer runtime CPU
+implementation exists in the three upstream commits since our pin. The
+[assessment](MACOS_RECOMP_REVIEW_2026-10-24.md) separates useful mapping/replay
+tools from unproven whole-game AOT performance claims.
 
 Long post-fix travel, live shadow/foliage quality and matched clean FPS results
 are still pending. No native60FPS lock is established by the current results.

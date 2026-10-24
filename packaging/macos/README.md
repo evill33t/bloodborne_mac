@@ -207,6 +207,20 @@ presentation threads and remains off by default; a separate FPS gain has not
 been established. See the [AC native-path measurements](../../docs/MACOS_NATIVE_AC_2026-10-24.md)
 for clean gameplay results, diagnostic overhead and remaining shadow coverage.
 
+Additional resource experiments are opt-in:
+`BB_METAL_TEXTURE_JOURNAL_PAGE_INDEX=1` retains page history across journal
+eviction and validates complete textures on first use each frame; mode2 uses
+indexed queries only while bounded history is complete. `BB_METAL_BINDING_CACHE=2`
+also suppresses byte-identical inline bindings inside each encoder. Matched AC
+gameplay did not establish a repeatable FPS gain, so these remain disabled.
+`BB_METAL_SHADOW_HTILE_GPU=1` and `BB_METAL_SHADOW_HTILE_REBIND=1` cover known
+pending-writer and unchanged-binding shadow-clear gaps, with complete backing
+leases and conservative alias rejection. See the
+[resource and shadow report](../../docs/MACOS_METAL_RESOURCES_2026-10-24.md)
+for validation and current defaults. Native module unwinding requires newly
+prepared BBPROBE6 data; the normal launcher regenerates it. Keep frozen test
+executables paired with their matching preparation tools.
+
 `BB_METAL_SHADER_PREWARM=0` disables automatic in-game prewarming. GPU label waits now park on
 completion notifications, detect invalid mappings and report failures. Supported
 1.09 native fence-loop hooks preserve guest comparisons and timeout budgets;
