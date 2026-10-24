@@ -231,8 +231,38 @@ skip; both pass in isolation afterward. This yields41 distinct passing native
 CTest paths and2 private-input skips. The supplied original HTILE GPU,
 GPU-off and lease regressions also pass with the combined default build.
 
-A720-second movement/travel replay is running with the final binary
-`2cc5e1ae0bfc693af3f31de14102729782b158aacc15e7eadacead72dd64c511`.
-It leaves both shadow override variables unset, uses the new defaults, and
-keeps journal/binding experiments off. Its final result is pending. No
-native60FPS lock is established by the completed matched comparisons above.
+The 720-second movement/travel attempt with binary
+`2cc5e1ae0bfc693af3f31de14102729782b158aacc15e7eadacead72dd64c511`
+leaves both shadow override variables unset, uses the new defaults, and keeps
+journal/binding experiments off. It stops at640.345seconds to last submission,
+after35,455 submitted frames, four travel requests and four unpresented frames
+at the stop. The guest requests `exit(1)` before a finalizer reports
+"Mutex is not initialized." The fault stack is nested under `runtime_finalize`,
+so that cleanup panic does not establish the initial reason for exit.
+No720-second stability pass is claimed. The last audit records4,579 positive
+GPU clears,6 binding revalidations and zero readiness rejections; no Metal
+failure is reported before the CPU failure.
+
+REA analyzes the complete original511-byte panic procedure at0x20b55b0, with
+Evidence ID
+`ev_9ee24e81f0f571b098b5b96c2254cab8041cda0e39dd9324f584fa2320fe2a40`
+and123 assembly entries. At0x20b56d2 it deliberately stores0xdeadba to address0.
+This identifies the final null fault as the game's panic action, not evidence
+of a GPU fault. The initial exit caller remains unknown in that run.
+
+Optional `BB_RUNTIME_EXIT_AUDIT=1` now records original guest RIP/import return,
+thread name and module/msync coverage before callbacks, then bounded finalizer
+identities. It changes no exit status, order or destructor selection. Both
+architecture probes pass22 loader tests including exact actual-NID exit caller,
+LIFO/single callback execution and audit-off behavior. See the
+[diagnostic note](MACOS_EXIT_AUDIT_2026-10-24.md). A separate audit replay is
+running with binary
+`01a8e6a34842c0df26ddc7c0e1530cb3720c3c9bf901f31ea341f8b085eda0af`.
+No native60FPS lock is established by the completed matched comparisons above.
+
+The original-file inventory/hash verification passes after these changes:
+28,779 game files and35 DLC files retain sizes/mtimes, the original eboot and
+prepared-original ELF retain their expected SHA256 values, and all16 master
+save hashes match the starting snapshot. Test writes use derived outputs and
+cloned saves. Evidence is `integrity-final.json` alongside the retained start
+snapshot. This is not a full-content hash of every game/DLC file.
