@@ -1779,7 +1779,7 @@ bool WriteImage(u64 off, const u8* bytes, std::size_t n) {
     VirtualProtect(at, n, old, &unused);
     FlushInstructionCache(GetCurrentProcess(), at, n);
 #else
-    std::memcpy(at, bytes, n);
+    if (!coop::WriteCheckedMemory(at,bytes,n)) return false;
 #endif
     return true;
 }

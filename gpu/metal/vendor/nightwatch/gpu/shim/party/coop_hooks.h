@@ -93,6 +93,8 @@ bool HookValueFilter(u64 off, std::initializer_list<u8> original, std::initializ
 /// Writes `patched` over `original` at `off` (same length). True when the image now holds
 /// `patched` (written, or already there); false (and a log line naming `name`) when it holds
 /// neither: nothing is written then.
+bool WriteCheckedMemory(void* destination,const void* source,std::size_t size);
+
 bool PatchBytes(u64 off, std::initializer_list<u8> original, std::initializer_list<u8> patched, const char* name);
 
 } // namespace coop

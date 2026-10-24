@@ -503,6 +503,8 @@ bool HookValueFilter(u64 off, std::initializer_list<u8> original, std::initializ
     return true;
 }
 
+bool WriteCheckedMemory(void* to,const void* from,std::size_t size) { return WriteImage(to,from,size); }
+
 bool PatchBytes(u64 off, std::initializer_list<u8> original, std::initializer_list<u8> patched, const char* name) {
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_image || original.size() != patched.size() || !patched.size()) {

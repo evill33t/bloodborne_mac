@@ -18,7 +18,7 @@ template<class T> T read(const std::vector<unsigned char>& bytes,std::size_t at)
     assert(at+sizeof(T)<=bytes.size()); T result; std::memcpy(&result,bytes.data()+at,sizeof(T)); return result;
 }
 int main(int argc,char** argv) {
-    if(argc!=2) return 77;
+    if(argc!=3) return 77;
     std::ifstream f(argv[1],std::ios::binary);
     std::vector<unsigned char> elf(std::istreambuf_iterator<char>(f),{});
     assert(elf.size()>64 && !std::memcmp(elf.data(),"\177ELF",4));
@@ -50,6 +50,15 @@ int main(int argc,char** argv) {
         assert(off+files<=elf.size() && va+memory<=size);
         std::memcpy(image+va,elf.data()+off,files);
         MacFeatures::AddSegment(va,memory,read<std::uint32_t>(elf,ph+4));
+    }
+    std::ifstream patch_file(argv[2],std::ios::binary);
+    std::vector<unsigned char> patches(std::istreambuf_iterator<char>(patch_file),{});
+    assert(patches.size()>=24 && !std::memcmp(patches.data(),"BBPATCH2",8));
+    std::size_t cursor=24;
+    for(std::uint64_t k=0;k<read<std::uint64_t>(patches,16);++k) {
+        const auto off=read<std::uint64_t>(patches,cursor),length=read<std::uint64_t>(patches,cursor+8);cursor+=16;
+        assert(off+length<=size && cursor+length<=patches.size());
+        std::memcpy(image+off,patches.data()+cursor,length);cursor+=length;
     }
     MacFeatures::Install();
     unsigned char timing[32];std::memcpy(timing,image+0x2034770,sizeof(timing));
