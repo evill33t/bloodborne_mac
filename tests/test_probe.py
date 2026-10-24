@@ -138,6 +138,56 @@ def signal_return_package(pc):
             struct.pack('<12Q',512,1,0,0,520,1,1,0,528,1,2,0)+image)
 
 
+def throw_audit_package(*,bad_typeinfo=False,bad_name=False,bad_prefix=False,
+                        module_size=8192,scope='q#q',events=1,name=b'FixtureError'):
+    """Owned returning function with a guarded throw-like ABI, not original libc code."""
+    code=bytearray(bytes.fromhex('4883ec18'))
+    def rip(opcode,target):
+        code.extend(opcode);code.extend(struct.pack('<i',target-(len(code)+4)))
+    rip(b'\xff\x15',520) # __error
+    code.extend(bytes.fromhex('48890424c7005b000000'))
+    rip(b'\x48\x8d\x3d',8320) # object: writable header128 plus payload
+    if bad_typeinfo:code.extend(b'\x48\xbe'+struct.pack('<Q',0xffffffffffffffff))
+    else:rip(b'\x48\x8d\x35',9000)
+    rip(b'\x48\x8d\x15',4608) # destructor address; never invoked
+    code.extend(b'\xb9'+struct.pack('<I',events))
+    loop=len(code)
+    rip(b'\xff\x15',512)
+    caller=len(code)
+    code.extend(bytes.fromhex('83f82a74020f0bffc9')) # verify original return42; --ecx
+    rip(b'\x0f\x85',loop)
+    # The original synthetic function must write the passed typeinfo/destructor,
+    # count header, and retain errno. Every mismatch traps with UD2.
+    rip(b'\x48\x39\x35',8320)
+    code.extend(bytes.fromhex('74020f0b'))
+    rip(b'\x48\x39\x15',8328)
+    code.extend(bytes.fromhex('74020f0b'))
+    rip(b'\x83\x3d',8192)
+    # RIP-relative imm8 includes one byte after displacement.
+    struct.pack_into('<i',code,len(code)-4,8192-(len(code)+1))
+    code.extend(bytes([2 if bad_prefix else 1])+bytes.fromhex('74020f0b488b1424833a5b74020f0b31ff4883c418'))
+    rip(b'\xff\x25',528)
+    assert len(code)<512
+    image=bytearray(12288);image[:len(code)]=code
+    image[4096:4099]=bytes.fromhex('31c0c3')
+    # Independently authored function: enter frame, store count, preserve two
+    # arguments in object storage, return42. No original procedure body here.
+    function=bytes.fromhex('554889e548c74780')+struct.pack('<I',2 if bad_prefix else 1)+bytes.fromhex('48893748895708b82a0000005dc3')
+    image[4112:4112+len(function)]=function
+    image[4608]=0xc3
+    image[9500:9500+len(name)+1]=name+b'\0'
+    relocs=[(512,1,0,0),(520,1,1,0),(528,1,2,0)]
+    if bad_name:struct.pack_into('<Q',image,9008,0xffffffffffffffff)
+    else:relocs.append((9008,0,9500,0))
+    names=(f'vkuuLfhnSZI#{scope}','9BcDykPmo1I#p#J','after-throw-like-function')
+    package=(struct.pack('<8s6Q',b'BBPROBE3',len(image),0,3,len(relocs),3,1)+
+             struct.pack('<8Q',4096,module_size,4096,8192,32,4,1,256)+
+             struct.pack('<3Q',0,4112,1)+struct.pack('<9Q',0,4096,5,4096,4096,5,8192,4096,6)+
+             b''.join(n.encode().ljust(128,b'\0') for n in names)+
+             b''.join(struct.pack('<QQqq',*r) for r in relocs)+image)
+    return package,caller
+
+
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
     def test_invalid_content_profile_is_rejected(self):
@@ -205,6 +255,54 @@ class LoaderTests(unittest.TestCase):
                 self.assertEqual(r.returncode,20,r.stdout+r.stderr)
                 self.assertIn('first unsupported PS4 import: after-signal-return',r.stdout)
                 self.assertIn('first argument: 0x0',r.stdout)
+
+    def check_throw_fixture(self,**kwargs):
+        data,caller=throw_audit_package(**kwargs)
+        r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':'1'})
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('first unsupported PS4 import: after-throw-like-function',r.stdout)
+        self.assertIn('first argument: 0x0',r.stdout)
+        return r,caller
+
+    def test_throw_audit_observes_without_changing_function_or_arguments(self):
+        r,caller=self.check_throw_fixture(name=b'Fixture"Line\n')
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+            self.assertIn('installed observation at image RVA 0x1010',r.stderr)
+            self.assertIn(f'caller_rva={caller:#x}',r.stderr)
+            self.assertIn('caller_readable=1',r.stderr)
+            self.assertIn('type_state=available type_name="Fixture\\x22Line\\x0a"',r.stderr)
+            self.assertEqual(r.stderr.count('Runtime throw audit: sequence='),1)
+        else:self.assertNotIn('Runtime throw audit:',r.stderr)
+
+    def test_throw_audit_bounds_unavailable_and_long_type_names(self):
+        for kwargs,state in ((dict(bad_typeinfo=True),'unavailable'),
+                             (dict(bad_name=True),'unavailable'),
+                             (dict(name=b'A'*120),'truncated')):
+            with self.subTest(kwargs=kwargs):
+                r,_=self.check_throw_fixture(**kwargs)
+                if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+                    self.assertIn(f'type_state={state}',r.stderr)
+
+    def test_throw_audit_refuses_wrong_prologue_extent_or_scope(self):
+        for kwargs,reason in ((dict(bad_prefix=True),'extent/prologue mismatch'),
+                              (dict(module_size=69),'extent/prologue mismatch'),
+                              (dict(scope='other#other'),'no bound __cxa_throw target')):
+            with self.subTest(kwargs=kwargs):
+                r,_=self.check_throw_fixture(**kwargs)
+                self.assertNotIn('Runtime throw audit: sequence=',r.stderr)
+                if os.environ.get('BB_PROBE_TRANSLATOR')=='1':self.assertIn(reason,r.stderr)
+
+    def test_throw_audit_limits_events_and_is_optional(self):
+        r,_=self.check_throw_fixture(events=70)
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+            self.assertEqual(r.stderr.count('Runtime throw audit: sequence='),64)
+            self.assertEqual(r.stderr.count('event limit reached (64)'),1)
+        data,_=throw_audit_package()
+        r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':'0'})
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('after-throw-like-function',r.stdout)
+        self.assertIn('first argument: 0x0',r.stdout)
+        self.assertNotIn('Runtime throw audit:',r.stderr)
 
     def test_native_initializer_and_export_return(self):
         r=self.run_image(native_package())
