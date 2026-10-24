@@ -22,6 +22,14 @@ Local changes:
 - 128 guest code ranges accommodate the loader's 64-segment limit, traps and
   generated x86 hooks. Hooks occupy one nonexecutable host arena.
 - Our runtime and Metal code use the same virtual 1.6 GHz guest TSC.
+- Decoded segment operands retain their own register kind. Interpreter/JIT
+  fallback context saves read per-thread 16-bit selectors instead of terminating
+  on MOV from CS. Flat user-context defaults follow the FreeBSD AMD64 selector
+  layout (CS0x43, SS/DS/ES0x3b, FS0x13, GS0x1b). Selector restores retain metadata;
+  they do not install GDT descriptors or replace the runtime's explicit FS/GS
+  bases. This is a user-mode context model, not privileged segmentation.
+  The exact observed six-byte store, register/memory widths, flags, thread
+  isolation and TLS are covered in both execution modes.
 
 `command_buffer_offsets.inc` contains 336 command-writer RVAs selected from
 `gpu/shim/bbport_gnm_table.inc` in

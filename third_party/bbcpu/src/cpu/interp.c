@@ -38,6 +38,7 @@ uint64_t bbcpu_read(BbCpu *cpu, const BbInsn *in, const BbOp *op) {
     case OP_REG:
         if (op->kind == RK_GPR) return read_gpr(cpu, op, op->size);
         if (op->kind == RK_VEC) return cpu->v[op->reg].q[0] & bb_mask(op->size);
+        if (op->kind == RK_SEG && op->reg < 6) return cpu->selectors[op->reg];
         bbcpu_fatal(cpu, in, "read of an unsupported register kind");
     case OP_MEM: return bb_load(bbcpu_addr(cpu, in, op), op->size);
     case OP_AGEN: return bbcpu_addr(cpu, in, op);
@@ -48,6 +49,8 @@ uint64_t bbcpu_read(BbCpu *cpu, const BbInsn *in, const BbOp *op) {
 
 void bbcpu_write(BbCpu *cpu, const BbInsn *in, const BbOp *op, uint64_t value) {
     if (op->type == OP_REG && op->kind == RK_GPR) write_gpr(cpu, op, op->size, value);
+    else if (op->type == OP_REG && op->kind == RK_SEG && op->reg < 6 && op->reg != 1)
+        cpu->selectors[op->reg] = (uint16_t)value;
     else if (op->type == OP_MEM) bb_store(bbcpu_addr(cpu, in, op), op->size, value);
     else bbcpu_fatal(cpu, in, "write to an unsupported operand");
 }
@@ -748,7 +751,6 @@ static uint64_t step(BbCpu *cpu, const BbInsn *in) {
     switch (m) {
     case M(MOV): {
         const BbOp *dst = &in->op[0];
-        if (dst->type == OP_REG && dst->kind == RK_OTHER) return next; /* segment registers */
         bbcpu_write(cpu, in, dst, read_src(cpu, in, &in->op[1], dst->size));
         return next;
     }

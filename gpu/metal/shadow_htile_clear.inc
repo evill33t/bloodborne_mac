@@ -7,6 +7,12 @@ bool shadow_htile_clear_enabled=[] {
 }();
 u64 shadow_htile_clear_attempts=0,shadow_htile_clear_applied=0;
 std::array<u64,10> shadow_htile_clear_rejected{};
+bool shadow_htile_clear_audit=[] {
+  const char* value=std::getenv("BB_METAL_SHADOW_HTILE_AUDIT");
+  return value && !std::strcmp(value,"1");
+}();
+std::array<u64,11> shadow_htile_readiness_sites{};
+std::array<u64,8> shadow_htile_uniform_read_reasons{},shadow_htile_metadata_read_reasons{};
 std::vector<u32> shadow_htile_clear_snapshot;
 struct PreparedShadowHtileClear {
   ShadowHtileClear::Plan plan;
@@ -21,9 +27,13 @@ std::optional<PreparedShadowHtileClear> PrepareShadowHtileClear(const Program& p
   const auto reject=[&](ShadowHtileClear::Reject reason) -> std::optional<PreparedShadowHtileClear> {
     ++shadow_htile_clear_rejected[unsigned(reason)];return {};
   };
+  const auto unready=[&](unsigned site) {
+    if(shadow_htile_clear_audit)++shadow_htile_readiness_sites[site];
+    return reject(ShadowHtileClear::Reject::Readiness);
+  };
   // CpuResourceRead's complete callback/writer proof requires these modes.
   if(!native_indirect_enabled || !native_texture_coherence || !gpu_written_texture_snapshot)
-    return reject(ShadowHtileClear::Reject::Readiness);
+    return unready(0);
   if(!ShadowHtileClear::ProgramEligible(program))return reject(ShadowHtileClear::Reject::Program);
   const std::span<const u32,16> prepared(user,16);
   const auto metadata=ShadowHtileClear::Base(prepared.subspan<4,4>());
@@ -50,37 +60,46 @@ std::optional<PreparedShadowHtileClear> PrepareShadowHtileClear(const Program& p
       surface,{}, {}, {}, {});
   if(shape.reason!=ShadowHtileClear::Reject::Readiness)return reject(shape.reason);
   const auto ready=CurrentCpuReadReady();
-  if(!ready)return reject(ShadowHtileClear::Reject::Readiness);
+  if(!ready)return unready(1);
   const auto uniform_address=ShadowHtileClear::Base(prepared.subspan<8,4>());
   const auto generation=Core::Memory::DirectMapGeneration();
-  if(generation!=surface.mapping_generation || !CpuResourceRead(uniform_address,8,ready))
-    return reject(ShadowHtileClear::Reject::Readiness);
+  if(generation!=surface.mapping_generation)return unready(2);
+  u32 read_reason=0;
+  if(!CpuResourceRead(uniform_address,8,ready,shadow_htile_clear_audit ? &read_reason : nullptr)) {
+    if(shadow_htile_clear_audit && read_reason<8)++shadow_htile_uniform_read_reasons[read_reason];
+    return unready(3);
+  }
   std::array<u32,2> uniform;
   std::memcpy(uniform.data(),reinterpret_cast<const void*>(uniform_address),sizeof(uniform));
   const ShadowHtileClear::CpuReadProof uniform_proof{uniform_address,8,generation,
       Core::Memory::DirectMapGeneration(),true};
   if(uniform!=std::array<u32,2>{ShadowHtileClear::Words,ShadowHtileClear::ClearWord})
     return reject(ShadowHtileClear::Reject::Uniform);
-  if(!CpuResourceRead(metadata,ShadowHtileClear::MetadataBytes,ready))
-    return reject(ShadowHtileClear::Reject::Readiness);
+  if(!CpuResourceRead(metadata,ShadowHtileClear::MetadataBytes,ready,shadow_htile_clear_audit ? &read_reason : nullptr)) {
+    if(shadow_htile_clear_audit && read_reason<8)++shadow_htile_metadata_read_reasons[read_reason];
+    return unready(4);
+  }
   try {shadow_htile_clear_snapshot.resize(ShadowHtileClear::Words);}
-  catch(const std::bad_alloc&) {return reject(ShadowHtileClear::Reject::Readiness);}
+  catch(const std::bad_alloc&) {return unready(5);}
   std::memcpy(shadow_htile_clear_snapshot.data(),reinterpret_cast<const void*>(metadata),
       ShadowHtileClear::MetadataBytes);
   const ShadowHtileClear::CpuReadProof metadata_proof{metadata,ShadowHtileClear::MetadataBytes,
       generation,Core::Memory::DirectMapGeneration(),true};
   const auto decision=ShadowHtileClear::Recognize(program,prepared,{gx,gy,gz},{tx,ty,tz},indirect,
       surface,uniform_proof,uniform,metadata_proof,shadow_htile_clear_snapshot);
-  if(!decision.plan)return reject(decision.reason);
+  if(!decision.plan) {
+    if(decision.reason==ShadowHtileClear::Reject::Readiness)return unready(7);
+    return reject(decision.reason);
+  }
   PreparedShadowHtileClear result{*decision.plan,target,target->tex,{}};
   for(const auto range:{NativeIndirect::Range{uniform_address,8},
       NativeIndirect::Range{metadata,ShadowHtileClear::MetadataBytes}}) {
     id<MTLBuffer> buffer=nil;u64 offset=0;
     if(!LocateIndirect(range.address,range.bytes,&buffer,&offset))
-      return reject(ShadowHtileClear::Reject::Readiness);
+      return unready(6);
     result.reads.push_back({range,{offset+(buffer==mem[0] ? 0 : mem_split),range.bytes}});
   }
-  if(Core::Memory::DirectMapGeneration()!=generation)return reject(ShadowHtileClear::Reject::Readiness);
+  if(Core::Memory::DirectMapGeneration()!=generation)return unready(8);
   return result;
 }
 void LeaseShadowHtileClear(std::optional<PreparedShadowHtileClear>& prepared) {
@@ -95,6 +114,7 @@ void LeaseShadowHtileClear(std::optional<PreparedShadowHtileClear>& prepared) {
   if(!cmd || !current || Core::Memory::DirectMapGeneration()!=prepared->plan.generation ||
       !ProtectDescriptorReads(prepared->reads)) {
     ++shadow_htile_clear_rejected[unsigned(ShadowHtileClear::Reject::Readiness)];prepared.reset();
+    if(shadow_htile_clear_audit)++shadow_htile_readiness_sites[9];
   }
 }
 void ApplyShadowHtileClear(const std::optional<PreparedShadowHtileClear>& prepared) {
@@ -104,7 +124,9 @@ void ApplyShadowHtileClear(const std::optional<PreparedShadowHtileClear>& prepar
   if(Core::Memory::DirectMapGeneration()!=clear.plan.generation ||
       binding==shadow_htile_clear_surfaces.end() || binding->second.target!=clear.plan.target ||
       binding->second.mapping_generation!=clear.plan.generation || clear.target->tex!=clear.texture) {
-    ++shadow_htile_clear_rejected[unsigned(ShadowHtileClear::Reject::Readiness)];return;
+    ++shadow_htile_clear_rejected[unsigned(ShadowHtileClear::Reject::Readiness)];
+    if(shadow_htile_clear_audit)++shadow_htile_readiness_sites[10];
+    return;
   }
   // The original compute has been encoded. BeginPass will emit its native
   // equivalent in queue order, advancing the depth revision only then.
@@ -113,4 +135,15 @@ void ApplyShadowHtileClear(const std::optional<PreparedShadowHtileClear>& prepar
   ++shadow_htile_clear_applied;
   if(trace)DC_INFO("gpu: shadow HTILE full clear depth %#llx (meta %#llx), original RMW retained",
       clear.plan.target,clear.plan.metadata);
+}
+void ReportShadowHtileAudit() const {
+  if(!shadow_htile_clear_audit)return;
+  const auto values=[](const auto& counters) {
+    std::string result;
+    for(const auto value:counters) {if(!result.empty())result+=',';result+=std::to_string(value);}
+    return result;
+  };
+  DC_INFO("gpu shadow HTILE audit: sites=[%s] uniform-read=[%s] metadata-read=[%s] (cumulative)",
+      values(shadow_htile_readiness_sites).c_str(),values(shadow_htile_uniform_read_reasons).c_str(),
+      values(shadow_htile_metadata_read_reasons).c_str());
 }

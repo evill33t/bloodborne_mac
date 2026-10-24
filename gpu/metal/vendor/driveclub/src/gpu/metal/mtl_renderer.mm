@@ -1088,9 +1088,10 @@ struct MetalRenderer::Impl {
     return true;
   }
   void PruneGuestWriters() {writer_prune.Prune(guest_writers);}
-  bool CpuResourceRead(u64 address,u64 bytes,const CpuReadReady& ready={}) {
+  bool CpuResourceRead(u64 address,u64 bytes,const CpuReadReady& ready={},u32* rejection_reason=nullptr) {
     const auto reject=[&](u32 reason,const char* label,NativeIndirect::Range writer={},
         NativeIndirect::Range read={}) {
+      if(rejection_reason)*rejection_reason=reason;
       if(indirect_read_trace && indirect_read_failures.size()<128) {
         const u64 key=Hash(reason,Hash(bytes,Hash(address)));
         if(indirect_read_failures.insert(key).second)
@@ -6232,6 +6233,7 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           shadow_htile_clear_rejected[1],shadow_htile_clear_rejected[2],shadow_htile_clear_rejected[3],
           shadow_htile_clear_rejected[4],shadow_htile_clear_rejected[5],shadow_htile_clear_rejected[6],
           shadow_htile_clear_rejected[7],shadow_htile_clear_rejected[8]);
+      ReportShadowHtileAudit();
       if(exact_texture_compare.Budget()) {
         const auto& exact=exact_texture_compare.Counters();
         DC_INFO("gpu exact texture: %llu equal, %llu different, %llu missing, %llu identity rejects, %llu source bytes compared; %llu retained bytes/%llu budget, %zu entries; %llu stores, %llu evictions, %llu allocation failures (cumulative)",

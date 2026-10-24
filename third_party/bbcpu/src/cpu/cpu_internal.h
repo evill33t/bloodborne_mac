@@ -66,11 +66,14 @@ typedef struct BbCpu {
     struct BbJitCacheEntry *jit_cache;
     uint64_t instructions;
     BbWatch *watch; /* allocated only for BB_JIT_WATCH diagnostics */
+    /* Flat user-mode context selectors, ES CS SS DS FS GS. FS/GS addressing
+     * continues to use the runtime's separately installed 64-bit bases. */
+    uint16_t selectors[6];
 } BbCpu;
 
 /* Operand of a decoded instruction (compact copy of Zydis's). */
 enum { OP_NONE, OP_REG, OP_MEM, OP_IMM, OP_AGEN };
-enum { RK_GPR, RK_VEC, RK_X87, RK_OTHER };
+enum { RK_GPR, RK_VEC, RK_X87, RK_OTHER, RK_SEG };
 typedef struct {
     uint8_t type;
     uint8_t size;      /* bytes */

@@ -131,5 +131,84 @@ The classification capture now optionally includes pre/post host TAA, final
 scanout and spaced full-view samples under the same independent256MiB cap.
 All new capture modes remain off during ordinary gameplay.
 
-Full-view localization and the deferred movement/area-transition soak remain
-in progress. Original-file integrity must be rechecked after the final run.
+The initial full-view capture has4.27million accepted static-depth samples;
+mean raw alpha drift0.54/255, while host TAA lowers tone-compressed HDR drift
+from0.689 to0.594/255. A later four-angle camera/movement capture has1.60million
+accepted samples and raw alpha drift1.292/255. These do not isolate the user's
+reported arch/right-wall artifact. HTILE readiness rejections rise substantially
+following travel; additional default-off diagnostics now separate the rejection
+sites and CPU-read causes without weakening admission.
+
+## Extended stability failure and correction
+
+The first planned600-second route failed after 504.28 seconds, following
+three diagnostic fast-travel requests, movement, attacks and fall/respawn cycles.
+It is **not** a completed stability pass. Native bbcpu terminated with status30
+at guest0x7005733d44 on `8c 8f e8 00 00 00` (MOV word [RDI+0xe8], CS).
+The runtime did not support reading segment-register operands. No GPU wait
+timeout was reported before termination. Evidence is retained in
+`ac24-final-long-shadow/metrics.json` and `launch.log`.
+
+A synthetic test reproduces the same six-byte stop before the change. The
+CPU decoder now retains segment-register identity and its interpreter/JIT
+fallback reads per-thread16-bit user-context selectors. Restores update that
+metadata while retaining the runtime's separately installed FS/GS bases.
+The flat context uses FreeBSD-compatible user selectors, inferred as the
+appropriate user-mode ABI model, rather than reading ARM host state. It does
+not implement GDT loading, descriptor validation or privilege transitions.
+The reference layout and initialization are in FreeBSD9.0
+[segments.h](https://raw.githubusercontent.com/freebsd/freebsd-src/releng/9.0/sys/amd64/include/segments.h)
+and [exec_setregs](https://raw.githubusercontent.com/freebsd/freebsd-src/releng/9.0/sys/amd64/amd64/machdep.c).
+
+After the correction, interpreter and native JIT fallback tests pass the actual
+store, six selector reads,16/32/64-bit destinations, narrow memory guards,
+flags, thread isolation and explicit TLS-base preservation. The complete native
+suite passes32 executed tests, with two expected private-input skips. The
+Rosetta suite passes120 executed tests, with four expected skips. The native audit build and the focused admission/CPU checks also pass. The
+private original HTILE GPU fixture was supplied explicitly and passed its
+blocked-consumer, full-input-lease regression after rebuilding. The full x86
+suite preceded the final audit-only instrumentation; it is not a claim about a
+new x86 gameplay replay.
+
+## Analysis-only continuation and remaining work
+
+The AC guard rejected the next launch before creating a game process. The user
+selected analysis only, so no further gameplay launches were attempted. The
+post-fix travel replay is pending. Its frozen native runtime is
+`cpu-fixed-audit-runtime/bb-macos-game`, SHA256
+`b1627f8d97f1b1797e465f53847fd14a5a275a3718648ad22a8dd92221b574dd`.
+The failed long replay used SHA256
+`20eb6777f2ce0b61a4d3ee39d5474f2bd339d368e14828e2892a79e08f981f00`.
+
+The retained long replay ends with 16,368 native clears, 33,819 attempts,
+3,017 surface rejections and 14,434 readiness rejections. During its final four
+observations, attempts grow by 205 and readiness rejections grow by 205, with
+no new native clears. In that fallback, the original metadata RMW dispatch
+continues but the native depth-clear substitution does not run. The original
+GPU regression establishes that the metadata kernel alone leaves private D32
+contents stale. This is a concrete coverage gap in the correction; which
+readiness predicate is responsible in gameplay is still unmeasured.
+
+`BB_METAL_SHADOW_HTILE_AUDIT=1` reports default-off counters. The readiness site
+indices are modes, missing CP context, stale layout generation, uniform CPU
+read, metadata CPU read, allocation, buffer lookup, recognition proof, final
+map-generation check, consumer lease and apply-time identity. Uniform/metadata
+read counters additionally distinguish unreadable inputs, pending CPU fences,
+partial direct mappings, host backing views, unknown GPU writers, pending GPU
+writers and callback effects. No check was bypassed.
+
+The next AC replay should target the user's arch/right-wall camera motion after
+travel and correlate these counters with atlas and shadow-alpha captures. If
+pending same-queue GPU writes block the CPU proof, a candidate is a GPU decision
+using the actual protected inputs, followed by a conditional native depth clear.
+It must retain the original RMW, the nibble-13 preservation case, uniform
+validation, mapping identity and complete consumer leases. A stale binding
+instead needs a fresh association proof; updating a generation tag alone would
+not establish it. These are analysis proposals, not implemented or validated
+shadow fixes.
+
+The final read-only integrity check passes: all 28,779 source files have unchanged
+size/mtime inventory, the source eboot and prepared original ELF hashes match,
+and all 16 master-save hashes match. `git diff --check` passes. The sliding-shadow
+case, post-fix long gameplay stability and a repeatable native 60 FPS lock remain
+unresolved.

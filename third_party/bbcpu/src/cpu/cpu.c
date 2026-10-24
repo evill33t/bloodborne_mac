@@ -120,6 +120,12 @@ static BbCpu *current_cpu(void) {
     cpu->mxcsr = 0x1f80;
     cpu->fcw = 0x37f;
     cpu->flags = 2;
+    /* FreeBSD-compatible flat 64-bit user context, not host ARM selectors.
+     * No GDT, privilege changes or descriptor-based TLS are emulated. */
+    cpu->selectors[0] = cpu->selectors[2] = cpu->selectors[3] = 0x3b;
+    cpu->selectors[1] = 0x43;
+    cpu->selectors[4] = 0x13;
+    cpu->selectors[5] = 0x1b;
     apply_thread_pointer(cpu);
     __atomic_add_fetch(&cpus_created, 1, __ATOMIC_RELAXED);
     watch_init(cpu);

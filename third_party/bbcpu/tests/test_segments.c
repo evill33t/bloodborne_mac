@@ -32,9 +32,9 @@ int main(void) {
     assert(run(crash,sizeof(crash),(uintptr_t)memory)==0x12345678);
     assert(memory[0xe8]==0x43 && memory[0xe9]==0);
     for(unsigned k=0;k<sizeof(memory);++k)if(k!=0xe8 && k!=0xe9)assert(memory[k]==0xa5);
-    const uint16_t expected[]={0x3b,0x43,0x3b,0x3b,0,0}; /* ES CS SS DS FS GS */
+    const uint16_t expected[]={0x3b,0x43,0x3b,0x3b,0x13,0x1b}; /* ES CS SS DS FS GS */
     for(unsigned segment=0;segment<6;++segment) {
-        uint8_t store[]={0x8c,(uint8_t)(segment<<3),0xc3};
+        uint8_t store[]={0x8c,(uint8_t)(7|(segment<<3)),0xc3};
         memset(memory,0xa5,sizeof(memory));run(store,sizeof(store),(uintptr_t)memory);
         uint16_t value;memcpy(&value,memory,2);assert(value==expected[segment]);
         for(unsigned k=2;k<sizeof(memory);++k)assert(memory[k]==0xa5);

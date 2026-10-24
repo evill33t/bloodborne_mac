@@ -80,6 +80,10 @@ static void convert_operand(const ZydisDecodedInstruction *zi, const ZydisDecode
             op->kind = RK_X87;
             op->reg = (uint8_t)ZydisRegisterGetId(zo->reg.value);
             break;
+        case ZYDIS_REGCLASS_SEGMENT:
+            op->kind = RK_SEG;
+            op->reg = (uint8_t)ZydisRegisterGetId(zo->reg.value);
+            break;
         default:
             op->kind = RK_OTHER;
             op->reg = (uint8_t)(zo->reg.value & 0xff);
