@@ -16,13 +16,16 @@ static const char *retirement_audit_layout(void) {
         0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x48,0x89,0xfb};
     static const unsigned char publish[]={0x48,0x8b,0x83,0x30,0x0c,0,0,
         0x48,0x8d,0x0d,0x68,0x2b,0x2e,0x04,0x48,0x89,0x01,0x4c,0x89,0xf7};
+    static const unsigned char call_return[]={0xe8,0x3d,0x3b,0x02,0,
+        0x48,0x8b,0x03,0x48,0x89,0xdf};
     unsigned char actual[sizeof(prefix)];
     if(!hash || strcmp(hash,allocation_audit_eboot_hash))return "image-identity";
     if(base>UINT64_MAX-0x54b9eb8 || !module_count || modules[0].base<0x54b9eb8 ||
        !allocation_audit_image_range(0x11d7200,437,5) ||
        !allocation_audit_image_range(0x54b9eb0,8,6))return "image-layout";
     if(!throw_audit_image_read(base+0x11d7200,actual,sizeof(prefix)) || memcmp(actual,prefix,sizeof(prefix)) ||
-       !throw_audit_image_read(base+0x11d733a,actual,sizeof(publish)) || memcmp(actual,publish,sizeof(publish)))
+       !throw_audit_image_read(base+0x11d733a,actual,sizeof(publish)) || memcmp(actual,publish,sizeof(publish)) ||
+       !throw_audit_image_read(base+0x11d734e,actual,sizeof(call_return)) || memcmp(actual,call_return,sizeof(call_return)))
         return "instruction-layout";
     return NULL;
 }
@@ -45,14 +48,14 @@ static void retirement_audit_init_probe(const uint64_t regs[16],uint64_t address
     const int32_t saved_guest_errno=*runtime_errno();
     uint64_t label=0;
     if(!retirement_audit_enabled() || !atomic_load_explicit(&retirement_audit_installed,memory_order_acquire) ||
-       address!=(uintptr_t)image+0x11d734b || retirement_audit_layout())goto done;
+       address!=(uintptr_t)image+0x11d7353 || retirement_audit_layout())goto done;
     atomic_fetch_add_explicit(&retirement_audit_init_seen,1,memory_order_relaxed);
     /* Public register order puts the initializer's saved original RDI in RBX. */
     if(!retirement_audit_selection(regs[3],&label))goto done;
     atomic_store_explicit(&retirement_audit_context,regs[3],memory_order_release);
     const unsigned selected=atomic_fetch_add_explicit(&retirement_audit_init_selected,1,memory_order_relaxed);
     if(selected<64)fprintf(stderr,"Runtime retirement audit: selected context=%#" PRIx64
-        " completion_label=%#" PRIx64 " init_rva=0x11d734b unsynchronized=1\n",regs[3],label);
+        " completion_label=%#" PRIx64 " init_rva=0x11d7353 unsynchronized=1\n",regs[3],label);
     else if(selected==64)fputs("Runtime retirement audit: initialization log limit reached (64)\n",stderr);
  done:
     *runtime_errno()=saved_guest_errno;errno=saved_errno;
@@ -63,9 +66,11 @@ static void install_retirement_audit(void) {
     if(reason) {
         fprintf(stderr,"Runtime retirement audit: refused initialization observation reason=%s\n",reason);return;
     }
-    bbcpu_set_probe((uintptr_t)image+0x11d734b,retirement_audit_init_probe,0);
+    /* This verified CALL return starts a decoded block on both selector paths.
+     * The earlier publish fallthrough is inside the selected path's JIT block. */
+    bbcpu_set_probe((uintptr_t)image+0x11d7353,retirement_audit_init_probe,0);
     atomic_store_explicit(&retirement_audit_installed,1,memory_order_release);
-    fputs("Runtime retirement audit: installed read-only initialization observation at image RVA 0x11d734b\n",stderr);
+    fputs("Runtime retirement audit: installed read-only initialization observation at image RVA 0x11d7353\n",stderr);
 }
 static void retirement_audit_snapshot(unsigned sequence) {
     if(!retirement_audit_enabled())return;

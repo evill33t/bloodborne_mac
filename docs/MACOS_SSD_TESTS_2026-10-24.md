@@ -214,3 +214,41 @@ Evidence: `queue-ssd-failure.json`, `queue-ssd-diagnostic-gaps.json`,
 under the evidence root, plus this replay's separate launch log, metrics,
 cloned saves and clips. The repeated SSD integrity check passes for all source
 inventory entries, executable hashes and 16 master saves.
+
+## Retirement diagnostic reachability correction
+
+The next `resource24-ssd-retirement-soak` attempt uses frozen diagnostic binary
+`f100b3c089242e17562b4d36cbe3d630344b563a3f018d6c8b1d7bb16088fc0f`.
+Its sparse fixtures validate layout/selection/read guards, but live initialization
+does not select a context. Source inspection identifies the missing validation:
+native JIT probes execute at basic-block entry, and the selector-zero path
+falls through the original post-publish `0x11d734b` address within a translated
+block. The branch that targets this address skips the relevant initialization.
+Direct callback invocation in the sparse fixture did not exercise reachability.
+
+The agent deliberately sends SIGTERM to the PID/path-verified test game and
+records `intentional-diagnostic-stop.json`. This attempt is an intentional
+diagnostic stop, not an allocator recurrence or stability pass. AC remains
+connected. A corrected observation uses the verified call-return `0x11d7353`,
+where RBX still holds the original context after publication. An actual CPU
+execution fixture must demonstrate selected-path callback delivery before
+another live replay. No translator-wide probe splitting or guest code/data
+change is required for this correction.
+
+The corrected native game is frozen separately as
+`08a4b76cee67ffc2838e53a5297d48d0c45c9650af57e793791681bbad812edf`
+in `retirement-return-ssd-runtime/`. Actual owned guest execution tests pass
+with JIT enabled and disabled: the selected path skips the old interior point
+under JIT, executes the observed CALL, selects context exactly once at its
+return, and preserves original publication/return behavior. Selector rejection
+and disabled-audit execution also pass. Sparse fixtures and 29 loader tests
+pass on each architecture. The new live replay
+`resource24-ssd-retirement-return-soak` successfully records the original
+context and label at startup; final gameplay results follow separately.
+
+A quiet private CPU experiment also compares parallel exact equality with the
+unchanged serial loop. Four tasks with a 4 MiB threshold reduce a varied
+256 MiB stream from 4.897 to 3.734 ms, but a synthetic 498-entry stream improves
+only from 5.140 to 4.716 ms. Lower thresholds regress. Large protected-input
+and mismatch checks pass. This is not a live renderer/FPS result; no production
+parallel-comparison option is added. See `exact-compare-review/parallel-report.md`.

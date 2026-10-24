@@ -230,6 +230,8 @@ static void retirement_layout(void) {
         0x48,0x8d,0x0d,0x68,0x2b,0x2e,0x04,0x48,0x89,0x01,0x4c,0x89,0xf7};
     memcpy(cell(base+0x11d7200,sizeof(prefix))->value,prefix,sizeof(prefix));
     memcpy(cell(base+0x11d733a,sizeof(publish))->value,publish,sizeof(publish));
+    const unsigned char call_return[]={0xe8,0x3d,0x3b,0x02,0,0x48,0x8b,0x03,0x48,0x89,0xdf};
+    memcpy(cell(base+0x11d734e,sizeof(call_return))->value,call_return,sizeof(call_return));
     word(base+0x54b9eb0,label_address);
     word(context_address+0x351c,0);word(context_address+0xc30,label_address);
     word(context_address+0x3400,9);word(label_address,8);
@@ -237,12 +239,12 @@ static void retirement_layout(void) {
 static void invoke_init(uint64_t context) {
     uint64_t regs[16]={0};regs[3]=context;
     errno=EDOM;guest_errno=91;
-    retirement_audit_init_probe(regs,base+0x11d734b,0);
+    retirement_audit_init_probe(regs,base+0x11d7353,0);
     assert(errno==EDOM && guest_errno==91);
 }
 static void selected_retirement(void) {
     reset();retirement_layout();install_retirement_audit();
-    assert(probe_count==1 && probe_address==base+0x11d734b && probe_callback==retirement_audit_init_probe);
+    assert(probe_count==1 && probe_address==base+0x11d7353 && probe_callback==retirement_audit_init_probe);
     invoke_init(context_address);
     assert(atomic_load(&retirement_audit_context)==context_address);
     assert(atomic_load(&retirement_audit_init_seen)==1 && atomic_load(&retirement_audit_init_selected)==1);
@@ -281,6 +283,8 @@ static void retirement_tests(void) {
     reset();retirement_layout();image=(unsigned char *)(uintptr_t)(UINT64_MAX-0x100);install_retirement_audit();assert(!probe_count && !read_count);
     reset();retirement_layout();find_cell(base+0x11d7200)->value[0]^=1;install_retirement_audit();assert(!probe_count);
     reset();retirement_layout();find_cell(base+0x11d733a)->value[19]^=1;install_retirement_audit();assert(!probe_count);
+    reset();retirement_layout();find_cell(base+0x11d734e)->value[1]^=1;install_retirement_audit();assert(!probe_count);
+    reset();retirement_layout();find_cell(base+0x11d734e)->value[10]^=1;install_retirement_audit();assert(!probe_count);
     reset();retirement_layout();fail_address=base+0x11d733a;install_retirement_audit();assert(!probe_count);
     /* An observed initializer reached by its nonzero-selector branch is not
      * the global completion publisher. Invalid fixed fields stay unavailable. */
