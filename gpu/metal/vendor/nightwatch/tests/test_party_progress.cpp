@@ -1002,7 +1002,7 @@ static void TestBbpf(const char* source_dir) {
     CHECK(BbpfWriteFile(ppath, h, pool));
     // tools/party/flag_tool.py dump must read them
     char cmd[1600];
-    std::snprintf(cmd, sizeof cmd, "python -I \"%s/tools/party/flag_tool.py\" dump \"%s\" --set-only 2>&1", source_dir,
+    std::snprintf(cmd, sizeof cmd, "python3 -I \"%s/tools/party/flag_tool.py\" dump \"%s\" --set-only 2>&1", source_dir,
                   path);
     std::FILE* p = popen(cmd, "r");
     if (!p) {
@@ -1025,7 +1025,7 @@ static void TestBbpf(const char* source_dir) {
     CHECK(text.find("\n6100\n") != std::string::npos);
     CHECK(text.find("\n12400999\n") != std::string::npos);
     CHECK(text.find("12401800") == std::string::npos);  // in the pool, not the visible tree
-    std::snprintf(cmd, sizeof cmd, "python -I \"%s/tools/party/flag_tool.py\" dump \"%s\" --set-only 2>&1", source_dir,
+    std::snprintf(cmd, sizeof cmd, "python3 -I \"%s/tools/party/flag_tool.py\" dump \"%s\" --set-only 2>&1", source_dir,
                   ppath);
     p = popen(cmd, "r");
     text.clear();

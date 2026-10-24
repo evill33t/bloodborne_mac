@@ -86,7 +86,7 @@ void SetImage(unsigned char* p,std::uint64_t size) { image=p; image_size=size;
     if (enabled) nw_net_set_image(p,size);
 #endif
 }
-void Install() {
+void InstallHooks() {
 #ifdef BB_HAS_NIGHTWATCH
     if (!enabled) return;
     const char* hash=std::getenv("BB_MAC_EBOOT_SHA256");
@@ -97,7 +97,12 @@ void Install() {
     coop::PartyInit(image,image_size);
     MacFeatures::SetGameTick(&coop::CoopTick);
     coop::MarkImageHooksDone();
-    nw_net_start();
+#endif
+}
+void Install() {
+    InstallHooks();
+#ifdef BB_HAS_NIGHTWATCH
+    if (enabled) nw_net_start();
 #endif
 }
 void Shutdown() {

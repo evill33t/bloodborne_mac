@@ -11,6 +11,7 @@ void Configure(const MacSettings::Values& settings);
 void Register();
 void SetImage(unsigned char*,std::uint64_t);
 void Install();
+void InstallHooks();
 void Shutdown();
 std::string Status();
 std::string Code(bool lan=false);
