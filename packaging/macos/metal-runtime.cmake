@@ -1,5 +1,5 @@
 # Shared direct Metal production sources for the Rosetta and native CPU runtimes.
-set(BB_PS4_METAL "${BB_ROOT}/gpu/metal/vendor/driveclub/src")
+set(BB_PS4_METAL "${BB_ROOT}/gpu/metal/vendor/bloodborne/src")
 add_subdirectory("${BB_ROOT}/gpu/metal/bbhost" bbhost-features)
 add_library(bb-ps4-metal STATIC
     "${BB_PS4_METAL}/gpu/liverpool/command_processor.cpp"

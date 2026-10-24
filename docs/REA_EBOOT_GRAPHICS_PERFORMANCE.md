@@ -126,7 +126,7 @@ particular gameplay scene or that every argument buffer is GPU-produced.
 
 **Observed in the port:**
 
-- `gpu/metal/vendor/driveclub/src/gpu/liverpool/command_processor.cpp:651`
+- `gpu/metal/vendor/bloodborne/src/gpu/liverpool/command_processor.cpp:651`
   handles `WAIT_REG_MEM` with up to 1,000,000 `sched_yield()` iterations, then
   logs and continues even when its predicate remains unsatisfied.
 - The pending-fence shortcut at line 662 can avoid a CPU wait for ordered GPU
@@ -149,7 +149,7 @@ The renderer already defers completion through `MTLSharedEvent` callbacks
 
 ## 3. GPU errors need to reach the waiting guest
 
-`gpu/metal/vendor/driveclub/src/gpu/metal/mtl_renderer.mm:983` installs upload,
+`gpu/metal/vendor/bloodborne/src/gpu/metal/mtl_renderer.mm:983` installs upload,
 arena-lifetime and statistics callbacks in normal `Commit()` but no durable
 command-status/error handling. `WaitLast()` at line 1191 waits and clears the
 command without inspecting its failure status. Checkpoint draining at line

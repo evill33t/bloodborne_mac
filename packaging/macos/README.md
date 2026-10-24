@@ -52,7 +52,7 @@ records the imported sources, command-writer guards, tests and remaining limits.
 The runtime build downloads pinned SDL 3.4.16 and LibAtrac9 source archives with
 SHA-256 verification. Native shader tools use pinned glslang and SPIRV-Cross.
 The selected direct Metal PS4 renderer is vendored under
-`gpu/metal/vendor/driveclub/`; its `UPSTREAM.md` records the source commit and GPL
+`gpu/metal/vendor/bloodborne/`; its `UPSTREAM.md` records the source commit and GPL
 license. The selected bbhost engine and four native plugins are recorded in
 [`gpu/metal/vendor/bbhost/UPSTREAM.md`](../../gpu/metal/vendor/bbhost/UPSTREAM.md).
 The combined Mac runtime is GPL-3.0-or-later. Include dependency licenses when
