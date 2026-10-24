@@ -13,6 +13,7 @@ void AddSegment(std::uint64_t at, std::uint64_t size, std::uint32_t flags);
 void AddRelative(std::uint64_t at, std::uint64_t target);
 void Install();
 void PollMenu();
+void SetGameTick(void (*tick)());
 void SetSettings(const MacSettings::Values& values);
 bool TakeSettings(MacSettings::Values& values);
 MacSettings::Values Settings();

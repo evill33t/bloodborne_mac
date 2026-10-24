@@ -71,7 +71,9 @@ PY
 }
 trap cleanup_mod_view EXIT
 export BB_MAC_SETTINGS="${BB_MAC_SETTINGS:-$data/macos-settings.ini}"
-export BB_USER_DIR="${BB_USER_DIR:-$data/user}"
+export BB_MAC_BASE_USER_DIR="${BB_MAC_BASE_USER_DIR:-${BB_USER_DIR:-$data/user}}"
+export BB_USER_DIR=$("$python" scripts/macos_nightwatch.py --settings "$BB_MAC_SETTINGS" \
+    --user "$BB_MAC_BASE_USER_DIR" --cpu "${BB_MAC_CPU:-rosetta}")
 "$python" scripts/macos_prepare.py "$game" --out "$prepared" \
     --graphics-profile "${BB_MAC_GRAPHICS_PROFILE:-original}" --settings "$BB_MAC_SETTINGS"
 # Recalculate automatic sizing after a resolution restart, while preserving an

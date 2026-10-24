@@ -15,7 +15,10 @@
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
+#include <atomic>
 namespace MacFeatures {
+namespace { std::atomic<void (*)()> extra_game_tick{nullptr}; }
+void SetGameTick(void (*tick)()) { extra_game_tick.store(tick,std::memory_order_release); }
 namespace {
 constexpr std::uint64_t kOpenSection = 0x1f20900;         // sub_1f20900
 constexpr std::uint64_t kScratchInit = 0x208af20;         // the handler's scratch block
@@ -561,6 +564,7 @@ void InstallGameMenu(ElfImage* image) {
     host_log("Mac System menu: %s",installed ? "Display, Graphics, Mods and Performance added" : "unexpected code; native panel remains available");
 }
 void PollMenu() {
+    if (auto tick=extra_game_tick.load(std::memory_order_acquire)) tick();
     if (TakeDebugToggle()) debug_menu_toggle();
     if (!installed || !seeded) return;
     auto v=Settings(); bool changed=false;

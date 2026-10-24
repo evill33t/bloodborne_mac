@@ -13,6 +13,7 @@
 #include "gpu/metal/game_input.h"
 #include "gpu/metal/bbhost/features.h"
 #include "gpu/metal/bbhost/network.h"
+#include "gpu/metal/nightwatch/integration.h"
 #include "gpu/metal/frame_handoff.h"
 #include "gpu/metal/frame_generation.h"
 #import <QuartzCore/QuartzCore.h>
@@ -336,9 +337,16 @@ extern "C" int bbmetal_wait_gpu_label(std::uint64_t address,std::uint64_t refere
 }
 extern "C" int bbgpu_handle_fault(void*,void*) { return 0; }
 extern "C" void bbgpu_dump_guest_writes(void*) {}
-extern "C" void bbnet_configure(const char*,const char*,const char*,const char*) { MacNetwork::Register(); }
-extern "C" void bbnet_set_image(unsigned char* image,uint64_t size) { MacFeatures::BindImage(image,size); MacNetwork::SetImage(image,size); }
-extern "C" void bbnet_initialize(void) { MacNetwork::Initialize(); }
+extern "C" void bbnet_configure(const char*,const char*,const char*,const char*) {
+    if (MacNightwatch::Active()) MacNightwatch::Register(); else MacNetwork::Register();
+}
+extern "C" void bbnet_set_image(unsigned char* image,uint64_t size) {
+    MacFeatures::BindImage(image,size); MacNightwatch::SetImage(image,size);
+    if (!MacNightwatch::Active()) MacNetwork::SetImage(image,size);
+}
+extern "C" void bbnet_initialize(void) {
+    if (MacNightwatch::Active()) MacNightwatch::Install(); else MacNetwork::Initialize();
+}
 extern "C" int bbgpu_overlay_captures_input(void) {
     return MacSettings::CapturesInput.load(std::memory_order_acquire) ||
         MacAchievements::CapturesInput.load(std::memory_order_acquire) ||
@@ -381,7 +389,8 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     MacSettings::Values settings=MacSettings::Load(settings_path);
     const bool startup_native_1080=settings.render_width==1920 && settings.render_height==1080;
     MacFeatures::Initialize(settings);
-    MacNetwork::Configure(settings);
+    MacNightwatch::Configure(settings);
+    if (!MacNightwatch::Active()) MacNetwork::Configure(settings);
     if (auto mode=SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)); mode && mode->refresh_rate>=30) display_refresh.store(mode->refresh_rate);
     std::unique_ptr<Gpu::Metal::Presenter> presenter;
     bool applied_fullscreen=false;
@@ -413,6 +422,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
     std::thread worker([=] {
         @autoreleasepool {
             int result=guest_main(argc,argv);
+            MacNightwatch::Shutdown();
             _Exit(result);
         }
     });
@@ -439,7 +449,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
             SDL_Event event;
             bool have_event=SDL_WaitEventTimeout(&event,4);
             while (have_event) {
-                if (event.type==SDL_EVENT_QUIT) _Exit(0);
+                if (event.type==SDL_EVENT_QUIT) { MacNightwatch::Shutdown(); _Exit(0); }
                 if (event.type==SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED && presenter)
                     presenter->Resize(event.window.data1,event.window.data2);
                 if (event.type==SDL_EVENT_WINDOW_DISPLAY_CHANGED) {

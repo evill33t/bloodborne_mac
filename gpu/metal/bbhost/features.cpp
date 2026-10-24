@@ -60,7 +60,10 @@ void Install() {
     if (mprotect(tail,ImageTailSize,PROT_READ|PROT_WRITE)) throw std::runtime_error("Cannot prepare the engine's data tail");
     params_install(&game_image); event_flags_install(&game_image); player_data_install(&game_image);
     extern void InstallFlagStore(ElfImage*);
-    InstallFlagStore(&game_image);
+    // Nightwatch observes the original flag writers for shared progression.
+    // Installing the optional decompiled leaves would hide those writes.
+    const auto party=std::getenv("BB_PARTY");
+    if (!party || (std::strcmp(party,"host") && std::strcmp(party,"join"))) InstallFlagStore(&game_image);
     lua_events_install(&game_image); world_chr_install(&game_image);
     // Debug text redirects LEA instructions inside the camera patch sites.
     // Validate/install timing first, as upstream's graphics pass does.

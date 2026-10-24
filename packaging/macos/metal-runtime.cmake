@@ -1,6 +1,7 @@
 # Shared direct Metal production sources for the Rosetta and native CPU runtimes.
 set(BB_PS4_METAL "${BB_ROOT}/gpu/metal/vendor/bloodborne/src")
 add_subdirectory("${BB_ROOT}/gpu/metal/bbhost" bbhost-features)
+add_subdirectory("${BB_ROOT}/gpu/metal/nightwatch" nightwatch)
 add_library(bb-ps4-metal STATIC
     "${BB_PS4_METAL}/gpu/liverpool/command_processor.cpp"
     "${BB_PS4_METAL}/gpu/liverpool/tiling.cpp"
@@ -28,7 +29,7 @@ add_library(bb-ps4-metal STATIC
     "${BB_ROOT}/gpu/metal/game_bridge.mm")
 target_include_directories(bb-ps4-metal PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
 target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
-target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features
+target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features bbmac-nightwatch
     "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
 
 # Source recipes are recompiled by the selected host runtime; no game is run.

@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Direct lamp travel (lamp_travel.h): the pure rules. Header only, no game dependency (unit tests:
+// tests/test_lamp_travel.cpp).
+//
+// Bloodborne's Hunter's Dream headstones (talk scripts t210000..t210003, the DLC's t210721) list
+// the lamps with the talk command AddWarpEntry (talk ESD c1_19(index, name flag, lit flag),
+// command 0x13 of the switch 0x203FFD0) and open the game's warp menu (c1_41, command 0x29: the
+// "WarpMenu" FrpgMenuDlgWarp); the chosen entry's index comes back in MenuMan +0xEC0 (talk test
+// f23). Lamp AAB_n (area AA, block B, lamp n) is:
+//   ReturnPointParam row  AAB*10000 + 2950 + n   (what the lamp warp 0x13CDF30 takes)
+//   name / blocked flag   70000000 + AAB*10 + n  (EventText: the lamp's name; set = "cannot travel")
+//   lit flag              10000000 + AAB*10000 + 7810 + 20*n  (the lamp object's flag base + 10)
+//   Dream flag            70000100 + AAB*10000 + n  (the lamp's "Return to the Hunter's Dream" YES:
+//                                                     common event 7200 runs the warp to 2102950)
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+namespace coop::lamptravel {
+
+struct Lamp {
+    std::uint16_t aab;  ///< area * 10 + block (241 = m24_01)
+    std::uint8_t n;     ///< lamp index in its block
+    std::uint8_t group; ///< the headstone that lists it (Group)
+};
+
+enum Group : std::uint8_t { Dream = 0, Yharnam = 1, Frontier = 2, Unseen = 3, Nightmare = 4, HuntersNightmare = 5 };
+
+/// Every lamp, in the order the headstones list them (t210000, t210001, t210002, t210003, t210721).
+inline constexpr Lamp kLamps[] = {
+    // First headstone (t210000): Central Yharnam, Cathedral Ward, Upper Cathedral Ward, Old Yharnam
+    {241, 0, Yharnam}, {241, 1, Yharnam}, {241, 2, Yharnam}, {241, 3, Yharnam}, {240, 0, Yharnam},
+    {240, 1, Yharnam}, {242, 0, Yharnam}, {242, 2, Yharnam}, {242, 1, Yharnam}, {230, 0, Yharnam},
+    {230, 1, Yharnam}, {230, 2, Yharnam},
+    // Frontier headstone (t210001): Hemwick, Forbidden Woods, Byrgenwerth
+    {220, 0, Frontier}, {220, 1, Frontier}, {270, 0, Frontier}, {270, 1, Frontier}, {320, 0, Frontier},
+    {320, 2, Frontier},
+    // Unseen headstone (t210002): Yahar'gul, Cainhurst, Abandoned Old Workshop
+    {280, 0, Unseen}, {280, 3, Unseen}, {280, 1, Unseen}, {280, 2, Unseen}, {250, 0, Unseen}, {250, 2, Unseen},
+    {250, 1, Unseen}, {211, 0, Unseen},
+    // Nightmare headstone (t210003): Lecture Building, Nightmare Frontier, Nightmare of Mensis
+    {320, 1, Nightmare}, {320, 3, Nightmare}, {330, 0, Nightmare}, {330, 1, Nightmare}, {260, 0, Nightmare},
+    {260, 3, Nightmare}, {260, 2, Nightmare}, {260, 1, Nightmare},
+    // The Old Hunters (t210721): Hunter's Nightmare, Research Hall, Fishing Hamlet
+    {340, 0, HuntersNightmare}, {340, 1, HuntersNightmare}, {340, 2, HuntersNightmare},
+    {340, 3, HuntersNightmare}, {350, 0, HuntersNightmare}, {350, 1, HuntersNightmare},
+    {350, 2, HuntersNightmare}, {360, 0, HuntersNightmare}, {360, 1, HuntersNightmare},
+    {360, 2, HuntersNightmare},
+};
+inline constexpr std::size_t kLampCount = sizeof(kLamps) / sizeof(kLamps[0]);
+
+inline constexpr std::uint32_t kDreamReturnPoint = 2102950; ///< the Hunter's Dream (lamp 210_0)
+inline constexpr std::uint32_t kDreamNameFlag = 70002100;   ///< EventText "Hunter's Dream"
+/// The lamp's Dream confirmation (talk ESD c1_17(2, 10010713, 3, 4, 2): OpenGenericDialog kind 2,
+/// "Return to the Hunter's Dream?"), the command the world lamps' scripts t AAB 000..003 run on
+/// "Return to the Hunter's Dream" (ActionButtonParam 6101).
+inline constexpr std::uint32_t kCmdGenericDialog = 0x11;
+inline constexpr std::uint32_t kCmdClearWarpList = 0x14;
+inline constexpr std::uint32_t kCmdAddWarpEntry = 0x13;
+inline constexpr std::uint32_t kCmdOpenWarpMenu = 0x29;
+inline constexpr std::uint32_t kDreamConfirmText = 10010713;
+
+constexpr std::uint32_t ReturnPoint(const Lamp& l) { return l.aab * 10000u + 2950u + l.n; }
+constexpr std::uint32_t NameFlag(const Lamp& l) { return 70000000u + l.aab * 10u + l.n; }
+constexpr std::uint32_t LitFlag(const Lamp& l) { return 10000000u + l.aab * 10000u + 7810u + 20u * l.n; }
+
+/// The lamp of ReturnPointParam row `id` (false: not a world / Dream lamp of the table, or the Dream).
+inline bool LampOf(std::uint32_t id, Lamp* out) {
+    for (const Lamp& l : kLamps) {
+        if (ReturnPoint(l) == id) {
+            if (out) *out = l;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The flag whose setting is the lamp's own "Return to the Hunter's Dream: YES" (its common event
+/// 7200 warps); 0 for an id outside the table.
+inline std::uint32_t DreamFlag(std::uint32_t here) {
+    Lamp l{};
+    return LampOf(here, &l) ? 70000100u + l.aab * 10000u + l.n : 0;
+}
+
+/// The packed map (AA << 24 | B << 16) a lamp's return point lies in.
+constexpr std::uint32_t MapOf(std::uint32_t return_point) {
+    return (return_point / 100000) << 24 | (return_point / 10000 % 10) << 16;
+}
+
+/// The talk command is the world lamp's "Return to the Hunter's Dream?" confirmation: the one
+/// direct travel replaces. `args` are the command's integer arguments (count = number of args).
+inline bool IsDreamConfirm(std::uint32_t cmd, int count, const std::int32_t* args) {
+    return cmd == kCmdGenericDialog && count == 5 && args && args[0] == 2 &&
+           static_cast<std::uint32_t>(args[1]) == kDreamConfirmText;
+}
+
+struct Entry {
+    std::uint32_t index = 0;        ///< the warp menu's result value (1-based, unique)
+    std::uint32_t name_flag = 0;    ///< AddWarpEntry's 2nd argument
+    std::uint32_t lit_flag = 0;     ///< AddWarpEntry's 3rd argument (the game shows it when set)
+    std::uint32_t return_point = 0; ///< where the choice travels
+    std::uint8_t group = 0;
+};
+
+/// The warp list for a lamp: the Hunter's Dream first, then every lit lamp the player may travel
+/// to, grouped and ordered as the headstones list them. Leaves out the lamp the player stands at
+/// (`here`, 0 unknown), lamps whose "cannot travel" flag is set (the headstones refuse those too)
+/// and ids `known` rejects. `flag(id)` reads an event flag; `known(return point)`: a ReturnPointParam
+/// row the game has. Empty: nothing to choose but the Dream (the vanilla question stays).
+/// `dream`: the Hunter's Dream as the list's first entry.
+template <class FlagFn, class KnownFn>
+std::vector<Entry> BuildList(std::uint32_t here, FlagFn flag, KnownFn known, bool dream = true) {
+    std::vector<Entry> out;
+    Lamp at{};
+    const bool here_known = LampOf(here, &at);
+    std::uint32_t next = 1;
+    if (here_known && dream) {
+        // The lamp the player stands at is lit: its flag shows the Dream entry.
+        out.push_back({next++, kDreamNameFlag, LitFlag(at), kDreamReturnPoint, Dream});
+    }
+    for (const Lamp& l : kLamps) {
+        const std::uint32_t rp = ReturnPoint(l);
+        if (rp == here || !known(rp) || !flag(LitFlag(l)) || flag(NameFlag(l))) {
+            continue;
+        }
+        out.push_back({next++, NameFlag(l), LitFlag(l), rp, l.group});
+    }
+    if (out.empty() || (out.size() == 1 && out[0].return_point == kDreamReturnPoint)) {
+        out.clear();  // only the Dream: the lamp's own question does that
+    }
+    return out;
+}
+
+/// The return point of the chosen warp-menu `index` (0: none / unknown).
+inline std::uint32_t Chosen(const std::vector<Entry>& list, std::uint32_t index) {
+    for (const Entry& e : list) {
+        if (e.index == index) return e.return_point;
+    }
+    return 0;
+}
+
+/// The lamp nearest to `pos` among `spots` (return point, x, y, z) in map `map` (AA << 24 | B << 16),
+/// within `max_m` metres; 0 none.
+struct Spot {
+    std::uint32_t id;
+    float x, y, z;
+};
+inline std::uint32_t NearestLamp(const std::vector<Spot>& spots, std::uint32_t map, const float pos[3], float max_m) {
+    std::uint32_t best = 0;
+    float best_d = max_m * max_m;
+    for (const Spot& s : spots) {
+        if (MapOf(s.id) != (map & 0xffff0000u)) continue;
+        const float dx = s.x - pos[0], dy = s.y - pos[1], dz = s.z - pos[2];
+        const float d = dx * dx + dy * dy + dz * dz;
+        if (d <= best_d) {
+            best_d = d;
+            best = s.id;
+        }
+    }
+    return best;
+}
+
+/// Where the player stands for NearestLamp: its physics position when readable, else the drawn
+/// one (chr +0xC0). An in-place warp (vtbl +0x5F8: the test aids, the party's no-load placements)
+/// moves the physics position at once and the drawn one only once the player moves (lamprule run 5:
+/// at lamp 2412951 with +0xC0 still at the Great Bridge lamp 2412952, 72 m away, so "here" was
+/// 2412952 and that lamp, lit, was left out of the list).
+inline const float* StandingPos(bool physics_ok, const float physics[3], const float drawn[3]) {
+    return physics_ok ? physics : drawn;
+}
+
+/// BB_LAMP_TRAVEL: unset -> on; "0" / "off" / "false" -> off.
+inline bool SwitchOn(const char* v) {
+    if (!v || !v[0]) return true;
+    return !(std::strcmp(v, "0") == 0 || std::strcmp(v, "off") == 0 || std::strcmp(v, "false") == 0);
+}
+
+/// Whether a lamp may offer direct travel now: not in the Hunter's Dream (its headstones do it),
+/// no cutscene, no boss fight (a party's hold), the world loaded.
+struct Situation {
+    bool world_up = false, loading = false, cutscene = false, boss = false;
+    std::uint32_t map = 0;
+};
+inline bool Offer(const Situation& s) {
+    const std::uint32_t area = (s.map >> 24) & 0xff;
+    return s.world_up && !s.loading && !s.cutscene && !s.boss && area != 21 && s.map != 0xffffffffu;
+}
+
+/// Other observers of the talk command switch 0x203FFD0, which lamp travel replaces (issue #4: the
+/// shared NPC talk's choice observer could not hook it after lamp travel and never ran). They are
+/// registered before the game runs and called first in every call, as a prologue hook would be.
+template <typename Fn, std::size_t N = 4>
+class ObserverList {
+public:
+    /// False: full, null, or already there (registered once).
+    bool Add(Fn fn) {
+        if (!fn || count_ >= N) return false;
+        for (std::size_t i = 0; i < count_; ++i) {
+            if (fns_[i] == fn) return false;
+        }
+        fns_[count_++] = fn;
+        return true;
+    }
+    template <typename... A>
+    void Dispatch(A... args) const {
+        for (std::size_t i = 0; i < count_; ++i) fns_[i](args...);
+    }
+    std::size_t Size() const { return count_; }
+
+private:
+    Fn fns_[N] = {};
+    std::size_t count_ = 0;
+};
+
+} // namespace coop::lamptravel

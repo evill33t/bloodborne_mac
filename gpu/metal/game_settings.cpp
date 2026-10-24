@@ -10,6 +10,16 @@
 #include <unistd.h>
 
 namespace MacSettings {
+bool ValidNightwatchName(const std::string& value) {
+    return !value.empty() && value.size()<=16 &&
+        value.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")==std::string::npos;
+}
+bool ValidNightwatchCode(const std::string& value) {
+    // The engine performs the authenticated code decoding. Keep INI delimiters,
+    // whitespace and oversized input out of the persisted value here.
+    return value.empty() || (value.size()<=512 && value.starts_with("BBP3-") &&
+        value.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_+")==std::string::npos);
+}
 bool ValidServer(const std::string& value) {
     const auto start=value.starts_with("https://") ? 8u : value.starts_with("http://") ? 7u : 0u;
     if (!start || value.size()<=start || value.size()>512) return false;
@@ -35,6 +45,11 @@ bool ValidServer(const std::string& value) {
     return true;
 }
 void Validate(Values& v) {
+    if (v.nightwatch_mode<0 || v.nightwatch_mode>2) v.nightwatch_mode=0;
+    if (v.nightwatch_players<2 || v.nightwatch_players>4) v.nightwatch_players=3;
+    if (v.nightwatch_port<1 || v.nightwatch_port>65535) v.nightwatch_port=9307;
+    if (!ValidNightwatchName(v.nightwatch_name)) v.nightwatch_name="Hunter";
+    if (!ValidNightwatchCode(v.nightwatch_code)) v.nightwatch_code.clear();
     if (v.frame_cap!=0 && v.frame_cap!=30 && v.frame_cap!=60 && v.frame_cap!=90 && v.frame_cap!=120 &&
         v.frame_cap!=144 && v.frame_cap!=165 && v.frame_cap!=240) v.frame_cap=30;
     bool valid=false;
@@ -62,6 +77,8 @@ Values Load(const std::filesystem::path& path) {
         const auto key=trim(line.substr(0,eq)), value=trim(line.substr(eq+1));
         try {
             size_t used=0;
+            if (key=="nightwatch_name") { if (ValidNightwatchName(value)) v.nightwatch_name=value; continue; }
+            if (key=="nightwatch_code") { if (ValidNightwatchCode(value)) v.nightwatch_code=value; continue; }
             if (key=="online_server") { if (ValidServer(value)) v.server_url=value; continue; }
             if (key=="online_matchmaking") { if (ValidServer(value)) v.matchmaking_url=value; continue; }
             if (key=="render_resolution") {
@@ -74,6 +91,9 @@ Values Load(const std::filesystem::path& path) {
             const float n=std::stof(value,&used);
             if (used!=value.size() || !std::isfinite(n)) continue;
             if (key=="frame_cap" && (n==0 || n==30 || n==60 || n==90 || n==120 || n==144 || n==165 || n==240)) v.frame_cap=int(n);
+            else if (key=="nightwatch_mode" && n>=0 && n<=2 && std::floor(n)==n) v.nightwatch_mode=int(n);
+            else if (key=="nightwatch_players" && n>=2 && n<=4 && std::floor(n)==n) v.nightwatch_players=int(n);
+            else if (key=="nightwatch_port" && n>=1 && n<=65535 && std::floor(n)==n) v.nightwatch_port=int(n);
             else if (key=="model_lod" && (n==-2 || n==0 || n==1 || n==2)) v.model_lod=int(n);
             else if (key=="sharpness") v.sharpness=n;
             else if (key=="anisotropy" && (n==0 || n==2 || n==4 || n==8 || n==16)) v.anisotropy=int(n);
@@ -92,6 +112,7 @@ Values Load(const std::filesystem::path& path) {
                 else if (key=="effect_ssao") v.ssao=b;
                 else if (key=="effect_dynamic_shadows") v.dynamic_shadows=b;
                 else if (key=="online") v.online=b;
+                else if (key=="nightwatch_rot") v.nightwatch_rot=b;
                 else if (key=="optimized_lights") v.optimized_lights=b;
             }
         } catch (...) { /* Ignore a malformed entry; retain its default. */ }
@@ -121,6 +142,9 @@ bool Save(const std::filesystem::path& path,const Values& values,std::string& er
         << "\nonline=" << v.online << "\nonline_server=" << v.server_url
         << "\nonline_matchmaking=" << v.matchmaking_url << '\n';
     out << "optimized_lights=" << v.optimized_lights << "\nmodel_lod=" << v.model_lod << '\n';
+    out << "nightwatch_mode=" << v.nightwatch_mode << "\nnightwatch_players=" << v.nightwatch_players
+        << "\nnightwatch_port=" << v.nightwatch_port << "\nnightwatch_name=" << v.nightwatch_name
+        << "\nnightwatch_code=" << v.nightwatch_code << "\nnightwatch_rot=" << v.nightwatch_rot << '\n';
     out.close();
     if (!out) { error="Could not write settings."; std::filesystem::remove(temp,ec); return false; }
     std::filesystem::rename(temp,path,ec);
@@ -129,6 +153,9 @@ bool Save(const std::filesystem::path& path,const Values& values,std::string& er
 }
 bool NeedsRestart(const Values& a,const Values& b) {
     return a.online!=b.online || a.server_url!=b.server_url || a.matchmaking_url!=b.matchmaking_url ||
+        a.nightwatch_mode!=b.nightwatch_mode || a.nightwatch_players!=b.nightwatch_players ||
+        a.nightwatch_port!=b.nightwatch_port || a.nightwatch_name!=b.nightwatch_name ||
+        a.nightwatch_code!=b.nightwatch_code || a.nightwatch_rot!=b.nightwatch_rot ||
         a.frame_cap!=b.frame_cap || a.render_width!=b.render_width || a.render_height!=b.render_height ||
         a.game_aa!=b.game_aa || a.motion_blur!=b.motion_blur || a.dof!=b.dof ||
         a.chromatic_aberration!=b.chromatic_aberration || a.ssao!=b.ssao ||

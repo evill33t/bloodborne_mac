@@ -66,6 +66,18 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized, opened, sdl_ready;
 static SDL_Gamepad *gamepad;
 static size_t reads;
+/* Nightwatch's game-thread actions use the same sampled pad as physical input. */
+static uint32_t director_buttons, last_sample_buttons, cross_presses;
+static uint32_t last_sample_left=0x8080u;
+static int director_axes[4]={-1,-1,-1,-1};
+void runtime_pad_director_press(uint32_t buttons) { __atomic_store_n(&director_buttons,buttons,__ATOMIC_RELAXED); }
+void runtime_pad_director_sticks(int lx,int ly,int rx,int ry) {
+    const int axes[4]={lx,ly,rx,ry};
+    for (int i=0;i<4;++i) __atomic_store_n(&director_axes[i],axes[i],__ATOMIC_RELAXED);
+}
+uint32_t runtime_pad_last_buttons(void) { return __atomic_load_n(&last_sample_buttons,__ATOMIC_RELAXED); }
+uint32_t runtime_pad_last_left(void) { return __atomic_load_n(&last_sample_left,__ATOMIC_RELAXED); }
+uint32_t runtime_pad_cross_presses(void) { return __atomic_load_n(&cross_presses,__ATOMIC_RELAXED); }
 static uint8_t connected_count;
 static uint64_t last_mouse_sample_us; /* CNV-003: dt since the previous mouse-to-stick sample */
 static double smoothed_mouse_stick_x, smoothed_mouse_stick_y; /* mouse_to_axis's EMA state */
@@ -811,17 +823,26 @@ static void sample(PadData *d) {
     read_inject();
     replay_sample(d);
     d->buttons|=injected.buttons;
+    d->buttons|=__atomic_load_n(&director_buttons,__ATOMIC_RELAXED);
     if (injected.touch_side>=0) touch_click(d,injected.touch_side);
     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     if (injected.buttons & BTN_L2) d->l2=255;
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    for (int i=0;i<4;++i) {
+        const int axis=__atomic_load_n(&director_axes[i],__ATOMIC_RELAXED);
+        if (axis>=0 && axis<=255) *axes[i]=(uint8_t)axis;
+    }
     touch_ids(d);
     if (hold_after_capture) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;
     }
+    const uint32_t previous=__atomic_load_n(&last_sample_buttons,__ATOMIC_RELAXED);
+    if ((d->buttons & BTN_CROSS) && !(previous & BTN_CROSS)) __atomic_add_fetch(&cross_presses,1,__ATOMIC_RELAXED);
+    __atomic_store_n(&last_sample_buttons,d->buttons,__ATOMIC_RELAXED);
+    __atomic_store_n(&last_sample_left,d->left_x | (uint32_t)d->left_y<<8,__ATOMIC_RELAXED);
 }
 
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }

@@ -2,6 +2,7 @@
 #include "game_overlay.h"
 #include "gpu/metal/bbhost/features.h"
 #include "gpu/metal/bbhost/network.h"
+#include "gpu/metal/nightwatch/integration.h"
 #include "host/plugins.h"
 #include "core/config.h"
 #include "bbhost_plugin.h"
@@ -64,6 +65,10 @@ struct Overlay::Impl {
     NSTextField *status,*message;
     NSTextField *server,*matchmaking,*account_status,*toast;
     NSButton *online,*sign_in,*sign_out;
+    NSPopUpButton *nightwatch_mode,*nightwatch_players;
+    NSTextField *nightwatch_name,*nightwatch_code,*nightwatch_port,*nightwatch_status;
+    NSButton *nightwatch_rot,*nightwatch_copy,*nightwatch_copy_lan,*nightwatch_leave,*nightwatch_rejoin;
+    Uint64 nightwatch_refresh=0;
     NSMenuItem* settings_item;
     std::map<NSControl*,std::function<void()>> plugin_actions;
     std::map<std::string,NSButton*> plugin_switches;
@@ -227,7 +232,25 @@ struct Overlay::Impl {
             Field(@"Game and account server",server),Field(@"Matchmaking server",matchmaking),
             Stack(@[sign_in,sign_out],NSUserInterfaceLayoutOrientationHorizontal),account_status,
             Label(@"Server changes apply after restart. Use the same server as the other hunters. Your account token is kept in macOS Keychain.",12)],NSUserInterfaceLayoutOrientationVertical,10);
-        auto document=Stack(@[columns,network,PluginFields()],NSUserInterfaceLayoutOrientationVertical,28);
+        nightwatch_mode=Popup(@[@"Off (single player / private server)",@"Host a party",@"Join a party"],@"Nightwatch mode · restart required");
+        nightwatch_players=Popup(@[@"2 hunters",@"3 hunters",@"4 hunters"],@"Nightwatch party size");
+        nightwatch_name=TextField(@"Hunter name (1–16 letters, numbers, _ or -)");
+        nightwatch_code=TextField(@"Host's BBP3 party code");
+        nightwatch_port=TextField(@"Party port (1–65535)");
+        nightwatch_rot=Check(@"Rot penalties after death (host rule)");
+        nightwatch_copy=Button(@"Copy Internet code"); nightwatch_copy_lan=Button(@"Copy LAN code");
+        nightwatch_leave=Button(@"Leave party"); nightwatch_rejoin=Button(@"Rejoin party");
+        nightwatch_status=Label(@"Nightwatch is off.",12);
+        nightwatch_mode.enabled=MacNightwatch::Available();
+        auto coop=Stack(@[Label(@"NIGHTWATCH CO-OP · EXPERIMENTAL",12,true),
+            Field(@"Mode · restart required",nightwatch_mode),
+            Field(@"Party size · match the host",nightwatch_players),
+            Field(@"Hunter name",nightwatch_name),Field(@"Host party code · join only",nightwatch_code),
+            Field(@"Party port",nightwatch_port),nightwatch_rot,
+            Stack(@[nightwatch_copy,nightwatch_copy_lan,nightwatch_leave,nightwatch_rejoin],NSUserInterfaceLayoutOrientationHorizontal),nightwatch_status,
+            Label(@"Apply & restart to change modes. Co-op uses separate saves; choose Continue or New Game after restarting. Everyone needs the same Mac build, mods and frame cap. Nightwatch runs directly between players and replaces private-server online play for this run. Rosetta runtime required.",12),
+            Label(@"Adapted from Nightwatch Co-op by vladtepes22 and visy's seamless co-op. Modified integration of Lantern Engine by Awaken (https://github.com/Awakenchan/LanternEngine); unofficial macOS version.",11)],NSUserInterfaceLayoutOrientationVertical,10);
+        auto document=Stack(@[columns,coop,network,PluginFields()],NSUserInterfaceLayoutOrientationVertical,28);
         scroll.documentView=document; document.translatesAutoresizingMaskIntoConstraints=NO;
         [document.widthAnchor constraintEqualToAnchor:scroll.contentView.widthAnchor].active=YES;
         [document.topAnchor constraintEqualToAnchor:scroll.contentView.topAnchor].active=YES;
@@ -284,6 +307,12 @@ struct Overlay::Impl {
         v.dof=dof.state==NSControlStateValueOn; v.chromatic_aberration=ca.state==NSControlStateValueOn;
         v.ssao=ssao.state==NSControlStateValueOn; v.dynamic_shadows=shadows.state==NSControlStateValueOn;
         v.online=online.state==NSControlStateValueOn;
+        v.nightwatch_mode=int(nightwatch_mode.indexOfSelectedItem);
+        v.nightwatch_players=int(nightwatch_players.indexOfSelectedItem)+2;
+        v.nightwatch_name=nightwatch_name.stringValue.UTF8String;
+        v.nightwatch_code=nightwatch_code.stringValue.UTF8String;
+        v.nightwatch_port=int(nightwatch_port.integerValue);
+        v.nightwatch_rot=nightwatch_rot.state==NSControlStateValueOn;
         v.optimized_lights=optimized_lights.state==NSControlStateValueOn;
         static constexpr int lods[]{-2,0,1,2};
         v.model_lod=lods[std::clamp(int(model_detail.indexOfSelectedItem),0,3)];
@@ -303,6 +332,12 @@ struct Overlay::Impl {
         aa.state=v.game_aa; blur.state=v.motion_blur; dof.state=v.dof;
         ca.state=v.chromatic_aberration; ssao.state=v.ssao; shadows.state=v.dynamic_shadows;
         online.state=v.online; server.stringValue=[NSString stringWithUTF8String:v.server_url.c_str()];
+        [nightwatch_mode selectItemAtIndex:v.nightwatch_mode];
+        [nightwatch_players selectItemAtIndex:v.nightwatch_players-2];
+        nightwatch_name.stringValue=[NSString stringWithUTF8String:v.nightwatch_name.c_str()];
+        nightwatch_code.stringValue=[NSString stringWithUTF8String:v.nightwatch_code.c_str()];
+        nightwatch_port.stringValue=[NSString stringWithFormat:@"%d",v.nightwatch_port];
+        nightwatch_rot.state=v.nightwatch_rot;
         optimized_lights.state=v.optimized_lights;
         [model_detail selectItemAtIndex:v.model_lod==-2 ? 0 : v.model_lod==0 ? 1 : v.model_lod==1 ? 2 : 3];
         matchmaking.stringValue=[NSString stringWithUTF8String:v.matchmaking_url.c_str()];
@@ -328,6 +363,15 @@ struct Overlay::Impl {
         else [window makeFirstResponder:game_view];
     }
     void Action(id sender) {
+        if (sender==nightwatch_copy || sender==nightwatch_copy_lan) {
+            const auto code=MacNightwatch::Code(sender==nightwatch_copy_lan);
+            if (code.empty()) { message.stringValue=@"Party codes will appear when hosting is ready."; return; }
+            [NSPasteboard.generalPasteboard clearContents];
+            [NSPasteboard.generalPasteboard setString:[NSString stringWithUTF8String:code.c_str()] forType:NSPasteboardTypeString];
+            message.stringValue=@"Party code copied. Share it with the hunters you want to invite."; return;
+        }
+        if (sender==nightwatch_leave) { MacNightwatch::Leave(); return; }
+        if (sender==nightwatch_rejoin) { MacNightwatch::Rejoin(); return; }
         if (sender==achievements) { if (show_achievements) show_achievements(); return; }
         if (sender==settings_item) { SetOpen(!open); return; }
         if (sender==sign_in) {
@@ -340,6 +384,25 @@ struct Overlay::Impl {
         if (sender==defaults) { Populate(Values{}); return; }
         if (sender==save || sender==restart) {
             [window makeFirstResponder:save]; // commit a plugin text field before applying
+            const auto code=std::string(nightwatch_code.stringValue.UTF8String);
+            const auto port=std::string(nightwatch_port.stringValue.UTF8String);
+            if (!ValidNightwatchName(nightwatch_name.stringValue.UTF8String) ||
+                !ValidNightwatchCode(code) || (nightwatch_mode.indexOfSelectedItem==2 && code.empty())) {
+                message.stringValue=@"Enter a hunter name using 1–16 letters, numbers, _ or -, and a BBP3 host code when joining."; return;
+            }
+            if (port.empty() || port.find_first_not_of("0123456789")!=std::string::npos ||
+                nightwatch_port.integerValue<1 || nightwatch_port.integerValue>65535) {
+                message.stringValue=@"Enter a party port between 1 and 65535."; return;
+            }
+            if (nightwatch_mode.indexOfSelectedItem!=0 && !MacNightwatch::Available()) {
+                message.stringValue=@"Nightwatch currently requires the Rosetta CPU runtime."; return;
+            }
+            if (nightwatch_mode.indexOfSelectedItem==2 && !MacNightwatch::ValidJoinCode(code)) {
+                message.stringValue=@"The party code has a typo or is incomplete. Paste the host's full BBP3 code."; return;
+            }
+            if (nightwatch_mode.indexOfSelectedItem!=0) for (const auto& plugin:plugins_scan()) {
+                if (plugin.enabled) { message.stringValue=@"Disable gameplay plugins before starting Nightwatch co-op."; return; }
+            }
             if (!ValidServer(server.stringValue.UTF8String) || !ValidServer(matchmaking.stringValue.UTF8String)) {
                 message.stringValue=@"Enter an HTTP or HTTPS server address, with an optional port."; return;
             }
@@ -350,7 +413,7 @@ struct Overlay::Impl {
             values=requested; apply(); RefreshMessage();
             std::fprintf(stderr,"Settings applied: cap=%d render=%dx%d MetalFX=%d restart=%d\n",
                 values.frame_cap,values.render_width,values.render_height,values.metalfx,NeedsRestart(values,startup));
-            if (sender==restart && (NeedsRestart(values,startup) || plugins_changed)) runtime_restart();
+            if (sender==restart && (NeedsRestart(values,startup) || plugins_changed)) { MacNightwatch::Shutdown(); runtime_restart(); }
             if (!NeedsRestart(values,startup) && !plugins_changed) message.stringValue=@"Settings applied and saved.";
             return;
         }
@@ -406,6 +469,14 @@ bool Overlay::HandleEvent(const SDL_Event& e) {
     return impl->open;
 }
 void Overlay::Tick() {
+    if (SDL_GetTicks()>=impl->nightwatch_refresh) {
+        impl->nightwatch_refresh=SDL_GetTicks()+500;
+        impl->nightwatch_status.stringValue=[NSString stringWithUTF8String:MacNightwatch::Status().c_str()];
+        impl->nightwatch_copy.enabled=MacNightwatch::Active() && !MacNightwatch::Code().empty();
+        impl->nightwatch_copy_lan.enabled=MacNightwatch::Active() && !MacNightwatch::Code(true).empty();
+        impl->nightwatch_leave.enabled=MacNightwatch::Active();
+        impl->nightwatch_rejoin.enabled=MacNightwatch::Active();
+    }
     const auto text=MacFeatures::TakeMessage();
     if (!text.empty()) {
         impl->toast.stringValue=[NSString stringWithUTF8String:text.c_str()];
@@ -413,7 +484,8 @@ void Overlay::Tick() {
     }
     if (impl->toast_until && SDL_GetTicks()>=impl->toast_until) impl->toast.hidden=YES;
     impl->account_status.stringValue=[NSString stringWithUTF8String:MacNetwork::AccountStatus().c_str()];
-    impl->sign_in.enabled=!MacNetwork::AccountBusy();
+    impl->sign_in.enabled=!MacNightwatch::Active() && !MacNetwork::AccountBusy();
+    impl->online.enabled=impl->server.enabled=impl->matchmaking.enabled=!MacNightwatch::Active();
     const auto link=MacNetwork::TakeLinkUrl();
     if (!link.empty()) [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:[NSString stringWithUTF8String:link.c_str()]]];
     if (MacFeatures::TakeRestartRequest()) {
@@ -422,7 +494,7 @@ void Overlay::Tick() {
         [alert addButtonWithTitle:@"Restart"]; [alert addButtonWithTitle:@"Cancel"];
         const bool captured=CapturesInput.exchange(true);
         const auto answer=[alert runModal]; CapturesInput=captured;
-        if (answer==NSAlertFirstButtonReturn) runtime_restart();
+        if (answer==NSAlertFirstButtonReturn) { MacNightwatch::Shutdown(); runtime_restart(); }
     }
     SDL_UpdateGamepads();
     int count=0; auto ids=SDL_GetGamepads(&count);

@@ -15,6 +15,10 @@ struct Values {
     bool game_aa = true, motion_blur = true, dof = true;
     bool chromatic_aberration = true, ssao = true, dynamic_shadows = true;
     bool online = false;
+    int nightwatch_mode = 0; // 0 off, 1 host, 2 join; restart required
+    int nightwatch_players = 3, nightwatch_port = 9307;
+    std::string nightwatch_name = "Hunter", nightwatch_code;
+    bool nightwatch_rot = false;
     bool optimized_lights = false; // opt-in until measured with the direct Metal backend
     int model_lod = 0; // -2 highest, 0 original, 1 lower, 2 lowest
     std::string server_url = "https://thehuntersdream.com";
@@ -26,6 +30,8 @@ inline constexpr int Heights[]{540,720,810,900,1080,1440,2160};
 inline constexpr int ResolutionCount = 7;
 void Validate(Values& values);
 bool ValidServer(const std::string& value);
+bool ValidNightwatchName(const std::string& value);
+bool ValidNightwatchCode(const std::string& value);
 Values Load(const std::filesystem::path& path);
 bool Save(const std::filesystem::path& path,const Values& values,std::string& error);
 bool NeedsRestart(const Values& current,const Values& startup);

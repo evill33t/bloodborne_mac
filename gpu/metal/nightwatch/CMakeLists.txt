@@ -1,0 +1,47 @@
+# Nightwatch's party engine only: no Windows launcher or Vulkan renderer.
+set(NW_VENDOR "${BB_ROOT}/gpu/metal/vendor/nightwatch")
+set(NW_SHIM "${NW_VENDOR}/gpu/shim")
+add_library(bbmac-nightwatch STATIC integration.cpp)
+target_include_directories(bbmac-nightwatch PUBLIC "${BB_ROOT}")
+target_link_libraries(bbmac-nightwatch PUBLIC bbmac-features)
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    file(GLOB NW_PARTY CONFIGURE_DEPENDS "${NW_SHIM}/party/*.cpp")
+    file(GLOB NW_NET CONFIGURE_DEPENDS "${NW_SHIM}/net/*.cpp")
+    list(FILTER NW_PARTY EXCLUDE REGEX "/(world_warper|party_flow_game|party_flow_rows|test_newgame)\\.cpp$")
+    target_sources(bbmac-nightwatch PRIVATE ${NW_PARTY} ${NW_NET} darwin.cpp messages.cpp "${NW_SHIM}/engine/engine_hooks.cpp" "${NW_SHIM}/party/test_newgame.cpp")
+    target_include_directories(bbmac-nightwatch PRIVATE "${NW_SHIM}" "${NW_SHIM}/party" "${NW_SHIM}/net")
+    target_compile_definitions(bbmac-nightwatch PUBLIC BB_HAS_NIGHTWATCH=1)
+    target_compile_definitions(bbmac-nightwatch PRIVATE
+        BB_COOP_EXTERNAL_TICK=1 bbnet_configure=nw_net_configure bbnet_set_image=nw_net_set_image
+        bbnet_start=nw_net_start bbnet_resolve=nw_net_resolve
+        bbnet_shutdown=nw_net_shutdown bbnet_status_line=nw_net_status_line
+        bbnet_post_guest_call=nw_net_post_guest_call)
+    target_compile_options(bbmac-nightwatch PRIVATE -Wno-gcc-compat -Wno-format -Wno-ignored-attributes -include "${CMAKE_CURRENT_SOURCE_DIR}/darwin_compat.h")
+endif()
+
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+set_source_files_properties("${NW_SHIM}/party/test_newgame.cpp" PROPERTIES COMPILE_DEFINITIONS BB_TEST_NEWGAME_NO_GAME=1)
+endif()
+
+if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+    get_target_property(NW_DEFINITIONS bbmac-nightwatch COMPILE_DEFINITIONS)
+    foreach(name IN ITEMS link net host)
+        add_executable(bb-nightwatch-${name}-tests "${NW_VENDOR}/tests/test_party_${name}.cpp")
+        target_include_directories(bb-nightwatch-${name}-tests BEFORE PRIVATE "${NW_VENDOR}" "${NW_SHIM}" "${NW_SHIM}/net")
+        target_compile_definitions(bb-nightwatch-${name}-tests PRIVATE ${NW_DEFINITIONS})
+        target_compile_options(bb-nightwatch-${name}-tests PRIVATE -UNDEBUG -Wno-ignored-attributes -include "${CMAKE_CURRENT_SOURCE_DIR}/darwin_compat.h")
+        target_link_libraries(bb-nightwatch-${name}-tests PRIVATE bbmac-nightwatch)
+        add_test(NAME darwin-nightwatch-${name} COMMAND bb-nightwatch-${name}-tests)
+        set_tests_properties(darwin-nightwatch-${name} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE ENVIRONMENT "BB_PARTY_LOOPBACK=1;ROSETTA_ADVERTISE_AVX=1")
+    endforeach()
+    foreach(name IN ITEMS progress travel)
+        add_executable(bb-nightwatch-${name}-tests "${NW_VENDOR}/tests/test_party_${name}.cpp"
+            "${NW_SHIM}/party/party_${name}.cpp" "${NW_SHIM}/net/json.cpp")
+        target_include_directories(bb-nightwatch-${name}-tests PRIVATE "${NW_SHIM}" "${NW_SHIM}/net")
+        target_compile_definitions(bb-nightwatch-${name}-tests PRIVATE BB_PARTY_PROGRESS_NO_GAME=1 BB_PARTY_TRAVEL_NO_GAME=1 BB_PARTY_CHALICE_NO_GAME=1)
+        target_compile_options(bb-nightwatch-${name}-tests PRIVATE -UNDEBUG)
+        add_test(NAME darwin-nightwatch-${name} COMMAND bb-nightwatch-${name}-tests)
+        set_tests_properties(darwin-nightwatch-${name} PROPERTIES TIMEOUT 30)
+    endforeach()
+    target_sources(bb-nightwatch-travel-tests PRIVATE "${NW_SHIM}/party/party_chalice.cpp")
+endif()

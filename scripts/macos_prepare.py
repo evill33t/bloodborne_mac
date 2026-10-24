@@ -10,6 +10,7 @@ import sys
 
 from macos_preflight import inspect_game
 from macos_patch_analysis import check_selected
+from macos_nightwatch import mode as nightwatch_mode, PARTY_XML, PARTY_PATCHES, write_mod_identity
 from patches import (EBOOT_BASE, compile_patches, eboot_segments, resolution_writes, read_settings,
                      EFFECTS, external_patches, external_selection, compile_external)
 
@@ -45,6 +46,9 @@ def settings_patches(settings, segments, profile='original', *, engine_timing=Fa
             names.append(EFFECTS[key][0])
     xml = ROOT / 'patches/Bloodborne.xml'
     writes = compile_patches(xml, names, '01.09', segments)
+    if nightwatch_mode(settings):
+        writes += compile_patches(PARTY_XML, PARTY_PATCHES, '01.09', segments)
+        names += list(PARTY_PATCHES)
     try:
         size = tuple(int(v) for v in settings.get('render_resolution','1920x1080').split('x'))
     except ValueError:
@@ -104,6 +108,8 @@ def main():
     except (ValueError, TypeError) as error:
         parser.error(str(error))
     (out / 'macos-patch-analysis.json').write_text(json.dumps(patch_report, indent=2) + '\n')
+    if nightwatch_mode(settings):
+        write_mod_identity(game, Path(os.environ.get('BB_SOURCE_GAME', str(game))), out)
     writes += compile_external(selected, segments)
     blob = struct.pack('<8sQQ', b'BBPATCH2', EBOOT_BASE, len(writes))
     for offset, data in writes:
