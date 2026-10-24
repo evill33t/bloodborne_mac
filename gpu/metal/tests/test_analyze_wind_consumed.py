@@ -21,7 +21,7 @@ class ConsumedProtocolTests(unittest.TestCase):
         self.path = self.root / "wind_consumed_f100_draw1.json"
 
     def fixture(self, schema=4):
-        words = [0] * {2: 60, 3: 72, 4: 120}[schema]
+        words = [0] * {2: 60, 3: 72, 4: 120, 5: 255}[schema]
         words[:2] = [0x57494E44, schema]
         words[3:5] = [4, 4]
         for leaf in (7, 11):
@@ -54,6 +54,11 @@ class ConsumedProtocolTests(unittest.TestCase):
         meta = {"complete": True, "gpu_status": 4, "record_bytes": len(words) * 4,
                 "schema": schema, "shader_hash": "e4abfca709b00ef3", "sample_mask": 63, "sites": sites,
                 "frame": 100, "window_first_frame": 100, "window_frames": 1, "record_slot": 0, "draw": 1}
+        if schema == 5:
+            meta["fixed_vertex"] = json.loads(json.dumps(ANALYZER.FIXED_VERTEX_METADATA))
+            for counter, minimum, maximum, count in ANALYZER.FIXED_VERTEX_LAYOUT.values():
+                words[counter] = 2
+                words[minimum:minimum+count] = words[maximum:maximum+count] = [0x80000000+k for k in range(count)]
         return words, meta
 
     def analyze(self, words, meta):
@@ -191,6 +196,51 @@ class ConsumedProtocolTests(unittest.TestCase):
     def test_nonobject_metadata_rejected(self):
         self.path.write_text("[]")
         self.assertEqual(ANALYZER.analyze(self.root)["invalid_records"], 1)
+
+    def test_schema5_common_fields_and_exact_fixed_vertex_observed(self):
+        result = self.analyze(*self.fixture(5))
+        self.assertEqual(result["invalid_records"], 0)
+        self.assertTrue(all(result[name]["eligible_observations"] == 1 for name in ("wind", "view_projection", "camera", "object_matrix")))
+        self.assertEqual(result["fixed_vertex"]["eligible_observations"], 1)
+        self.assertEqual(result["fixed_vertex"]["uniform_observations"], 1)
+
+    def test_schema5_missing_wrong_or_extra_fixed_context_rejected(self):
+        for kind in ("missing", "pc", "register", "bool", "float", "extra", "extent"):
+            with self.subTest(kind=kind):
+                words, meta = self.fixture(5)
+                if kind == "missing": del meta["fixed_vertex"]
+                if kind == "pc": meta["fixed_vertex"]["after_pc_deformed"] += 4
+                if kind == "register": meta["fixed_vertex"]["attribute_vgprs"][-1] += 1
+                if kind == "bool": meta["fixed_vertex"]["iid"] = False
+                if kind == "float": meta["fixed_vertex"]["vid"] = 0.0
+                if kind == "extra": meta["fixed_vertex"]["unknown"] = 1
+                if kind == "extent": meta["fixed_vertex"]["words"] = 256
+                result = self.analyze(words, meta)
+                self.assertEqual(result["invalid_records"], 1)
+                self.assertEqual(result["fixed_vertex"]["eligible_observations"], 0)
+                self.assertEqual(result["wind"]["eligible_observations"], 0)
+
+    def test_schema5_missing_stage_is_unobserved_not_equal_output(self):
+        words, meta = self.fixture(5)
+        words[124] = 0
+        result = self.analyze(words, meta)
+        self.assertEqual(result["fixed_vertex"]["eligible_observations"], 0)
+        self.assertEqual(result["wind"]["eligible_observations"], 1)
+
+    def test_schema5_fixed_output_variation_is_independent(self):
+        words, meta = self.fixture(5)
+        words[244] += 7
+        result = self.analyze(words, meta)
+        self.assertEqual(result["fixed_vertex"]["varied_observations"], 1)
+        self.assertEqual(result["wind"]["varied_draws"], 0)
+        self.assertEqual(result["observations"][0]["fixed_vertex"]["stages"]["deformed"]["varied_components"], [0])
+
+    def test_historical_schema_does_not_claim_fixed_vertex_output(self):
+        for schema in (2, 3, 4):
+            with self.subTest(schema=schema):
+                result = self.analyze(*self.fixture(schema))
+                self.assertEqual(result["fixed_vertex"]["recorded_observations"], 0)
+                self.assertEqual(result["fixed_vertex"]["eligible_observations"], 0)
 
 
 if __name__ == "__main__":

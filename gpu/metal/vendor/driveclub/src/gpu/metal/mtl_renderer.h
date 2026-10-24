@@ -92,6 +92,8 @@ public:
     std::uint64_t TextureCoherenceRefreshCount() const;
     // Actual synchronous worker dispatches; first-chunk serial exits excluded.
     std::uint64_t ParallelTextureHashCheckCount() const;
+    std::uint64_t ExactTextureEqualCount() const;
+    std::uint64_t ExactTextureDifferentCount() const;
     // Called on the GPU recording thread after committing a flip. The host
     // queues its presentation before returning, preserving shared-queue order.
     void SetFrameReadyCallback(std::function<void(void*)> callback);

@@ -60,6 +60,12 @@ bool BindWindConsumedDraw(const Program& program,const u32* prepared_ud,u64 vs_k
       "_draw"+std::to_string(draw_count);
   NSMutableArray* user=[NSMutableArray new];for(unsigned k=0;k<16;++k)[user addObject:@(prepared_ud[k])];
   NSDictionary* metadata=@{@"schema":@(WindConsumed::SchemaValue),@"shader_hash":@"e4abfca709b00ef3",
+      @"fixed_vertex":@{@"vid":@0,@"iid":@0,@"before_pc_fetch":@0x000c,@"after_pc_matrix":@0x00c4,
+          @"after_pc_undeformed":@0x00f8,@"after_pc_deformed":@0x1534,@"after_pc_clip":@0x1578,
+          @"words":@255,@"vertex_descriptor_sgprs":@[@16,@35],
+          @"attribute_vgprs":@[@4,@5,@6,@8,@9,@10,@11,@12,@13,@14,@15,@16,@17,@20,@21,@22],
+          @"matrix_descriptor_sgprs":@[@16,@17,@18,@19],@"matrix_index_vgprs":@[@0,@1,@2],
+          @"matrix_data_vgprs":@[@23,@34],@"world_vgprs":@[@26,@30,@34],@"clip_vgprs":@[@5,@6,@7,@8]},
       @"sites":@[@{@"kind":@"wind",@"original_pc":@0x001c,@"byte_offset":@128,@"words":@4,@"first_sgpr":@12},
           @{@"kind":@"view_projection",@"original_pc":@0x14ec,@"byte_offset":@800,@"words":@16,@"first_sgpr":@8},
           @{@"kind":@"camera",@"original_pcs":@[@0x1500,@0x14f8,@0x14e8],

@@ -22,10 +22,23 @@ u64 htile_capture_frame=~0ull;
 u32 htile_capture_dispatches=0;
 std::unordered_set<u64> htile_capture_saved_shaders;
 
+// Production interpretation of one exact shadow-clear shader needs current
+// metadata/target binding and map identity even when diagnostics are OFF.
+// Current texture format, initialization and unique matching-target count are
+// supplied by the renderer at recognition time, not inferred from this cache.
+std::unordered_map<u64,ShadowHtileClear::Surface> shadow_htile_clear_surfaces;
+
 void ObserveHtileCaptureLayout(const RegFile& r,u64 target,u32 width,u32 height) {
-  if(capture_root.empty()) return;
   const u64 meta=u64(r[Reg::DB_HTILE_DATA_BASE])<<8;
   if (!meta || !ZInfo::TileSurface(r[Reg::DB_Z_INFO])) return;
+  ShadowHtileClear::Surface binding;
+  binding.metadata=meta;binding.target=target;binding.mapping_generation=Core::Memory::DirectMapGeneration();
+  binding.width=width;binding.height=height;binding.htile=true;
+  const u32 size=r[Reg::DB_DEPTH_SIZE];
+  binding.pitch=((size&0x7ff)+1)*8;binding.padded_height=(((size>>11)&0x7ff)+1)*8;
+  binding.depth_clear_word=r[Reg::DB_DEPTH_CLEAR];
+  shadow_htile_clear_surfaces[meta]=binding;
+  if(capture_root.empty()) return;
   HtileCaptureLayout layout;
   layout.target=target; layout.width=width; layout.height=height;
   layout.generation=Core::Memory::DirectMapGeneration();

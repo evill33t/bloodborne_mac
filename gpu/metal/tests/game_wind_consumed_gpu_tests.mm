@@ -58,6 +58,14 @@ vertex void record_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
         for(uint k=0;k<12u;++k)matrix[k]=params.bias+0x300u+row0*0x1000u+k+matrix_delta;
         uint4 descriptor = uint4(0x71234000u,0x100080u,(params.flags & 256u) ? 0u : 6u,0x77facu);
         dc_record_wind_matrix(record,matrix,descriptor,uint3(row0,row0+1u,row0+2u),vid,iid);
+        if(vid==0u && iid==0u) {
+            uint fixed[36];for(uint k=0;k<36u;++k)fixed[k]=params.bias+k;
+            dc_record_fixed_vertex(record,120u,125u,161u,fixed,36u);
+            dc_record_fixed_vertex(record,121u,197u,216u,fixed,19u);
+            dc_record_fixed_vertex(record,122u,235u,238u,fixed,3u);
+            dc_record_fixed_vertex(record,123u,241u,244u,fixed,3u);
+            dc_record_fixed_vertex(record,124u,247u,251u,fixed,4u);
+        }
     }
 }
 )MSL";
@@ -102,6 +110,14 @@ void Verify(const WindConsumed::Record& r,const Params p) {
     Require(SelectedLeafUniform(r,Site::Wind)==!(p.flags&4) && SelectedLeafUniform(r,Site::View)==!(p.flags&4),"Leaf selection classification mismatch");
     Require(SelectedLeafUniform(r,Site::Camera)==!(p.flags&4),"Camera leaf selection classification mismatch");
     Require(r[VertexMin]==0 && r[VertexMax]==192 && r[InstanceMin]==0 && r[InstanceMax]==0,"Selected invocation bounds mismatch");
+    for(const auto& [counter,minimum,maximum,count]:{std::array<unsigned,4>{FixedFetchSamples,FixedFetchMin,FixedFetchMax,36},
+            std::array<unsigned,4>{FixedMatrixSamples,FixedMatrixMin,FixedMatrixMax,19},
+            std::array<unsigned,4>{FixedUndeformedSamples,FixedUndeformedMin,FixedUndeformedMax,3},
+            std::array<unsigned,4>{FixedDeformedSamples,FixedDeformedMin,FixedDeformedMax,3},
+            std::array<unsigned,4>{FixedClipSamples,FixedClipMin,FixedClipMax,4}}) {
+        Require(r[counter]==1,"Fixed original vid/iid selection was broadened");
+        for(unsigned k=0;k<count;++k)Require(r[minimum+k]==p.bias+k && r[maximum+k]==p.bias+k,"Fixed-register raw bits changed");
+    }
 }
 void Lifecycle(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLRenderPipelineState> pipeline) {
     char temporary[]="/tmp/bb-wind-consumed-XXXXXX";const auto directory=::mkdtemp(temporary);
@@ -144,6 +160,10 @@ void Lifecycle(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLRenderPipeli
     for(const auto p:{first,second}) {
         const auto stem=root/("wind_consumed_f100_draw"+std::to_string(++index));
         auto meta=ReadJson(stem.string()+".json");Require([meta[@"complete"] boolValue],"Incomplete consumer record");
+        Require([meta[@"schema"] unsignedIntValue]==WindConsumed::SchemaValue &&
+            [meta[@"record_bytes"] unsignedIntValue]==sizeof(WindConsumed::Record) &&
+            [meta[@"fixed_vertex"][@"vid"] unsignedIntValue]==0 && [meta[@"fixed_vertex"][@"iid"] unsignedIntValue]==0 &&
+            [meta[@"fixed_vertex"][@"after_pc_clip"] unsignedIntValue]==0x1578,"Fixed-vertex completion metadata changed");
         Require([meta[@"consumer_command"] unsignedLongLongValue]==consumer_identity &&
             [meta[@"consumer_encoder"] unsignedLongLongValue]==encoder_identity &&
             [meta[@"consumer_submission"] unsignedLongLongValue]==8,"Completion bound to wrong command/encoder");
@@ -217,12 +237,40 @@ void MatrixCases(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLRenderPipe
     }
     std::puts("Consumed-wind GPU: matrix index subgroup excludes legitimate per-index variation, detects within-index changes and rejects invalid indices.");
 }
+void FixedCases(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLRenderPipelineState> pipeline) {
+    using namespace WindConsumed;
+    auto record=[device newBufferWithLength:sizeof(Record) options:MTLResourceStorageModeShared];
+    Require(record && record.contents,"Cannot allocate fixed-vertex helper fixture");
+    const auto initial=InitialRecord();std::memcpy(record.contents,initial.data(),sizeof(initial));
+    auto command=[queue commandBuffer];auto encoder=Encoder(command,pipeline);
+    [encoder setVertexBuffer:record offset:0 atIndex:Binding];
+    for(const Params p:{Params{0x80000000u,0u},Params{0x80000007u,0u}}) {
+        [encoder setVertexBytes:&p length:sizeof(p) atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1];
+    }
+    const Params ignored{0x7fc12345u,0u};[encoder setVertexBytes:&ignored length:sizeof(ignored) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:64 vertexCount:1];
+    [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1 instanceCount:1 baseInstance:1];
+    [encoder endEncoding];[command commit];[command waitUntilCompleted];Require(!command.error,"Fixed-vertex helper GPU fixture failed");
+    Record r;std::memcpy(r.data(),record.contents,sizeof(r));Require(Valid(r),"Fixed-vertex helper schema/overflow failed");
+    for(const auto& [counter,minimum,maximum,count]:{std::array<unsigned,4>{FixedFetchSamples,FixedFetchMin,FixedFetchMax,36},
+            std::array<unsigned,4>{FixedMatrixSamples,FixedMatrixMin,FixedMatrixMax,19},
+            std::array<unsigned,4>{FixedUndeformedSamples,FixedUndeformedMin,FixedUndeformedMax,3},
+            std::array<unsigned,4>{FixedDeformedSamples,FixedDeformedMin,FixedDeformedMax,3},
+            std::array<unsigned,4>{FixedClipSamples,FixedClipMin,FixedClipMax,4}}) {
+        Require(r[counter]==2,"Ignored original vid/iid entered the fixed subgroup");
+        for(unsigned k=0;k<count;++k)Require(r[minimum+k]==0x80000000u+k && r[maximum+k]==0x80000007u+k,
+            "Fixed subgroup mixed identities or lost same-vertex raw variation");
+    }
+    std::puts("Consumed-wind GPU: fixed original vid/iid rejects unrelated invocations and preserves repeated raw-register changes.");
+}
 void Overflow(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLRenderPipelineState> pipeline) {
-    for(const bool matrix:{false,true}) {
+    for(const unsigned group:{0u,1u,2u}) {
     auto record=[device newBufferWithLength:sizeof(WindConsumed::Record) options:MTLResourceStorageModeShared];
     Require(record && record.contents,"Cannot allocate overflow fixture record");
     auto initial=WindConsumed::InitialRecord();
-    if(matrix)initial[WindConsumed::MatrixCandidates]=initial[WindConsumed::MatrixSamples]=~0u;
+    if(group==1)initial[WindConsumed::MatrixCandidates]=initial[WindConsumed::MatrixSamples]=~0u;
+    else if(group==2)initial[WindConsumed::FixedFetchSamples]=~0u;
     else initial[WindConsumed::WindSamples]=initial[WindConsumed::ViewSamples]=initial[WindConsumed::CameraSamples]=~0u;
     std::memcpy(record.contents,initial.data(),sizeof(initial));
     auto command=[queue commandBuffer];auto encoder=Encoder(command,pipeline);const Params p{};
@@ -239,7 +287,7 @@ int main(int argc,char** argv) {
     @autoreleasepool {try {
         auto device=MTLCreateSystemDefaultDevice();if(!device)return 77;
         auto queue=[device newCommandQueue];Require(queue!=nil,"No Metal command queue");
-        auto pipeline=Pipeline(device);Lifecycle(device,queue,pipeline);CameraCases(device,queue,pipeline);MatrixCases(device,queue,pipeline);Overflow(device,queue,pipeline);
+        auto pipeline=Pipeline(device);Lifecycle(device,queue,pipeline);CameraCases(device,queue,pipeline);MatrixCases(device,queue,pipeline);FixedCases(device,queue,pipeline);Overflow(device,queue,pipeline);
         if(argc==3) {
             auto original=Original(argv[2]);Require(Shader::VertexWindConsumedEligible(*original),"Original Dream program rejected");
             Shader::MslOptions options;options.wind_consumed=true;std::vector<std::string> unsupported;

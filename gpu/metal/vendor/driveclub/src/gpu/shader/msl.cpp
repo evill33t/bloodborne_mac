@@ -649,6 +649,46 @@ bool ProveReadOnlyGuestCode(const Program& p,std::string* failure=nullptr) {
 bool ProveWindConsumedSite(const Program& p) {
     if(p.stage!=Stage::Vertex || p.hash!=Gpu::Metal::WindConsumed::ShaderHash ||
        p.num_user_sgprs<8 || p.code.empty() || !p.unsupported.empty())return false;
+    // Private fixed-vertex prototype: bind complete original decoded context
+    // and exact inline-fetch sites before treating register names as evidence.
+    if(p.num_user_sgprs!=16 || p.vgpr_comp_cnt!=3 || p.fetch_ud!=0 ||
+       p.fetch_bytes!=72 || p.code.size()!=1105 || p.param_mask!=15)return false;
+    for(unsigned k=0;k<5;++k) {
+        unsigned scalar=0,vector=0;
+        for(const auto& i:p.code) {
+            if(i.pc==kFetchPcBase+4*k) {
+                if(i.enc!=Enc::SMRD || i.op!=u16(Smrd::S_LOAD_DWORDX4) || i.size!=1 ||
+                   i.dst!=16+4*k || i.sbase!=2 || !i.imm || i.smrd_offset!=4*k)return false;
+                ++scalar;
+            }
+            if(i.pc==kFetchPcBase+0x18+8*k) {
+                constexpr Mubuf ops[]{Mubuf::BUFFER_LOAD_FORMAT_XYZ,Mubuf::BUFFER_LOAD_FORMAT_XYZW,
+                    Mubuf::BUFFER_LOAD_FORMAT_XYZW,Mubuf::BUFFER_LOAD_FORMAT_XY,Mubuf::BUFFER_LOAD_FORMAT_XYZ};
+                if(i.enc!=Enc::MUBUF || i.op!=u16(ops[k]) || i.size!=2 || i.vdata!=4+4*k ||
+                   i.vaddr!=0 || i.srsrc!=16+4*k || i.soffset!=Operand::Zero || !i.idxen ||
+                   i.offen || i.addr64 || i.offset || i.glc || i.slc || i.tfe || i.lds)return false;
+                ++vector;
+            }
+        }
+        if(scalar!=1 || vector!=1)return false;
+    }
+    for(const auto& [pc,dst,a,b]: {std::array<u32,4>{0x00f8,34,31,4},
+            std::array<u32,4>{0x1534,26,3,21}}) {
+        unsigned matches=0;
+        for(const auto& i:p.code)if(i.pc==pc) {
+            if(i.enc!=Enc::VOP2 || i.op!=u16(Vop::V_MAC_F32) || i.size!=1 || i.dst!=dst ||
+               i.src[0]!=Operand::Vgpr0+a || i.src[1]!=Operand::Vgpr0+b || i.abs || i.neg || i.clamp)return false;
+            ++matches;
+        }
+        if(matches!=1)return false;
+    }
+    unsigned exports=0;
+    for(const auto& i:p.code)if(i.pc==0x1578) {
+        if(i.enc!=Enc::EXP || i.target!=ExpTarget::Pos0 || i.en!=15 || !i.done || i.compr ||
+           i.vsrc[0]!=5 || i.vsrc[1]!=6 || i.vsrc[2]!=7 || i.vsrc[3]!=8)return false;
+        ++exports;
+    }
+    if(exports!=1)return false;
     struct Site {u32 pc;Smrd op;u16 dst,base;u32 offset;};
     constexpr Site sites[]={{0x000c,Smrd::S_LOAD_DWORDX8,16,6,0},
         {0x0010,Smrd::S_BUFFER_LOAD_DWORD,0,12,20},
@@ -917,6 +957,19 @@ private:
 };
 
 void Emitter::Emit(const Inst& i) {
+    // Prototype reuses WINDOBS's bounded per-draw buffer/completion. Exact
+    // original vid/iid is a fixed compile-time selection, never a draw ordinal.
+    auto fixed_vertex=[&](unsigned counter,unsigned minimum,unsigned maximum,const std::vector<std::string>& values) {
+        std::string call="if (vid == 0u && iid == 0u && exec_lo != 0u) { const uint dc_fixed_values_["+N(values.size())+"] = {";
+        for(unsigned k=0;k<values.size();++k)call+=(k ? ", " : "")+values[k];
+        call+="}; dc_record_fixed_vertex(dc_wind_record, "+N(counter)+"u, "+N(minimum)+"u, "+N(maximum)+
+            "u, dc_fixed_values_, "+N(values.size())+"u); }";Line(call);
+    };
+    if(wind_consumed && i.pc==0x000c) {
+        std::vector<std::string> words;for(unsigned k=16;k<=35;++k)words.push_back(SName(k));
+        for(unsigned k:{4u,5u,6u,8u,9u,10u,11u,12u,13u,14u,15u,16u,17u,20u,21u,22u})words.push_back(VName(k));
+        fixed_vertex(120,125,161,words);
+    }
     const auto* fetch=native_vertex_fetch ? Gpu::Metal::NativeVertexFetch::Layout(p.hash) : nullptr;
     if(fetch && i.pc==fetch->first_pc) {
         std::string descriptors;
@@ -966,6 +1019,16 @@ void Emitter::Emit(const Inst& i) {
     case Enc::MIMG: EmitImage(i); break;
     case Enc::EXP: EmitExp(i); break;
     default: Unsupported(i); break;
+    }
+    if(wind_consumed) {
+        if(i.pc==0x00c4) {
+            std::vector<std::string> words;for(unsigned k=16;k<=19;++k)words.push_back(SName(k));
+            for(unsigned k=0;k<3;++k)words.push_back(VName(k));
+            for(unsigned k=23;k<=34;++k)words.push_back(VName(k));
+            fixed_vertex(121,197,216,words);
+        } else if(i.pc==0x00f8) fixed_vertex(122,235,238,{VName(26),VName(30),VName(34)});
+        else if(i.pc==0x1534) fixed_vertex(123,241,244,{VName(26),VName(30),VName(34)});
+        else if(i.pc==0x1578) fixed_vertex(124,247,251,{VName(5),VName(6),VName(7),VName(8)});
     }
     if(fetch && i.pc==fetch->last_pc) Line("} }");
 }

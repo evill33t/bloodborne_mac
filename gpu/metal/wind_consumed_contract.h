@@ -7,9 +7,9 @@
 
 namespace Gpu::Metal::WindConsumed {
 inline constexpr std::uint64_t ShaderHash=0xe4abfca709b00ef3ull;
-inline constexpr std::uint64_t CacheTag=0x57494e444f425334ull; // WINDOBS4: private diagnostic ABI
+inline constexpr std::uint64_t CacheTag=0x57494e444f425335ull; // WINDOBS5: private diagnostic ABI
 inline constexpr unsigned Binding=14,MaxFrames=120,DrawsPerFrame=2,SampleMask=63;
-inline constexpr std::uint32_t MagicValue=0x57494e44u,SchemaValue=4;
+inline constexpr std::uint32_t MagicValue=0x57494e44u,SchemaValue=5;
 enum Word : std::size_t {
     Magic,Schema,CounterOverflow,WindSamples,ViewSamples,WindNull,ViewNull,
     WindLeafLoMin,WindLeafLoMax,WindLeafHiMin,WindLeafHiMax,
@@ -22,7 +22,13 @@ enum Word : std::size_t {
     MatrixLeafLoMin,MatrixLeafLoMax,MatrixLeafHiMin,MatrixLeafHiMax,
     MatrixDescriptorMin,MatrixDescriptorMax=MatrixDescriptorMin+4,
     MatrixRowsMin=MatrixDescriptorMax+4,MatrixRowsMax=MatrixRowsMin+3,
-    MatrixMin=MatrixRowsMax+3,MatrixMax=MatrixMin+12,Words=MatrixMax+12
+    MatrixMin=MatrixRowsMax+3,MatrixMax=MatrixMin+12,
+    FixedFetchSamples=MatrixMax+12,FixedMatrixSamples,FixedUndeformedSamples,FixedDeformedSamples,FixedClipSamples,
+    FixedFetchMin,FixedFetchMax=FixedFetchMin+36,
+    FixedMatrixMin=FixedFetchMax+36,FixedMatrixMax=FixedMatrixMin+19,
+    FixedUndeformedMin=FixedMatrixMax+19,FixedUndeformedMax=FixedUndeformedMin+3,
+    FixedDeformedMin=FixedUndeformedMax+3,FixedDeformedMax=FixedDeformedMin+3,
+    FixedClipMin=FixedDeformedMax+3,FixedClipMax=FixedClipMin+4,Words=FixedClipMax+4
 };
 enum class Site : unsigned {Wind,View,Camera};
 struct SiteLayout {Word samples,null,leaf,minimum,maximum;unsigned count;};
@@ -35,7 +41,7 @@ inline constexpr SiteLayout Layout(Site site) noexcept {
     return {Magic,Magic,Magic,Magic,Magic,0};
 }
 using Record=std::array<std::uint32_t,Words>;
-static_assert(Words==120 && sizeof(Record)==480);
+static_assert(Words==255 && sizeof(Record)==1020);
 inline constexpr Record InitialRecord() noexcept {
     Record r{};r[Magic]=MagicValue;r[Schema]=SchemaValue;
     for(auto word:{WindLeafLoMin,WindLeafHiMin,ViewLeafLoMin,ViewLeafHiMin,CameraLeafLoMin,CameraLeafHiMin,VertexMin,InstanceMin})r[word]=~0u;
@@ -46,6 +52,10 @@ inline constexpr Record InitialRecord() noexcept {
     for(unsigned k=0;k<4;++k)r[MatrixDescriptorMin+k]=~0u;
     for(unsigned k=0;k<3;++k)r[MatrixRowsMin+k]=~0u;
     for(unsigned k=0;k<12;++k)r[MatrixMin+k]=~0u;
+    for(unsigned k=0;k<36;++k)r[FixedFetchMin+k]=~0u;
+    for(unsigned k=0;k<19;++k)r[FixedMatrixMin+k]=~0u;
+    for(unsigned k=0;k<3;++k)r[FixedUndeformedMin+k]=r[FixedDeformedMin+k]=~0u;
+    for(unsigned k=0;k<4;++k)r[FixedClipMin+k]=~0u;
     return r;
 }
 inline unsigned ConfiguredFrames(const char* value) noexcept {

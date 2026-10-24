@@ -196,6 +196,7 @@ static bool CapturePathAllowed(const std::filesystem::path& root) {
   return true;
 }
 void InitCapture() {
+  InitShadowClassificationCapture();
   const char* path=std::getenv("BB_METAL_CAPTURE_DIR");
   if(!path || !*path) return;
   std::error_code error;
@@ -396,6 +397,7 @@ void CaptureFogAsyncBoundary(const Program* pixel,const RenderTarget* color) {
 // The legacy synchronous path drains the GPU. Both modes alter pass boundaries
 // and are diagnostics, not performance measurements.
 void CaptureFogBoundary(const Program* pixel,const RenderTarget* color) {
+  CaptureShadowClassificationFogBoundary(pixel,color);
   if(fog_async_frames || fog_async_started) {CaptureFogAsyncBoundary(pixel,color);return;}
   if(!fog_capture_frames || capture_root.empty()) return;
   const bool first_particle=pixel && pixel->hash==0x33a4610f6f19410dull && color &&
@@ -440,4 +442,292 @@ void CaptureSceneBoundary() {
   }
   for(auto* target:{temporal_depth,temporal_color}) if(target && target->initialized && !target->clear_pending)
     CaptureRaw(target->tex,(target==temporal_depth ? "scene_depth_" : "scene_hdr_")+Hex(target->addr)+"_write_"+std::to_string(target->written));
+}
+
+// Separate, default-OFF saved-arch classification. Unlike generic raw capture,
+// this keeps capture_root empty and retains production texture admission. Draw
+// stamps are published only at the actual consumer branch. The next Draw,
+// Dispatch or Flip entry flushes those stamps BEFORE its own resource changes.
+// Thus an "after" payload cannot accidentally contain the current draw's input.
+struct ShadowClassificationSource {
+  id<MTLTexture> texture=nil;
+  u64 frame=0,draw=0,address=0,written=0,depth_revision=0,shader_hash=0,producer_submission=0,producer_mapping_generation=0;
+  unsigned phase_index=0,observed_particle_draws=0;
+  std::string phase;
+  std::optional<SceneCamera> camera;
+  u64 camera_frame=~0ull;
+};
+std::string shadow_classification_root,shadow_classification_prefix;
+unsigned shadow_classification_frames=0;
+u64 shadow_classification_first_frame=~0ull,shadow_classification_state_frame=~0ull;
+u64 shadow_classification_bytes=0,shadow_classification_sequence=0;
+bool shadow_classification_stopped=false,shadow_classification_fog_open=false;
+bool shadow_classification_atlas=false;
+bool shadow_classification_near=false,shadow_classification_temporal=false;
+bool shadow_classification_full=false;
+unsigned shadow_classification_stride=1;
+unsigned shadow_classification_mask_draws=0,shadow_classification_ao_draws=0;
+bool shadow_classification_ao_before=false,shadow_classification_fog_before=false,shadow_classification_fog_depth=false;
+std::vector<ShadowClassificationSource> shadow_classification_pending;
+ShadowClassificationSource shadow_classification_fog;
+static constexpr u64 kShadowClassificationLimit=256ull<<20;
+
+bool ShadowClassificationCameraRequested() const {
+  return shadow_classification_frames && !shadow_classification_root.empty() && !shadow_classification_stopped;
+}
+bool ShadowClassificationFrame(u64 frame) const {
+  return ShadowClassificationCameraRequested() && shadow_classification_first_frame!=~0ull &&
+      frame>=shadow_classification_first_frame && frame-shadow_classification_first_frame<shadow_classification_frames &&
+      (frame-shadow_classification_first_frame)%shadow_classification_stride==0;
+}
+void InitShadowClassificationCapture() {
+  const char* count=std::getenv("BB_METAL_SHADOW_CLASSIFY_FRAMES");
+  const char* directory=std::getenv("BB_METAL_SHADOW_CLASSIFY_DIR");
+  if(!count || !*count || !directory || !*directory)return;
+  unsigned requested=0;
+  for(const char* p=count;*p;++p) {
+    if(*p<'0' || *p>'9') {DC_WARN("gpu: shadow classification frame count rejected");return;}
+    requested=std::min(120u,requested*10u+unsigned(*p-'0'));
+  }
+  if(!requested)return;
+  std::error_code error;
+  const std::filesystem::path supplied(directory);
+  const auto root=std::filesystem::weakly_canonical(supplied,error);
+  if(!supplied.is_absolute() || error || !CapturePathAllowed(root)) {
+    DC_WARN("gpu: shadow classification output directory rejected");return;
+  }
+  std::filesystem::create_directories(root,error);
+  if(error) {DC_WARN("gpu: shadow classification output directory could not be created");return;}
+  shadow_classification_root=root.string();shadow_classification_frames=requested;
+  if(const char* atlas=std::getenv("BB_METAL_SHADOW_CLASSIFY_ATLAS"))shadow_classification_atlas=std::string_view(atlas)=="1";
+  if(const char* near=std::getenv("BB_METAL_SHADOW_CLASSIFY_NEAR"))shadow_classification_near=std::string_view(near)=="1";
+  if(const char* temporal=std::getenv("BB_METAL_SHADOW_CLASSIFY_TEMPORAL"))shadow_classification_temporal=std::string_view(temporal)=="1";
+  if(const char* full=std::getenv("BB_METAL_SHADOW_CLASSIFY_FULL"))shadow_classification_full=std::string_view(full)=="1";
+  if(const char* stride=std::getenv("BB_METAL_SHADOW_CLASSIFY_STRIDE")) {
+    const unsigned limit=shadow_classification_full ? 600u : 120u;
+    unsigned value=0;
+    bool valid=*stride;
+    for(const char* p=stride;*p;++p) {
+      if(*p<'0' || *p>'9' || value>limit) {valid=false;break;}
+      value=value*10u+unsigned(*p-'0');
+    }
+    if(valid && value>=1 && value<=limit)shadow_classification_stride=value;
+  }
+  if(shadow_classification_full)shadow_classification_frames=3*shadow_classification_stride+1;
+  const auto identity=std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  shadow_classification_prefix=shadow_classification_root+"/classification_"+std::to_string(identity);
+  DC_INFO("gpu: shadow classification ready at %s (%u frames, 256 MiB); arm with the normal trace trigger",
+      shadow_classification_root.c_str(),requested);
+  if(shadow_classification_atlas)DC_INFO("gpu: shadow classification includes up to two full4096D32 atlas inputs; use FRAMES=2 for a complete <=132 MiB run");
+}
+RenderTarget* ShadowClassificationTarget(id<MTLTexture> texture) {
+  if(!texture)return nullptr;
+  while(texture.parentTexture)texture=texture.parentTexture;
+  for(auto* registry:{&color_targets,&depth_targets}) for(auto& [address,variants]:*registry) {
+    (void)address;
+    for(auto& target:variants) {
+      id<MTLTexture> parent=target->tex;
+      while(parent.parentTexture)parent=parent.parentTexture;
+      if(parent==texture)return target.get();
+    }
+  }
+  return nullptr;
+}
+ShadowClassificationSource ShadowClassificationSourceFor(id<MTLTexture> texture,
+    const RenderTarget* target,const char* phase,u64 shader_hash,unsigned index=0) {
+  ShadowClassificationSource source;
+  source.texture=texture;source.frame=frame_count;source.draw=draw_count;
+  source.shader_hash=shader_hash;source.producer_submission=submission_id+1;
+  source.producer_mapping_generation=Core::Memory::DirectMapGeneration();
+  source.phase=phase;source.phase_index=index;
+  if(target) {source.address=target->addr;source.written=target->written;source.depth_revision=target->depth_revision;}
+  if(scene_camera) {source.camera=scene_camera;source.camera_frame=scene_camera_frame;}
+  return source;
+}
+bool QueueShadowClassificationSource(const ShadowClassificationSource& source) {
+  // Full-view diagnosis keeps only five boundaries. Four spaced frames fit
+  // under the same independent 256 MiB cap, without changing ordinary runs.
+  if(shadow_classification_full && source.phase!="shadow_mask_after_producer" &&
+      source.phase!="scene_temporal_depth" && source.phase!="hdr_before_temporal" &&
+      source.phase!="hdr_after_temporal" && source.phase!="scanout_before_present")return false;
+  id<MTLTexture> texture=source.texture;
+  const bool atlas=shadow_classification_atlas && source.phase=="shadow_sampled_atlas" && texture &&
+      texture.width==4096 && texture.height==4096 && texture.pixelFormat==MTLPixelFormatDepth32Float;
+  if(shadow_classification_stopped || shadow_classification_root.empty() || !texture ||
+      texture.device!=device || texture.textureType!=MTLTextureType2D ||
+      (!atlas && (texture.width!=1920 || texture.height!=1080)) ||
+      texture.mipmapLevelCount!=1 || texture.sampleCount!=1 || texture.storageMode==MTLStorageModeMemoryless)return false;
+  const auto format=texture.pixelFormat;
+  const bool rgba=format==MTLPixelFormatRGBA8Unorm || format==MTLPixelFormatBGRA8Unorm;
+  const bool hdr=format==MTLPixelFormatRGBA16Float;
+  const bool depth=format==MTLPixelFormatDepth32Float || format==MTLPixelFormatDepth32Float_Stencil8 ||
+      format==MTLPixelFormatR32Float;
+  const u32 texel_bytes=hdr ? 8 : rgba || depth ? 4 : 0;
+  if(!texel_bytes)return false;
+  struct Region {const char* name;u32 x,y,width,height;u64 offset,row_bytes,bytes;};
+  std::vector<Region> regions=atlas ? std::vector<Region>{{"full_atlas",0,0,4096,4096,0,0,0}} :
+      shadow_classification_full ? std::vector<Region>{{"full_scene",0,0,1920,1080,0,0,0}} :
+      shadow_classification_near ? std::vector<Region>{{"near_ground",500,900,220,120,0,0,0},
+          {"right_wall",1510,400,220,120,0,0,0},{"arch_intrados",1280,278,220,67,0,0,0}} :
+      std::vector<Region>{{"far_city",1290,570,190,110,0,0,0},{"left_fog",770,410,55,120,0,0,0},
+          {"arch_intrados",1280,278,220,67,0,0,0}};
+  u64 total=0;
+  for(auto& region:regions) {
+    region.offset=total;region.row_bytes=(u64(region.width)*texel_bytes+255)&~255ull;
+    region.bytes=region.row_bytes*region.height;total+=region.bytes;
+  }
+  if(total>device.maxBufferLength || shadow_classification_bytes>kShadowClassificationLimit ||
+      total>kShadowClassificationLimit-shadow_classification_bytes) {
+    shadow_classification_stopped=true;
+    DC_WARN("gpu: shadow classification reached its independent 256 MiB limit");return false;
+  }
+  auto buffer=[device newBufferWithLength:total options:MTLResourceStorageModeShared];
+  if(!buffer) {shadow_classification_stopped=true;DC_WARN("gpu: shadow classification staging allocation failed");return false;}
+  EndPass();EnsureCommandBuffer();
+  auto blit=[cmd blitCommandEncoder];
+  if(!blit) {shadow_classification_stopped=true;DC_WARN("gpu: shadow classification blit creation failed");return false;}
+  [blit fillBuffer:buffer range:NSMakeRange(0,total) value:0];
+  const auto option=format==MTLPixelFormatDepth32Float_Stencil8 ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone;
+  NSMutableArray* records=[NSMutableArray new];
+  for(const auto& region:regions) {
+    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(region.x,region.y,0)
+        sourceSize:MTLSizeMake(region.width,region.height,1) toBuffer:buffer destinationOffset:region.offset
+        destinationBytesPerRow:region.row_bytes destinationBytesPerImage:region.bytes options:option];
+    [records addObject:@{@"name":@(region.name),@"x":@(region.x),@"y":@(region.y),@"width":@(region.width),
+        @"height":@(region.height),@"offset":@(region.offset),@"row_bytes":@(region.row_bytes),
+        @"texel_bytes":@(texel_bytes),@"bytes":@(region.bytes)}];
+  }
+  [blit endEncoding];shadow_classification_bytes+=total;
+  const auto sequence=++shadow_classification_sequence;
+  const auto base=shadow_classification_prefix+"_f"+std::to_string(source.frame)+"_"+
+      std::to_string(sequence)+"_"+source.phase;
+  const auto swizzle=texture.swizzle;
+  NSMutableDictionary* metadata=[@{@"version":@1,@"kind":@"arch_shadow_classification",@"phase":@(source.phase.c_str()),
+      @"phase_index":@(source.phase_index),@"frame":@(source.frame),@"draw":@(source.draw),@"sequence":@(sequence),
+      @"shader_hash":@(source.shader_hash),@"source_address":@(source.address),@"source_written":@(source.written),
+      @"source_depth_revision":@(source.depth_revision),@"producer_submission":@(source.producer_submission),
+      @"producer_mapping_generation":@(source.producer_mapping_generation),
+      @"blit_submission":@(submission_id+1),@"blit_mapping_generation":@(Core::Memory::DirectMapGeneration()),
+      @"source_format":@(format),@"source_width":@(texture.width),@"source_height":@(texture.height),
+      @"source_swizzle":@[@(swizzle.red),@(swizzle.green),@(swizzle.blue),@(swizzle.alpha)],
+      @"aspect":@(format==MTLPixelFormatDepth32Float || format==MTLPixelFormatDepth32Float_Stencil8 ? 1 : 0),
+      @"bytes":@(total),@"regions":[records copy],@"padding_zeroed":@YES,
+      @"observed_particle_draws":@(source.observed_particle_draws),@"camera_matches_frame":@(source.camera && source.camera_frame==source.frame),
+      @"encode_steady_seconds":@(std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count()),
+      @"scope":@"Exact same-queue ROI bytes. After phases follow a consumer-branch draw stamp and precede the next Draw/Dispatch/Flip resource changes; no waits. Before phases precede the named consumer draw. AO captures follow each admitted merge draw, not an assumed complete group. Particle HDR spans the observed same-target group; other writers in that group are not excluded. This is image classification, not uniform lifetime or performance proof."} mutableCopy];
+  if(source.camera) {
+    NSMutableArray* view=[NSMutableArray new];NSMutableArray* inverse=[NSMutableArray new];NSMutableArray* projection=[NSMutableArray new];
+    for(float value:source.camera->view)[view addObject:@(value)];
+    for(float value:source.camera->inverse)[inverse addObject:@(value)];
+    for(float value:source.camera->projection)[projection addObject:@(value)];
+    metadata[@"camera"]=@{@"view":[view copy],@"inverse":[inverse copy],@"projection":[projection copy],
+        @"frame":@(source.camera_frame),@"width":@(source.camera->width),@"height":@(source.camera->height)};
+  }
+  NSDictionary* saved_metadata=[metadata copy];
+  [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    @autoreleasepool {
+      const bool success=completed.status==MTLCommandBufferStatusCompleted;
+      bool written=false;
+      if(success && buffer.contents) {
+        std::ofstream file(base+".bin",std::ios::binary);
+        file.write(static_cast<const char*>(buffer.contents),total);file.close();written=file.good();
+      }
+      NSMutableDictionary* result=[saved_metadata mutableCopy];result[@"complete"]=@(success && written);
+      result[@"gpu_status"]=@(completed.status);result[@"gpu_start_seconds"]=@(completed.GPUStartTime);
+      result[@"gpu_end_seconds"]=@(completed.GPUEndTime);
+      if(!success)result[@"error"]=completed.error.localizedDescription ?: @"Metal classification copy failed";
+      else if(!written)result[@"error"]=@"Classification payload could not be written";
+      NSData* json=[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted|NSJSONWritingSortedKeys error:nil];
+      if(!json || ![json writeToFile:@((base+".json").c_str()) atomically:YES] || !success || !written)
+        DC_WARN("gpu: shadow classification output failed at %s",base.c_str());
+    }
+  }];
+  return true;
+}
+void CloseShadowClassificationFog(bool frame_end=false) {
+  if(!shadow_classification_fog_open)return;
+  shadow_classification_fog_open=false;
+  if(shadow_classification_fog.observed_particle_draws) {
+    shadow_classification_fog.phase=frame_end ? "hdr_after_particle_group_frame_end" : "hdr_after_particle_group";
+    QueueShadowClassificationSource(shadow_classification_fog);
+  }
+  shadow_classification_fog={};
+}
+void CaptureShadowClassificationBoundary(bool frame_end=false) {
+  if(shadow_classification_root.empty())return;
+  // Move first: EndPass may submit normal profiling work. Each source owns its
+  // Metal texture; completion blocks own buffers/metadata and never capture Impl.
+  auto pending=std::move(shadow_classification_pending);shadow_classification_pending.clear();
+  for(const auto& source:pending)QueueShadowClassificationSource(source);
+  if(frame_end)CloseShadowClassificationFog(true);
+  if(shadow_classification_first_frame!=~0ull && frame_count>=shadow_classification_first_frame &&
+      frame_count-shadow_classification_first_frame+unsigned(frame_end)>=shadow_classification_frames && !shadow_classification_stopped) {
+    shadow_classification_stopped=true;
+    DC_INFO("gpu: shadow classification finished: %llu ROI payloads, %llu bytes",shadow_classification_sequence,shadow_classification_bytes);
+  }
+}
+void CaptureShadowClassificationFogBoundary(const Program* pixel,const RenderTarget* color) {
+  if(!ShadowClassificationFrame(frame_count))return;
+  // The earlier producer mask has not yet been blurred. Preserve the input of
+  // the first AO merge separately so alpha preservation is an independent,
+  // exact same-frame check rather than a comparison across the blur stage.
+  if(!shadow_classification_ao_before && pixel && pixel->hash==0xc8558edd38b999b5ull && color &&
+      color->initialized && !color->clear_pending && color->tex && color->width==1920 && color->height==1080 &&
+      (color->tex.pixelFormat==MTLPixelFormatRGBA8Unorm || color->tex.pixelFormat==MTLPixelFormatBGRA8Unorm)) {
+    shadow_classification_ao_before=true;
+    QueueShadowClassificationSource(ShadowClassificationSourceFor(color->tex,color,
+        "shadow_mask_before_ao_merge",pixel->hash));
+  }
+  if(shadow_classification_fog_open && (!color || color->tex!=shadow_classification_fog.texture))
+    CloseShadowClassificationFog();
+  const bool particle=pixel && pixel->hash==0x33a4610f6f19410dull && color && color->initialized &&
+      !color->clear_pending && color->tex.pixelFormat==MTLPixelFormatRGBA16Float &&
+      color->width==1920 && color->height==1080 && color->dim==TexDim::Tex2D;
+  if(!particle || shadow_classification_fog_before)return;
+  shadow_classification_fog_before=true;shadow_classification_fog_open=true;
+  shadow_classification_fog=ShadowClassificationSourceFor(color->tex,color,"hdr_before_particle_group",pixel->hash);
+  QueueShadowClassificationSource(shadow_classification_fog);
+}
+void MarkShadowClassificationDraw(const Program* pixel,RenderTarget* const colors[8],
+    const std::vector<id<MTLTexture>>& inputs) {
+  if(!ShadowClassificationCameraRequested() || !pixel)return;
+  auto* color=colors[0];
+  const bool full=color && color->tex && color->dim==TexDim::Tex2D && color->width==1920 && color->height==1080 &&
+      color->levels==1 && color->depth_or_layers==1;
+  const bool mask=full && (color->tex.pixelFormat==MTLPixelFormatRGBA8Unorm || color->tex.pixelFormat==MTLPixelFormatBGRA8Unorm);
+  if(shadow_classification_first_frame==~0ull) {
+    if(!trace || pixel->hash!=0x513b8cfa1ec711b2ull || !mask)return;
+    shadow_classification_first_frame=frame_count;
+    DC_INFO("gpu: shadow classification armed at frame %llu",frame_count);
+  }
+  if(!ShadowClassificationFrame(frame_count))return;
+  if(shadow_classification_state_frame!=frame_count) {
+    shadow_classification_state_frame=frame_count;
+    shadow_classification_mask_draws=shadow_classification_ao_draws=0;
+    shadow_classification_ao_before=shadow_classification_fog_before=shadow_classification_fog_depth=false;
+  }
+  if(mask && pixel->hash==0x513b8cfa1ec711b2ull && shadow_classification_mask_draws<2) {
+    const auto index=shadow_classification_mask_draws++;
+    shadow_classification_pending.push_back(ShadowClassificationSourceFor(color->tex,color,"shadow_mask_after_producer",pixel->hash,index));
+    if(!index && !inputs.empty())shadow_classification_pending.push_back(ShadowClassificationSourceFor(
+        inputs[0],ShadowClassificationTarget(inputs[0]),"shadow_sampled_depth",pixel->hash));
+    if(!index && shadow_classification_atlas && frame_count-shadow_classification_first_frame<2 && inputs.size()>1)
+      shadow_classification_pending.push_back(ShadowClassificationSourceFor(inputs[1],ShadowClassificationTarget(inputs[1]),
+          "shadow_sampled_atlas",pixel->hash));
+  } else if(mask && pixel->hash==0xc8558edd38b999b5ull && shadow_classification_ao_draws<4) {
+    shadow_classification_pending.push_back(ShadowClassificationSourceFor(color->tex,color,"shadow_mask_after_ao_merge",pixel->hash,
+        shadow_classification_ao_draws++));
+  }
+  if(pixel->hash==0x33a4610f6f19410dull && shadow_classification_fog_open && color && color->tex==shadow_classification_fog.texture) {
+    ++shadow_classification_fog.observed_particle_draws;
+    shadow_classification_fog.draw=draw_count;shadow_classification_fog.written=color->written;
+    shadow_classification_fog.producer_submission=submission_id+1;
+    shadow_classification_fog.producer_mapping_generation=Core::Memory::DirectMapGeneration();
+    if(!shadow_classification_fog_depth && inputs.size()>1) {
+      shadow_classification_fog_depth=true;
+      shadow_classification_pending.push_back(ShadowClassificationSourceFor(inputs[1],ShadowClassificationTarget(inputs[1]),
+          "fog_sampled_depth",pixel->hash));
+    }
+  }
 }

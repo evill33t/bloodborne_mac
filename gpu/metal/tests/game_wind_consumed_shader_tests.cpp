@@ -27,6 +27,23 @@ std::string MatrixCall() {
     for(unsigned k=0;k<12;++k)call+=(k ? ", " : "")+std::string("v")+std::to_string(23+k);
     return call+"}; dc_record_wind_matrix(dc_wind_record, dc_matrix_observed_, uint4(s16, s17, s18, s19), uint3(v0, v1, v2), vid, iid); }\n";
 }
+std::string FixedCall(unsigned site) {
+    constexpr unsigned counter[]{120,121,122,123,124},minimum[]{125,197,235,241,247},maximum[]{161,216,238,244,251};
+    std::vector<std::string> words;
+    if(site==0) {
+        for(unsigned k=16;k<=35;++k)words.push_back("s"+std::to_string(k));
+        for(unsigned k:{4u,5u,6u,8u,9u,10u,11u,12u,13u,14u,15u,16u,17u,20u,21u,22u})words.push_back("v"+std::to_string(k));
+    } else if(site==1) {
+        for(unsigned k=16;k<=19;++k)words.push_back("s"+std::to_string(k));
+        for(unsigned k=0;k<3;++k)words.push_back("v"+std::to_string(k));
+        for(unsigned k=23;k<=34;++k)words.push_back("v"+std::to_string(k));
+    } else if(site<4)words={"v26","v30","v34"};
+    else words={"v5","v6","v7","v8"};
+    auto text="    if (vid == 0u && iid == 0u && exec_lo != 0u) { const uint dc_fixed_values_["+std::to_string(words.size())+"] = {";
+    for(unsigned k=0;k<words.size();++k)text+=(k ? ", " : "")+words[k];
+    return text+"}; dc_record_fixed_vertex(dc_wind_record, "+std::to_string(counter[site])+"u, "+
+        std::to_string(minimum[site])+"u, "+std::to_string(maximum[site])+"u, dc_fixed_values_, "+std::to_string(words.size())+"u); }\n";
+}
 void Verify(const Shader::Program& p) {
     Require(Shader::VertexWindConsumedEligible(p),"Full Dream read-only/site admission rejected");
     std::vector<std::string> unsupported;const auto normal=Shader::GenerateMsl(p,{},&unsupported);
@@ -43,6 +60,17 @@ void Verify(const Shader::Program& p) {
     Require(diagnostic.find("s5 = p_ ? p_[0] : 0u; dc_camera_y_mapped = p_ != nullptr;")!=std::string::npos,
         "Original camera Y null result is not retained");
     Require(diagnostic.find("v34 = f_[3];\n"+MatrixCall())!=std::string::npos,"Matrix observation is not after the third original row load");
+    const auto fixed_fetch=diagnostic.find(FixedCall(0));
+    const auto matrix_root=diagnostic.find("32u); s16 = p_ ? p_[0]");
+    Require(fixed_fetch!=std::string::npos && fixed_fetch<matrix_root,"Fixed original fetch registers were captured after their root-load overwrite");
+    Require(diagnostic.find(MatrixCall()+"    }\n"+FixedCall(1))!=std::string::npos,"Fixed matrix registers were not captured after the third original load");
+    Require(diagnostic.find("v34 = as_type<uint>(as_type<float>(v31) * as_type<float>(v4) + as_type<float>(v34));\n"+FixedCall(2))!=std::string::npos,
+        "Fixed undeformed world position is not after original PC00f8");
+    Require(diagnostic.find("v26 = as_type<uint>(as_type<float>(v3) * as_type<float>(v21) + as_type<float>(v26));\n"+FixedCall(3))!=std::string::npos,
+        "Fixed deformed world position is not after original PC1534");
+    Require(diagnostic.find("out.pos = float4(as_type<float>(v5), as_type<float>(v6), as_type<float>(v7), as_type<float>(v8));\n"+FixedCall(4))!=std::string::npos,
+        "Fixed clip registers are not captured after the original export");
+    for(unsigned site=0;site<5;++site)RemoveOne(diagnostic,FixedCall(site));
     RemoveOne(diagnostic,MslPrelude);RemoveOne(diagnostic,SiteCall(0));RemoveOne(diagnostic,SiteCall(1));
     RemoveOne(diagnostic,SiteCall(2));RemoveOne(diagnostic,saved_base);
     RemoveOne(diagnostic,MatrixCall());
@@ -83,6 +111,21 @@ int main(int argc,char** argv) {
             ++found->srsrc;Require(!Shader::VertexWindConsumedEligible(bad),"Wrong matrix descriptor admitted");
             bad=p;found=std::find_if(bad.code.begin(),bad.code.end(),[&](const auto& i){return i.pc==pc;});
             found->idxen=false;Require(!Shader::VertexWindConsumedEligible(bad),"Wrong matrix address mode admitted");
+        }
+        for(unsigned field=0;field<5;++field) {
+            bad=p;
+            if(field==0)--bad.num_user_sgprs;
+            if(field==1)--bad.vgpr_comp_cnt;
+            if(field==2)++bad.fetch_ud;
+            if(field==3)bad.fetch_bytes+=4;
+            if(field==4)bad.code.pop_back();
+            Require(!Shader::VertexWindConsumedEligible(bad),"Changed original fixed-vertex decoder context admitted");
+        }
+        for(const unsigned pc:{0x100000u,0x100018u,0x00f8u,0x1534u,0x1578u}) {
+            bad=p;const auto found=std::find_if(bad.code.begin(),bad.code.end(),[&](const auto& i){return i.pc==pc;});
+            Require(found!=bad.code.end(),"Synthetic fixed-vertex test site missing");
+            if(found->enc==Enc::EXP)++found->vsrc[0];else ++found->op;
+            Require(!Shader::VertexWindConsumedEligible(bad),"Changed fixed-vertex load/math/export site admitted at PC"+std::to_string(pc));
         }
         bad=p;bad.code[4].enc=Enc::MUBUF;bad.code[4].op=u16(Mubuf::BUFFER_STORE_DWORD);
         Require(!Shader::VertexWindConsumedEligible(bad),"Unreflected guest writer admitted");

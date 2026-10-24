@@ -475,6 +475,7 @@ extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,ch
                     const char* threaded=std::getenv("BB_METAL_PRESENT_THREAD");
                     if(!threaded || std::strcmp(threaded,"0"))
                         presenter->StartFrameLoop([] {return frame_handoff.Pending();},[] {frame_handoff.Acknowledge();});
+                    frame_handoff.SetNotifier(presenter->FrameReadyNotifier());
                     fps_start=SDL_GetTicksNS();
                     fps_frames=presenter->PresentedFrameCount();
                     render_frames=renderer->FrameCount();generated_frames=presenter->GeneratedPresentedFrameCount();

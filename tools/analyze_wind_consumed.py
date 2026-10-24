@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize private schema2/3/4 wind/VP/camera/matrix records; no guest reads."""
+"""Summarize private schema2/3/4/5 consumed VS inputs/outputs; no guest reads."""
 import argparse
 from collections import Counter
 import json
@@ -15,8 +15,33 @@ CAMERA_SITE = {"kind": "camera", "original_pcs": [0x1500, 0x14F8, 0x14E8],
 MATRIX_SITE = {"kind": "object_matrix", "original_pcs": [0x00B4, 0x00BC, 0x00C4],
                "first_vgprs": [23, 27, 31], "descriptor_sgprs": [16, 17, 18, 19], "index_vgprs": [0, 1, 2],
                "words": 12, "recorded_after_pc": 0x00C4, "selection": "one_sampled_original_row0_index", "mapping_null_status": "unobserved"}
-SITES_BY_SCHEMA = {2: SITES, 3: [*SITES, CAMERA_SITE], 4: [*SITES, CAMERA_SITE, MATRIX_SITE]}
-WORDS_BY_SCHEMA = {2: 60, 3: 72, 4: 120}
+SITES_BY_SCHEMA = {2: SITES, 3: [*SITES, CAMERA_SITE], 4: [*SITES, CAMERA_SITE, MATRIX_SITE],
+                   5: [*SITES, CAMERA_SITE, MATRIX_SITE]}
+WORDS_BY_SCHEMA = {2: 60, 3: 72, 4: 120, 5: 255}
+FIXED_VERTEX_METADATA = {
+    "vid": 0, "iid": 0, "before_pc_fetch": 0x000C, "after_pc_matrix": 0x00C4,
+    "after_pc_undeformed": 0x00F8, "after_pc_deformed": 0x1534, "after_pc_clip": 0x1578,
+    "words": 255, "vertex_descriptor_sgprs": [16, 35],
+    "attribute_vgprs": [4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 22],
+    "matrix_descriptor_sgprs": [16, 17, 18, 19], "matrix_index_vgprs": [0, 1, 2],
+    "matrix_data_vgprs": [23, 34], "world_vgprs": [26, 30, 34], "clip_vgprs": [5, 6, 7, 8],
+}
+FIXED_VERTEX_LAYOUT = {
+    "fetch": (120, 125, 161, 36), "matrix": (121, 197, 216, 19),
+    "undeformed": (122, 235, 238, 3), "deformed": (123, 241, 244, 3), "clip": (124, 247, 251, 4),
+}
+
+
+def exact_metadata(value, expected):
+    # False/0 and float/int compare equal in Python; the declared register/site
+    # schema requires actual integers and exact keys/list lengths instead.
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return value.keys() == expected.keys() and all(exact_metadata(value[key], item) for key, item in expected.items())
+    if isinstance(expected, list):
+        return len(value) == len(expected) and all(exact_metadata(a, b) for a, b in zip(value, expected))
+    return value == expected
 
 
 def analyze(directory):
@@ -41,6 +66,8 @@ def analyze(directory):
                 schema if word_count else None, "e4abfca709b00ef3", 63, SITES_BY_SCHEMA.get(schema)
             ):
                 reasons.append("wrong original shader/read sites or protocol")
+            if schema == 5 and not exact_metadata(meta.get("fixed_vertex"), FIXED_VERTEX_METADATA):
+                reasons.append("wrong exact fixed-vertex decoder/register context")
             binary = path.with_suffix(".bin")
             if not word_count or not binary.exists() or binary.stat().st_size != word_count * 4:
                 reasons.append("missing or wrong-sized private record")
@@ -104,6 +131,20 @@ def analyze(directory):
             matrix["eligible"] = not reasons and accounting_valid and raw[73] > 0 and rows_uniform
             matrix["varied_components"] = [k for k in range(12) if matrix["eligible"] and raw[73] > 1 and raw[96+k] != raw[108+k]]
         observation["object_matrix"] = matrix
+        fixed = {"recorded": bool(raw and schema == 5 and len(raw) == 255), "eligible": False}
+        if fixed["recorded"]:
+            stages = {}
+            for name, (counter, minimum, maximum, count) in FIXED_VERTEX_LAYOUT.items():
+                lo, hi = raw[minimum:minimum+count], raw[maximum:maximum+count]
+                stages[name] = {"samples": raw[counter], "uniform": lo == hi,
+                                "minimum_words": [f"0x{word:08x}" for word in lo],
+                                "maximum_words": [f"0x{word:08x}" for word in hi],
+                                "varied_components": [k for k in range(count) if raw[counter] > 1 and lo[k] != hi[k]]}
+            counts = [stage["samples"] for stage in stages.values()]
+            fixed.update(stages=stages, stage_counts_equal=min(counts) > 0 and len(set(counts)) == 1,
+                         uniform=all(stage["uniform"] for stage in stages.values()))
+            fixed["eligible"] = not reasons and fixed["stage_counts_equal"]
+        observation["fixed_vertex"] = fixed
         observations.append(observation)
     frames = Counter(observation["frame"] for observation in observations)
     summary = {"directory": str(directory.resolve()), "records": len(observations),
@@ -122,10 +163,15 @@ def analyze(directory):
                                 "varied_draws": sum(bool(row["varied_components"]) for row in matrices),
                                 "varied_draws_with_uniform_identity": sum(bool(row["varied_components"]) and row["selected_identity_uniform"] for row in matrices),
                                 "mapping_null_status": "unobserved", "mapped_input_proven": False}
+    fixed = [row["fixed_vertex"] for row in observations if row["fixed_vertex"]["eligible"]]
+    summary["fixed_vertex"] = {"recorded_observations": sum(row["fixed_vertex"]["recorded"] for row in observations),
+                               "eligible_observations": len(fixed), "uniform_observations": sum(row["uniform"] for row in fixed),
+                               "varied_observations": sum(not row["uniform"] for row in fixed), "vid": 0, "iid": 0}
     summary["limitations"] = ("Sparse already-loaded registers from selected actual VS invocations; atomics perturb timing; "
                               "equal samples do not prove all vertices or other shader inputs; schema2 has no camera and schemas2/3 have no matrix observation; "
                               "matrix samples cover one original index only and mapping-null status is unobserved, so stable zero data cannot prove mapping; unsigned bit minima/maxima are not float ordering; "
                               "uniform matrix identity requires the captured plain float4/stride16 descriptor form without ADD_TID or swizzling; "
+                              "schema5 fixed-vertex samples cover original vid0/iid0 only and do not establish visible coverage or cross-frame resource ownership; "
                               "variation does not identify a writer or establish authored animation speed.")
     summary["observations"] = observations
     return summary

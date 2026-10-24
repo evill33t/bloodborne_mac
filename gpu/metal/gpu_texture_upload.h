@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "gpu/metal/exact_texture_compare.h"
 
 namespace Gpu::Metal {
 
@@ -28,12 +29,18 @@ public:
         std::vector<std::uint64_t> chunks;
         // Actual CPU bytes hashed, even if a later encoder cannot be created.
         std::uint64_t bytes_hashed=0;
+        // Optional opt-in exact baseline, owned independently of staging arenas.
+        // Only successful CPU Encoded publishes this sealed allocation handle.
+        ExactTextureCompare::Handle snapshot;
     };
     struct Stats {
         // Successful uploads only. Packed uploads preserve every original
         // mip/slice job while issuing one compute dispatch for the group.
         std::uint64_t uploads=0,jobs=0,compute_dispatches=0,packed_uploads=0;
         std::uint64_t mapped_snapshots=0,mapped_bytes=0,mach_snapshots=0,mach_bytes=0;
+        std::uint64_t exact_snapshot_attempts=0,exact_snapshot_dedicated=0,exact_snapshot_published=0;
+        std::uint64_t exact_snapshot_failures=0,exact_snapshot_ineligible=0,exact_snapshot_ineligible_bytes=0;
+        std::uint64_t exact_snapshot_payload_bytes=0,exact_snapshot_allocation_bytes=0;
     };
     enum class Result {
         Fallback, // no GPU commands encoded; the CPU path remains safe

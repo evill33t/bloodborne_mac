@@ -60,6 +60,21 @@ add_dependencies(bb-macos-game bb-plugin-randomizer bb-plugin-boss_rush bb-plugi
 
 if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_executable(bb-presenter-tests "${BB_ROOT}/gpu/metal/tests/game_presenter_tests.mm")
+    target_include_directories(bb-presenter-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+    target_compile_options(bb-presenter-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
+    target_link_libraries(bb-presenter-tests PRIVATE bb-ps4-metal)
+    add_test(NAME native-metal-presentation COMMAND bb-presenter-tests)
+    add_test(NAME native-metal-presentation-display-link COMMAND bb-presenter-tests --display-link)
+    add_test(NAME native-metal-presentation-display-link-off COMMAND bb-presenter-tests --display-link-off)
+    add_test(NAME native-metal-presentation-latency2 COMMAND bb-presenter-tests --latency2)
+    add_test(NAME native-metal-presentation-framegen COMMAND bb-presenter-tests --framegen)
+    add_test(NAME native-metal-presentation-event-wake COMMAND bb-presenter-tests --event-wake)
+    add_test(NAME native-metal-presentation-poll-only COMMAND bb-presenter-tests --poll-only)
+    set_tests_properties(native-metal-presentation native-metal-presentation-display-link
+        native-metal-presentation-display-link-off native-metal-presentation-latency2
+        native-metal-presentation-framegen native-metal-presentation-event-wake
+        native-metal-presentation-poll-only PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;interactive")
     add_test(NAME native-precompile-help COMMAND bb-macos-precompile-shaders --help)
     add_test(NAME native-runtime-loader COMMAND "${Python3_EXECUTABLE}" "${BB_ROOT}/tests/test_probe.py")
     set_tests_properties(native-runtime-loader PROPERTIES TIMEOUT 45

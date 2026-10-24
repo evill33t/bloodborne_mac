@@ -45,12 +45,14 @@ struct FixtureCpBinding {
 }
 int main(int argc,char** argv) {
     const bool parallel_hash=argc==2 && !std::strcmp(argv[1],"--parallel-hash");
-    if(argc!=1 && !parallel_hash)return 2;
-    if(parallel_hash) {
+    const bool exact_compare=argc==2 && !std::strcmp(argv[1],"--exact-compare");
+    if(argc!=1 && !parallel_hash && !exact_compare)return 2;
+    if(parallel_hash || exact_compare) {
         setenv("BB_METAL_NATIVE_INDIRECT","1",1);
         setenv("BB_METAL_NATIVE_TEXTURE_COHERENCE","1",1);
         setenv("BB_METAL_GPU_WRITTEN_TEXTURE_SNAPSHOT","1",1);
-        setenv("BB_METAL_PARALLEL_TEXTURE_HASH","4",1);
+        setenv("BB_METAL_PARALLEL_TEXTURE_HASH",parallel_hash ? "4" : "0",1);
+        if(exact_compare)setenv("BB_METAL_EXACT_TEXTURE_COMPARE_MB","4",1);
     }
     @autoreleasepool {
         if (!MTLCreateSystemDefaultDevice()) return 77;
@@ -109,7 +111,7 @@ int main(int argc,char** argv) {
         };
         Gpu::Metal::Device device;
         Gpu::Metal::MetalRenderer renderer(device);
-        FixtureCpBinding cp_binding(renderer,parallel_hash);
+        FixtureCpBinding cp_binding(renderer,parallel_hash || exact_compare);
         const auto metal=(__bridge id<MTLDevice>)device.Handle();
         const auto queue=(__bridge id<MTLCommandQueue>)device.Queue();
         const auto draw=[&] {
@@ -188,6 +190,22 @@ int main(int argc,char** argv) {
         regs[Reg::SPI_SHADER_USER_DATA_PS_0+13]=std::bit_cast<uint32_t>((large_height-.5f)/large_height);
         id<MTLTexture> warm_large=draw();renderer.WaitIdle();
         if(!check(warm_large,0))return 1;
+        if(exact_compare) {
+            // An untouched cold entry compares only its next64KiB chunk.
+            // Then make it hot and prove a full unchanged exact comparison.
+            const auto cold=renderer.ExactTextureEqualCount();
+            auto unchanged=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureEqualCount()==cold+1 && check(unchanged,0));
+            const auto changed=renderer.ExactTextureDifferentCount();
+            // The cold hit advanced the original cursor to chunk1. Edit
+            // that next chunk so this test preserves the existing policy.
+            large_source[Gpu::ContentHash::kChunkBytes/4]^=0xff00u;
+            auto hot=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureDifferentCount()==changed+1 && check(hot,0));
+            const auto full=renderer.ExactTextureEqualCount();
+            unchanged=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureEqualCount()==full+1 && check(unchanged,0));
+        }
         if(parallel_hash) {
             // Make this exact >=1MiB cache entry hot, then prove an unchanged
             // full scan actually dispatches workers before holding the queue.
@@ -207,6 +225,7 @@ int main(int argc,char** argv) {
             if(!stop.stop_requested()){chunk_timeout=true;chunk_gate.signaledValue=1;}
         });
         const auto first_before=renderer.ParallelTextureHashCheckCount();
+        const auto exact_before=renderer.ExactTextureDifferentCount();
         large_source[0]^=0xff00u; // first chunk; the optional mode is already hot
         id<MTLTexture> old_partial=draw();
         // A first-chunk edit must take the serial precheck, not dispatch jobs.
@@ -217,6 +236,31 @@ int main(int argc,char** argv) {
         chunk_gate.signaledValue=1;chunk_watchdog.request_stop();chunk_watchdog.join();renderer.WaitIdle();
         if(chunk_timeout){fputs("Snapshot hash regeneration waited for queued GPU work\n",stderr);return 1;}
         if(!check(old_partial,0) || !check(new_partial,1))return 1;
+        if(exact_compare) {
+            assert(renderer.ExactTextureDifferentCount()==exact_before+2);
+            assert(cp_binding.cp && !cp_binding.cp->Execution()->Failed());
+            // Rebind the SAME texture VA onto new physical bytes. A prior
+            // immutable source must miss its map identity and use CRC/upload.
+            uint64_t rebound_physical=0;uintptr_t rebound_alias=0;
+            assert(!runtime_gpu_memory_allocate(0,runtime_gpu_memory_size(),large_size,16384,0,&rebound_physical));
+            assert(!runtime_gpu_memory_map(&rebound_alias,large_size,3,0,rebound_physical,16384));
+            auto* alias_pixels=reinterpret_cast<uint32_t*>(rebound_alias);
+            std::fill(alias_pixels,alias_pixels+large_size/4,0xffff0000u);
+            auto fixed_address=large_address;
+            assert(!runtime_gpu_memory_map(&fixed_address,large_size,3,0x10,rebound_physical,16384));
+            assert(fixed_address==large_address);
+            const auto old_equal=renderer.ExactTextureEqualCount();
+            auto rebound=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureEqualCount()==old_equal && check(rebound,2));
+            rebound=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureEqualCount()==old_equal+1 && check(rebound,2));
+            const auto alias_before=renderer.ExactTextureDifferentCount();
+            alias_pixels[last_pixel_offset/4]=0xff00ff00u;
+            rebound=draw();renderer.WaitIdle();
+            assert(renderer.ExactTextureDifferentCount()==alias_before+1 && check(rebound,1));
+            puts("Exact texture comparison: actual CP guard, cold chunk/full hot hits, first/final-partial unmarked edits and immutable queued versions passed");
+            puts("Exact texture comparison: same-VA remap rejects old source identity; unmarked physical-alias tail edit reaches next frame");
+        }
         puts("Metal snapshot hashes: next-draw changes in first and final partial chunks regenerate immutable queued versions");
         if(parallel_hash) {
             assert(cp_binding.cp && !cp_binding.cp->Execution()->Failed());

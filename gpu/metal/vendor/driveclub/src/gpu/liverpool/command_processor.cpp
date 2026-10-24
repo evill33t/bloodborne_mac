@@ -21,6 +21,7 @@
 #include "gpu/metal/command_validation.h"
 #include "gpu/metal/guest_label.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/render_thread_qos.h"
 #include "gpu/metal/bbhost/fog_draw_capture.h"
 
 namespace Gpu::Liverpool {
@@ -485,6 +486,7 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
     char name[32];
     std::snprintf(name, sizeof(name), ring.index == 0 ? "GPU gfx" : "GPU compute %u", ring.index);
     pthread_setname_np(name);
+    if(ring.index==0)Metal::RenderThreadQos::Apply(name);
     t_ring = &ring;
     t_regs = ring.index == 0 ? &regs : &ring.regs;
     for (;;) {

@@ -57,6 +57,9 @@ public:
     // readiness event, so its producer can resume as soon as we retain it.
     // Callbacks must outlive this presenter. UI setters remain nonblocking.
     void StartFrameLoop(std::function<void*()> pending,std::function<void()> queued);
+    // Safe to retain after destruction; then becomes a no-op. Only wakes the
+    // presentation run loop; borrowed frames still acknowledge after commit.
+    std::function<void()> FrameReadyNotifier() const;
     bool HasFrameLoop() const;
     std::uint64_t SkippedFrameCount() const;
     std::uint64_t DisplayLinkUpdateCount() const;

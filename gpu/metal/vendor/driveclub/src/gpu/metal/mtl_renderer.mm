@@ -53,6 +53,8 @@
 #include "gpu/metal/static_smrd.h"
 #include "gpu/metal/wind_capture_contract.h"
 #include "gpu/metal/wind_consumed_contract.h"
+#include "gpu/metal/shadow_htile_clear.h"
+#include "gpu/metal/exact_texture_compare.h"
 #include "gpu/metal/ps_root_read.h"
 #include "gpu/metal/gpu_texture_upload.h"
 #include "gpu/metal/native_vertex_fetch.h"
@@ -509,6 +511,7 @@ struct MetalRenderer::Impl {
     u64 version = 0;
   };
   std::unordered_map<u64, TextureEntry> textures;
+  ExactTextureCompare::Cache exact_texture_compare{ExactTextureCompare::ConfiguredBudget()};
   FrameWork::State frame_work;
   double next_texture_collection = 0;
   u64 texture_budget = 0;
@@ -573,6 +576,7 @@ struct MetalRenderer::Impl {
       const auto found=textures.find(key);if(found==textures.end())continue;
       retired_bytes+=found->second.allocated_bytes;
       cached_texture_bytes-=found->second.allocated_bytes;
+      exact_texture_compare.Erase(found->second.version);
       textures.erase(found);
     }
     if(retire_start)StutterTrace::Record("texture_collection_retire",retire_start,StutterTrace::Now(),
@@ -828,6 +832,7 @@ struct MetalRenderer::Impl {
 #include "gpu/metal/wind_capture.inc"
 #include "gpu/metal/wind_consumed_capture.inc"
 #include "gpu/metal/htile_capture.inc"
+#include "gpu/metal/shadow_htile_clear.inc"
 #include "gpu/metal/native_velocity.inc"
 #include "gpu/metal/renderer_binding_cache.inc"
 
@@ -2779,8 +2784,25 @@ struct MetalRenderer::Impl {
   }
 
   // True if the texture memory differs from what was uploaded.
-  bool TextureChanged(TextureEntry &e, u64 addr, u64 size,bool complete=false) {
+  bool TextureChanged(TextureEntry &e,u64 key,u64 addr,u64 size,bool complete=false) {
     StutterTrace::Scope timing("texture_change_check",frame_count,addr,size,1);
+    // This is reached only after the existing complete source-readiness proof.
+    // Compare against the exact immutable CPU bytes used by this texture's
+    // successful upload, retaining the original full/rotating-chunk policy.
+    // Any identity/budget/ownership miss uses the original CRC path below.
+    if(exact_texture_compare.Budget()) {
+      const bool full=e.hot || complete;
+      const u64 offset=full ? 0 : u64(e.next_chunk%e.chunks.size())*kChunk;
+      const auto compared=exact_texture_compare.Compare(
+          {key,addr,size,e.version,e.mapping_generation},reinterpret_cast<const void*>(addr),
+          offset,full ? size : std::min(kChunk,size-offset));
+      if(compared!=ExactTextureCompare::Result::Missing) {
+        if(!full)++e.next_chunk;
+        const bool changed=compared==ExactTextureCompare::Result::Different;
+        if(texture_hash_profile_enabled)texture_hash_histogram.Note(size,full,false,false,changed,0);
+        return changed;
+      }
+    }
     if(texture_hash_profile_enabled)return TextureChangedObserved(e,addr,size,complete);
     const u32 n = static_cast<u32>(e.chunks.size());
     if (e.hot || complete) {
@@ -3107,7 +3129,7 @@ struct MetalRenderer::Impl {
       if(force_content_check)++texture_coherence_refreshes;
     }
     if (e.tex) {
-      if (!gpu_source && e.hash_baseline_valid && !TextureChanged(e, addr, size,force_content_check)) {
+      if (!gpu_source && e.hash_baseline_valid && !TextureChanged(e,key,addr,size,force_content_check)) {
         e.frame = frame_count;
         RememberTextureSource(e,addr,size,generation);
         return view();
@@ -3116,6 +3138,7 @@ struct MetalRenderer::Impl {
     }
 
     StutterTrace::Scope timing("texture_upload",frame_count,addr,size);
+    exact_texture_compare.Erase(e.version);
     // replaceRegion writes CPU-side storage immediately. An older command
     // buffer may still sample the previous upload: give each changed version
     // its own texture and let Metal retain that version until its reads finish.
@@ -3296,6 +3319,8 @@ struct MetalRenderer::Impl {
     e.frame = frame_count;
     e.addr = addr;
     e.size = size;
+    if(gpu_uploaded && !gpu_source && snapshot_hashes.snapshot)
+      exact_texture_compare.Store({key,addr,size,e.version,generation},std::move(snapshot_hashes.snapshot));
     RememberTextureSource(e,addr,size,generation);
     return view();
   }
@@ -4450,7 +4475,7 @@ bool MetalRenderer::Impl::DrawIndirect(const RegFile& r,const DrawCall& dc,u64 a
   for(u32 k=0;k<8;++k) if(((r[Reg::CB_TARGET_MASK]>>(4*k))&15) &&
       ((r[Reg::SPI_SHADER_COL_FORMAT]>>(4*k))&15)) ++target_count;
   const bool camera_read=target_count>=5 && (r[Reg::DB_DEPTH_CONTROL]&3) &&
-      (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty()) &&
+      (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty() || ShadowClassificationCameraRequested()) &&
       (!temporal || !temporal->HasCamera());
   if(!vertex || (pixel_address && !pixel) || camera_read ||
       !NativeResources(*vertex,vud,ready) || (pixel && !NativeResources(*pixel,pud,ready))) {
@@ -4531,6 +4556,7 @@ bool MetalRenderer::Impl::DispatchIndirect(const RegFile& r,u64 address,const Cp
 }
 
 void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer> indirect) {
+  CaptureShadowClassificationBoundary();
   const u64 ps_addr = r.ProgramAddr(Reg::SPI_SHADER_PGM_LO_PS);
   if (trace_on_ps && trace_on_ps==ps_addr) {
     trace_on_ps=0;
@@ -4775,7 +4801,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     }
   }
   // ---- resources ----
-  if (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty()) {
+  if (temporal_aa.load(std::memory_order_relaxed) || frame_generation_enabled.load(std::memory_order_relaxed) || !capture_root.empty() || ShadowClassificationCameraRequested()) {
     if (!temporal) temporal=std::make_unique<TemporalAA>((__bridge void*)device);
     unsigned targets=0;
     for (auto* target:colors) targets+=target!=nullptr;
@@ -5496,6 +5522,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
     if(frame_generation_enabled.load(std::memory_order_relaxed) && frame_generation)
       for(auto* target:colors)if(target)frame_generation->Draw((__bridge void*)target->tex,target->written,
           target==colors[0] && frame_generation_display_copy);
+    MarkShadowClassificationDraw(ps,colors,ps_res.tex);
     return true;
   };
   if (tessellated) {
@@ -5659,6 +5686,7 @@ void MetalRenderer::Impl::Draw(const RegFile &r, const DrawCall &dc,id<MTLBuffer
 
 void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
     id<MTLBuffer> indirect,u64 indirect_offset,u64 indirect_address) {
+  CaptureShadowClassificationBoundary();
   const u64 addr = r.ProgramAddr(Reg::COMPUTE_PGM_LO);
   // Trace an infrequent upload kernel even when it runs outside a requested
   // frame (for example while the game generates a character's face texture).
@@ -5719,6 +5747,13 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   if (!cs) return;
   TraceHtileReaders(*cs,ud,gx,gy,gz);
   if(!indirect && cs->retail_id==0x9a9cf8a9) CaptureSceneBoundary();
+  if(!indirect && cs->retail_id==0x9a9cf8a9 && shadow_classification_temporal &&
+      ShadowClassificationFrame(frame_count) && temporal_color && temporal_depth) {
+    QueueShadowClassificationSource(ShadowClassificationSourceFor(temporal_color->tex,temporal_color,
+        "hdr_before_temporal",cs->hash));
+    QueueShadowClassificationSource(ShadowClassificationSourceFor(temporal_depth->tex,temporal_depth,
+        "scene_temporal_depth",cs->hash));
+  }
   if(!indirect && cs->retail_id==0x9a9cf8a9 && frame_generation_enabled.load(std::memory_order_relaxed) &&
       scene_camera && scene_camera_frame==frame_count && temporal_depth) {
     EndPass();EnsureCommandBuffer();
@@ -5740,6 +5775,9 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
           destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
       [blit endEncoding];
       temporal_color->written=++write_seq; temporal_resolved=true;
+      if(shadow_classification_temporal && ShadowClassificationFrame(frame_count))
+        QueueShadowClassificationSource(ShadowClassificationSourceFor(temporal_color->tex,temporal_color,
+            "hdr_after_temporal",cs->hash));
       CaptureRaw(temporal_color->tex,"scene_resolved_hdr_"+Hex(temporal_color->addr));
     }
   }
@@ -6000,6 +6038,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   u32* prepared[]{cud};
   SnapshotArena::Pin snapshot_pin(arena_pin);
   if(!PatchUserData(prepared)) return;
+  auto shadow_clear=PrepareShadowHtileClear(*cs,cud,gx,gy,gz,tx,ty,tz,bool(indirect));
   EnsureCommandBuffer();
   UpdateMemMap();
   id<MTLComputeCommandEncoder> e=nil;
@@ -6042,6 +6081,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
   // LDS_SIZE is in 128-dword units on CI; Metal wants a multiple of 16 bytes.
   const u32 lds = std::max<u32>(16, Bits(rsrc2, 15, 9) * 512);
   [e setThreadgroupMemoryLength:std::min<u32>(lds, 32768) atIndex:0];
+  LeaseShadowHtileClear(shadow_clear);
   if(indirect) {
     TrackProgramWriter(*cs,cud,{}, {tx,ty,tz});
     if(indirect_address) TrackIndirectRead(indirect_address,12,indirect,indirect_offset);
@@ -6053,6 +6093,7 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
         threadsPerThreadgroup:MTLSizeMake(tx, ty, tz)];
   }
   [e endEncoding];
+  ApplyShadowHtileClear(shadow_clear);
   if(compute_counter)stage_counter_passes.push_back(std::move(*compute_counter));
   if (dump_passes && trace && dump_frames) {
     u32 n = 0;
@@ -6098,6 +6139,17 @@ void MetalRenderer::Impl::Dispatch(const RegFile &r, u32 gx, u32 gy, u32 gz,
 }
 
 void MetalRenderer::Impl::Flip(const FlipInfo &f) {
+  if(shadow_classification_temporal && ShadowClassificationFrame(frame_count)) {
+    if(auto* target=Latest(color_targets,f.address);target && target->initialized && !target->clear_pending) {
+      id<MTLTexture> texture=target->tex;
+      if(texture.pixelFormat==MTLPixelFormatRGBA8Unorm_sRGB)
+        texture=[texture newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+      else if(texture.pixelFormat==MTLPixelFormatBGRA8Unorm_sRGB)
+        texture=[texture newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm];
+      QueueShadowClassificationSource(ShadowClassificationSourceFor(texture,target,"scanout_before_present",0));
+    }
+  }
+  CaptureShadowClassificationBoundary(true);
   FinishNativeVelocityFrame();
   frame_generation_hud_pending=false;
   // Finish the previous frame's last pass under its own trace flag before
@@ -6175,6 +6227,25 @@ void MetalRenderer::Impl::Flip(const FlipInfo &f) {
           command_budget_us,command_budget_commits);
       DC_INFO("gpu prewarm: %llu recipes loaded, %llu ready, %llu pipeline hits",
           warm.loaded,warm.ready,warm.hits);
+      if(shadow_htile_clear_attempts) DC_INFO("gpu shadow HTILE: %llu clears / %llu attempts; rejected [program=%llu surface=%llu dispatch=%llu metadata=%llu descriptor=%llu readiness=%llu uniform=%llu preserve13=%llu] (cumulative)",
+          shadow_htile_clear_applied,shadow_htile_clear_attempts,
+          shadow_htile_clear_rejected[1],shadow_htile_clear_rejected[2],shadow_htile_clear_rejected[3],
+          shadow_htile_clear_rejected[4],shadow_htile_clear_rejected[5],shadow_htile_clear_rejected[6],
+          shadow_htile_clear_rejected[7],shadow_htile_clear_rejected[8]);
+      if(exact_texture_compare.Budget()) {
+        const auto& exact=exact_texture_compare.Counters();
+        DC_INFO("gpu exact texture: %llu equal, %llu different, %llu missing, %llu identity rejects, %llu source bytes compared; %llu retained bytes/%llu budget, %zu entries; %llu stores, %llu evictions, %llu allocation failures (cumulative)",
+            exact.equal,exact.different,exact.missing,exact.identity_rejects,exact.compared_source_bytes,
+            exact_texture_compare.RetainedBytes(),exact_texture_compare.Budget(),exact_texture_compare.Entries(),
+            exact.stores,exact.evictions,exact.allocation_failures);
+        if(texture_uploader) {
+          const auto upload=texture_uploader->GetStats();
+          DC_INFO("gpu exact snapshot: %llu attempts, %llu dedicated, %llu published, %llu failures, %llu ineligible/%llu bytes; %llu payload bytes/%llu allocation bytes (cumulative)",
+              upload.exact_snapshot_attempts,upload.exact_snapshot_dedicated,upload.exact_snapshot_published,
+              upload.exact_snapshot_failures,upload.exact_snapshot_ineligible,upload.exact_snapshot_ineligible_bytes,
+              upload.exact_snapshot_payload_bytes,upload.exact_snapshot_allocation_bytes);
+        }
+      }
       if(temporal) DC_INFO("gpu temporal: %llu resolved frames, %llu native velocity inputs",
           temporal->ResolvedFrames(),temporal->NativeMotionFrames());
       if(NativeVelocityEnabled()) DC_INFO("gpu velocity: %llu clears, %llu producers, %llu camera matches, %llu filters (cumulative)",
@@ -6536,6 +6607,12 @@ std::uint64_t MetalRenderer::ParallelTextureHashCheckCount() const {
   std::scoped_lock lk(impl->lock);std::uint64_t checks=0;
   for(const auto& bin:impl->texture_hash_histogram.bins)checks+=bin.parallel;
   return checks;
+}
+std::uint64_t MetalRenderer::ExactTextureEqualCount() const {
+  std::scoped_lock lk(impl->lock);return impl->exact_texture_compare.Counters().equal;
+}
+std::uint64_t MetalRenderer::ExactTextureDifferentCount() const {
+  std::scoped_lock lk(impl->lock);return impl->exact_texture_compare.Counters().different;
 }
 
 void MetalRenderer::Draw(const RegFile &regs, const DrawCall &draw) {

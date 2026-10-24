@@ -69,5 +69,16 @@ static inline void dc_record_wind_matrix(device atomic_uint* record_, thread con
     atomic_fetch_min_explicit(record_ + 17u, iid_, memory_order_relaxed);
     atomic_fetch_max_explicit(record_ + 18u, iid_, memory_order_relaxed);
 }
+// Fixed original vid0/iid0 only. Repeated indexed executions are aggregated
+// with raw atomics; no descriptor/payload reread, spin or first-writer claim.
+static inline void dc_record_fixed_vertex(device atomic_uint* record_, uint counter_, uint minimum_, uint maximum_,
+                                           thread const uint* values_, uint count_) {
+    uint before_ = atomic_fetch_add_explicit(record_ + counter_, 1u, memory_order_relaxed);
+    if (before_ == 0xffffffffu) atomic_store_explicit(record_ + 2u, 1u, memory_order_relaxed);
+    for(uint k_ = 0u; k_ < count_; ++k_) {
+        atomic_fetch_min_explicit(record_ + minimum_ + k_, values_[k_], memory_order_relaxed);
+        atomic_fetch_max_explicit(record_ + maximum_ + k_, values_[k_], memory_order_relaxed);
+    }
+}
 )MSL";
 } // namespace Gpu::Metal::WindConsumed

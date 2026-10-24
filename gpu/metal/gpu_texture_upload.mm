@@ -19,6 +19,11 @@ constexpr std::uint64_t kMaximumBytes=128ull<<20;
 constexpr std::uint64_t kStagingPageBytes=4ull<<20;
 constexpr std::uint64_t kMetadataPageBytes=64ull<<10;
 constexpr unsigned kMaximumJobs=512;
+std::atomic<std::uint64_t> snapshot_generation{0};
+struct CpuSnapshotOwner {
+    id<MTLBuffer> buffer;
+    explicit CpuSnapshotOwner(id<MTLBuffer> value):buffer(value){}
+};
 struct alignas(8) Params {
     std::uint64_t source_offset,destination_offset;
     std::uint32_t width,height,pitch,row_words,tile,pixel_words;
@@ -288,11 +293,27 @@ GpuTextureUploader::Result GpuTextureUploader::EncodeImpl(void* command_handle,v
     // optional scopes by source address and time; zero is the unknown frame.
     const auto source_address=reinterpret_cast<std::uintptr_t>(upload.source);
     id<MTLBuffer> snapshot=nil,scratch=nil,metadata=nil;
+    bool dedicated_cpu_snapshot=false;
     std::uint64_t snapshot_offset=0,scratch_offset=0,metadata_offset=0;
     impl->BeginStaging(command);
     {
         StutterTrace::Scope timing("texture_gpu_snapshot_allocate",0,source_address,upload.bytes,1);
-        snapshot=impl->Reserve(gpu_source ? impl->gpu_snapshots : impl->snapshots,upload.bytes,gpu_source ? MTLResourceStorageModePrivate : MTLResourceStorageModeShared,snapshot_offset);
+        // Retained baselines never share an appendable arena. This allocation
+        // receives one CPU copy, is sealed, and is never returned to staging.
+        // With the opt-in absent this takes the original arena path unchanged.
+        if(!gpu_source && initial_hashes && ExactTextureCompare::ConfiguredBudget()) {
+            if(ExactTextureCompare::Retainable(upload.bytes,ExactTextureCompare::ConfiguredBudget())) {
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_attempts);
+                snapshot=[impl->device newBufferWithLength:upload.bytes options:MTLResourceStorageModeShared];
+                dedicated_cpu_snapshot=snapshot && snapshot.contents;
+                if(dedicated_cpu_snapshot)ExactTextureCompare::Add(impl->stats.exact_snapshot_dedicated);
+                else {snapshot=nil;ExactTextureCompare::Add(impl->stats.exact_snapshot_failures);}
+            } else {
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_ineligible);
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_ineligible_bytes,upload.bytes);
+            }
+        }
+        if(!snapshot)snapshot=impl->Reserve(gpu_source ? impl->gpu_snapshots : impl->snapshots,upload.bytes,gpu_source ? MTLResourceStorageModePrivate : MTLResourceStorageModeShared,snapshot_offset);
     }
     {
         StutterTrace::Scope timing("texture_gpu_scratch_allocate",0,source_address,scratch_bytes,1);
@@ -378,7 +399,27 @@ GpuTextureUploader::Result GpuTextureUploader::EncodeImpl(void* command_handle,v
             destinationSlice:job.slice destinationLevel:job.level destinationOrigin:MTLOriginMake(0,0,0)];
     }
     [blit endEncoding];
-    if(initial_hashes)initial_hashes->chunks=std::move(snapshot_chunks);
+    if(initial_hashes) {
+        initial_hashes->chunks=std::move(snapshot_chunks);
+        if(dedicated_cpu_snapshot) {
+            // Diagnostic admission/allocation failure leaves the normal upload
+            // and its original hash baseline intact. No guest bytes are reread.
+            try {
+                const auto generation=ExactTextureCompare::NextGeneration(snapshot_generation);
+                const auto allocated=std::uint64_t(snapshot.allocatedSize);
+                if(generation && allocated>=snapshot.length && allocated<=ExactTextureCompare::ConfiguredBudget()) {
+                    auto owner=std::make_shared<CpuSnapshotOwner>(snapshot);
+                    initial_hashes->snapshot=ExactTextureCompare::Snapshot::Create(std::move(owner),
+                        snapshot_bytes,upload.bytes,allocated,generation);
+                }
+            } catch(...) {initial_hashes->snapshot.reset();}
+            if(initial_hashes->snapshot) {
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_published);
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_payload_bytes,upload.bytes);
+                ExactTextureCompare::Add(impl->stats.exact_snapshot_allocation_bytes,initial_hashes->snapshot->AllocationBytes());
+            } else ExactTextureCompare::Add(impl->stats.exact_snapshot_failures);
+        }
+    }
     ++impl->stats.uploads;impl->stats.jobs+=jobs.size();
     impl->stats.compute_dispatches+=packed ? 1 : jobs.size();
     impl->stats.packed_uploads+=packed;

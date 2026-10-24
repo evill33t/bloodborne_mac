@@ -60,12 +60,31 @@ int main(int argc,char** argv) {
     const bool legacy=argc>1 && std::strcmp(argv[1],"--legacy")==0;
     const bool latency2=argc>1 && std::strcmp(argv[1],"--latency2")==0;
     const bool framegen=argc>1 && std::strcmp(argv[1],"--framegen")==0;
+    const bool force_link=argc>1 && std::strcmp(argv[1],"--display-link")==0;
+    const bool event_wake=argc>1 && std::strcmp(argv[1],"--event-wake")==0;
+    const bool poll_only=argc>1 && std::strcmp(argv[1],"--poll-only")==0;
+    const bool force_pump=event_wake || poll_only || (argc>1 && std::strcmp(argv[1],"--display-link-off")==0);
+    // Test the default independently of the caller's diagnostic environment.
+    // Latency two explicitly selects the link whose latency is being tested.
+    assert(unsetenv("BB_METAL_DISPLAY_LINK")==0);
+    assert(unsetenv("BB_METAL_DISPLAY_LINK_LATENCY")==0);
+    assert(unsetenv("BB_METAL_PRESENT_EVENT_WAKE")==0);
+    assert(unsetenv("BB_METAL_PRESENT_POLL_MS")==0);
+    if(event_wake) {
+        assert(setenv("BB_METAL_PRESENT_EVENT_WAKE","1",1)==0);
+        // A 250-ms fallback timer cannot satisfy the 450-ms UI-pause check.
+        assert(setenv("BB_METAL_PRESENT_POLL_MS","250",1)==0);
+    }
+    if(poll_only)assert(setenv("BB_METAL_PRESENT_EVENT_WAKE","0",1)==0);
+    if(force_link || latency2)assert(setenv("BB_METAL_DISPLAY_LINK","1",1)==0);
+    if(force_pump)assert(setenv("BB_METAL_DISPLAY_LINK","0",1)==0);
     char timing_path[]="/private/tmp/bb-presenter-timing-XXXXXX";
     if(latency2) {
         const int fd=mkstemp(timing_path);assert(fd>=0);close(fd);
         assert(setenv("BB_METAL_DISPLAY_LINK_LATENCY","2",1)==0);
         assert(setenv("BB_METAL_PRESENT_TIMING_CSV",timing_path,1)==0);
     }
+    std::function<void()> retained_notifier;
     @autoreleasepool {
         assert(SDL_Init(SDL_INIT_VIDEO));
         auto* window=SDL_CreateWindow("Metal presentation regression",640,360,SDL_WINDOW_METAL);
@@ -93,6 +112,8 @@ int main(int argc,char** argv) {
             presenter.SetFrameProvider([&] {return std::atomic_load(&packet);});
         }
         if(!legacy)presenter.StartFrameLoop([&] {return handoff.Pending();},[&] {handoff.Acknowledge();});
+        retained_notifier=presenter.FrameReadyNotifier();
+        handoff.SetNotifier(retained_notifier);
         std::thread producer([&] {while(!stop.load()) {
             if(framegen) {
                 auto next=std::make_shared<Gpu::Metal::GeneratedFrame>();next->real=next->generated=(__bridge void*)texture;
@@ -112,6 +133,23 @@ int main(int argc,char** argv) {
                 if(legacy)if(void* pending=handoff.Pending()) {presenter.PresentTexture(pending);handoff.Acknowledge();}
             }
         };
+        const auto pump_for=[&](std::chrono::milliseconds duration) {
+            const auto until=std::chrono::steady_clock::now()+duration;
+            while(std::chrono::steady_clock::now()<until)pump();
+        };
+        const auto check_pacing=[&](bool vsync,bool generation) {
+#if defined(__aarch64__)
+            constexpr bool default_real_link=false;
+#else
+            constexpr bool default_real_link=true;
+#endif
+            const bool expected_link=!legacy && vsync && (force_link || latency2 || (!force_pump && (generation || default_real_link)));
+            const auto updates=presenter.DisplayLinkUpdateCount();
+            pump_for(100ms);
+            if(expected_link)assert(presenter.DisplayLinkUpdateCount()>updates);
+            else assert(presenter.DisplayLinkUpdateCount()==updates);
+            assert(bool(layer.displaySyncEnabled)==vsync);
+        };
         const auto deadline=std::chrono::steady_clock::now()+4s;
         while(presenter.PresentedFrameCount()<8 && std::chrono::steady_clock::now()<deadline)pump();
         const auto before=presenter.PresentedFrameCount();
@@ -119,24 +157,34 @@ int main(int argc,char** argv) {
             (unsigned long long)presenter.DisplayLinkUpdateCount(),(unsigned long long)presenter.SubmittedFrameCount(),
             (unsigned long long)presenter.SkippedFrameCount(),(unsigned long long)before);
         if(before>=8) {
+            check_pacing(true,framegen);
             const auto produced_before=produced.load();
             const auto submitted_before=presenter.SubmittedFrameCount();
+            const auto displayed_before=presenter.PresentedFrameCount();
             std::this_thread::sleep_for(450ms); // deliberate main-thread stall
-            const auto displayed=presenter.PresentedFrameCount()-before;
+            const auto displayed=presenter.PresentedFrameCount()-displayed_before;
             std::printf("UI blocked 450 ms: %llu new displayed frames, %u producer frames\n",
                 (unsigned long long)displayed,produced.load()-produced_before);
             // GPU completion and presentation callbacks are separate. Already
             // queued frames may finish during the pause; no new command can be
             // submitted by the blocked legacy UI consumer.
             if(legacy)assert(presenter.SubmittedFrameCount()==submitted_before &&
-                displayed<=submitted_before-before && produced.load()<=produced_before+1);
+                displayed<=submitted_before-displayed_before && produced.load()<=produced_before+1);
             else assert(displayed>=4 && produced.load()>produced_before+3);
             // Settings cross the thread boundary; toggles must not deadlock or
             // strand an old display-link delegate. Keep storage producer-owned.
             for(bool vsync:{false,true}) {
                 presenter.SetVsync(vsync);presenter.Resize(640,360);presenter.SetRefreshRate(120);
-                const auto until=std::chrono::steady_clock::now()+200ms;
-                while(std::chrono::steady_clock::now()<until)pump();
+                pump_for(200ms);check_pacing(vsync,framegen);
+            }
+            if(framegen) {
+                // Default policy changes with FG, not with a recreated
+                // presenter. Producer storage and queued packet order stay
+                // under the existing owner/event contract across transitions.
+                for(bool enabled:{false,true}) {
+                    presenter.SetFrameGeneration(enabled);
+                    pump_for(200ms);check_pacing(true,enabled);
+                }
             }
         }
         stop=true;
@@ -161,8 +209,17 @@ int main(int argc,char** argv) {
             assert(presenter.PresentedFrameCount()<=2*produced.load());
         }
         if(before<8) {std::puts("No onscreen presentation timestamps; interactive fixture skipped");result=77;}
-        else std::puts(legacy?"Legacy control reproduced UI-stall backpressure":"Metal presenter: UI-stall isolation, queue handoff, settings transitions and shutdown passed");
+        else std::puts(legacy?"Legacy UI control reproduced UI-stall backpressure":
+            event_wake?"Metal presenter: event wake without timer assistance, VSync transitions and shutdown passed":
+            poll_only?"Metal presenter: polling-only comparison, VSync transitions and shutdown passed":
+            framegen?"Metal presenter: default FG display link, FG/VSync transitions, ordered pairs and shutdown passed":
+            force_link?"Metal presenter: explicit display link, UI-stall isolation, VSync transitions and shutdown passed":
+            force_pump?"Metal presenter: explicit worker pump, UI-stall isolation, VSync transitions and shutdown passed":
+            latency2?"Metal presenter: explicit display link latency2, UI-stall isolation and shutdown passed":
+            "Metal presenter: CPU-specific default pacing, UI-stall isolation, VSync transitions and shutdown passed");
         }
+        // Producer-held notifications do not retain or call a destroyed Impl.
+        if(retained_notifier)for(unsigned i=0;i<100;++i)retained_notifier();
         if(latency2 && result==0)CheckTiming(timing_path);
         if(latency2)unlink(timing_path);
         SDL_Metal_DestroyView(view);SDL_DestroyWindow(window);SDL_Quit();return result;

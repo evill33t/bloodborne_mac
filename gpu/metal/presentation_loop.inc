@@ -15,7 +15,15 @@ void Presenter::Impl::ApplySettings(bool threaded) {
     }
     if(threaded) {
         const char* opt=std::getenv("BB_METAL_DISPLAY_LINK");
-        const bool use_link=next.vsync && (!opt || std::strcmp(opt,"0"));
+        // The native CPU path benefits from queuing real frames without the
+        // display-callback admission gate. Keep the Rosetta pacing default;
+        // generated pairs and explicit overrides retain their old scheduling.
+#if defined(__aarch64__)
+        constexpr bool default_real_link=false;
+#else
+        constexpr bool default_real_link=true;
+#endif
+        const bool use_link=next.vsync && (opt ? std::strcmp(opt,"0")!=0 : (frame_generation || default_real_link));
         if(display_link && (!use_link || next.refresh_rate!=applied.refresh_rate)) {
             [display_link invalidate];display_link=nil;
         }
@@ -73,8 +81,30 @@ void Presenter::Impl::Display(CAMetalDisplayLinkUpdate* update,double diagnostic
     if(acknowledge)queued();
 }
 
+void Presenter::Impl::Pump() {
+    ApplySettings(true);
+    if(display_link) {
+        const double now=StutterTrace::Now();
+        if(now-last_display_update>.1 && (pending() || held_real || ready_pair)) {
+            // Hidden/occluded windows may receive no updates. Preserve
+            // the old nil-drawable skip behavior with a bounded delay.
+            StutterTrace::Record("display_unavailable",last_display_update,now,next_sequence);
+            last_display_update=now;++skipped;
+            held_real.reset();ready_pair.reset();
+            if(pending())queued();
+        }
+    } else if(held_real) {
+        PresentLegacy(held_real->real,held_real);held_real.reset();
+    } else if(ready_pair) {
+        PresentLegacy(ready_pair->real,ready_pair);ready_pair.reset();
+    } else if(void* texture=pending()) {
+        PresentLegacy(texture);queued();
+    }
+}
+
 void Presenter::Impl::Run(std::stop_token stop) {
     pthread_setname_np("Metal presentation");
+    RenderThreadQos::Apply("Metal presentation");
     @autoreleasepool {
         display_target=[BBMetalDisplayTarget new];
         Impl* owner=this;
@@ -86,32 +116,38 @@ void Presenter::Impl::Run(std::stop_token stop) {
 
         };
         ApplySettings(true);
-        NSTimer* timer=[NSTimer timerWithTimeInterval:.001 repeats:YES block:^(NSTimer*) {
-            owner->ApplySettings(true);
-            if(owner->display_link) {
-                const double now=StutterTrace::Now();
-                if(now-owner->last_display_update>.1 && (owner->pending() || owner->held_real || owner->ready_pair)) {
-                    // Hidden/occluded windows may receive no updates. Preserve
-                    // the old nil-drawable skip behavior with a bounded delay;
-                    // never strand a guest fence behind a missing compositor.
-                    StutterTrace::Record("display_unavailable",owner->last_display_update,now,owner->next_sequence);
-                    owner->last_display_update=now;++owner->skipped;
-                    owner->held_real.reset();owner->ready_pair.reset();
-                    if(owner->pending())owner->queued();
-                }
-            } else if(owner->held_real) {
-                owner->PresentLegacy(owner->held_real->real,owner->held_real);owner->held_real.reset();
-            } else if(owner->ready_pair) {
-                owner->PresentLegacy(owner->ready_pair->real,owner->ready_pair);owner->ready_pair.reset();
-            } else if(void* texture=owner->pending()) {
-                owner->PresentLegacy(texture);owner->queued();
+        // The timer remains the settings/occlusion watchdog and a fallback if
+        // notification setup fails. The bounded override isolates wakeups in
+        // the real-window regression; normal polling remains 1 ms.
+        double poll_seconds=.001;
+        if(const char* value=std::getenv("BB_METAL_PRESENT_POLL_MS")) {
+            unsigned milliseconds=0;
+            for(const char* at=value;*at && milliseconds<=1000;++at) {
+                if(*at<'0' || *at>'9') {milliseconds=0;break;}
+                milliseconds=milliseconds*10+unsigned(*at-'0');
             }
-        }];
+            if(milliseconds>=1 && milliseconds<=1000)poll_seconds=milliseconds*.001;
+        }
+        NSTimer* timer=[NSTimer timerWithTimeInterval:poll_seconds repeats:YES block:^(NSTimer*) {owner->Pump();}];
         NSRunLoop* loop=NSRunLoop.currentRunLoop;
         [loop addTimer:timer forMode:NSRunLoopCommonModes];
+        CFRunLoopSourceRef source=nullptr;
+        const auto cf_loop=CFRunLoopGetCurrent();
+        if(event_wake) {
+            CFRunLoopSourceContext context{};context.info=this;
+            context.perform=[](void* info) {static_cast<Impl*>(info)->Pump();};
+            source=CFRunLoopSourceCreate(kCFAllocatorDefault,0,&context);
+            if(source) {
+                CFRunLoopAddSource(cf_loop,source,kCFRunLoopCommonModes);
+                frame_wake->Install(cf_loop,source);
+                frame_wake->Notify(); // Includes a frame published before registration.
+            }
+        }
         while(!stop.stop_requested()) {
             @autoreleasepool {[loop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:.05]];}
         }
+        frame_wake->Close();
+        if(source) {CFRunLoopRemoveSource(cf_loop,source,kCFRunLoopCommonModes);CFRelease(source);}
         [timer invalidate];
         display_target.render=nil;
         [display_link invalidate];display_link=nil;display_target=nil;
@@ -125,6 +161,10 @@ void Presenter::StartFrameLoop(std::function<void*()> pending,std::function<void
     impl->worker=std::jthread([state=impl.get()](std::stop_token stop) {state->Run(stop);});
 }
 bool Presenter::HasFrameLoop() const {return impl->frame_loop.load();}
+std::function<void()> Presenter::FrameReadyNotifier() const {
+    if(!impl->event_wake)return {};
+    return [state=impl->frame_wake] {state->Notify();};
+}
 std::uint64_t Presenter::SkippedFrameCount() const {return impl->skipped.load();}
 std::uint64_t Presenter::DisplayLinkUpdateCount() const {return impl->display_updates.load();}
 std::uint64_t Presenter::SubmittedFrameCount() const {return impl->next_sequence.load();}

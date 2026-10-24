@@ -139,11 +139,16 @@ target_include_directories(bb-presenter-tests PRIVATE "${BB_PS4_METAL}" "${BB_RO
 target_compile_options(bb-presenter-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)
 target_link_libraries(bb-presenter-tests PRIVATE bb-ps4-metal)
 add_test(NAME darwin-metal-presentation COMMAND bb-presenter-tests)
-set_tests_properties(darwin-metal-presentation PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
+add_test(NAME darwin-metal-presentation-display-link COMMAND bb-presenter-tests --display-link)
+add_test(NAME darwin-metal-presentation-display-link-off COMMAND bb-presenter-tests --display-link-off)
 add_test(NAME darwin-metal-presentation-latency2 COMMAND bb-presenter-tests --latency2)
-set_tests_properties(darwin-metal-presentation-latency2 PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
 add_test(NAME darwin-metal-presentation-framegen COMMAND bb-presenter-tests --framegen)
-set_tests_properties(darwin-metal-presentation-framegen PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77)
+add_test(NAME darwin-metal-presentation-event-wake COMMAND bb-presenter-tests --event-wake)
+add_test(NAME darwin-metal-presentation-poll-only COMMAND bb-presenter-tests --poll-only)
+set_tests_properties(darwin-metal-presentation darwin-metal-presentation-display-link
+    darwin-metal-presentation-display-link-off darwin-metal-presentation-latency2
+    darwin-metal-presentation-framegen darwin-metal-presentation-event-wake
+    darwin-metal-presentation-poll-only PROPERTIES TIMEOUT 15 SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;interactive")
 target_link_libraries(bb-metal-worklist-tests PRIVATE bbruntime)
 target_link_libraries(bb-metal-native_tessellation-tests PRIVATE bbruntime)
 target_link_options(bb-metal-native_tessellation-tests PRIVATE
@@ -452,6 +457,8 @@ add_test(NAME darwin-metal-texture-coherence COMMAND bb-metal-texture-coherence-
 set_tests_properties(darwin-metal-texture-coherence PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
 add_test(NAME darwin-metal-texture-coherence-parallel-hash COMMAND bb-metal-texture-coherence-tests --parallel-hash)
 set_tests_properties(darwin-metal-texture-coherence-parallel-hash PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45)
+add_test(NAME darwin-metal-texture-coherence-exact-compare COMMAND bb-metal-texture-coherence-tests --exact-compare)
+set_tests_properties(darwin-metal-texture-coherence-exact-compare PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 45 RUN_SERIAL TRUE)
 add_test(NAME darwin-metal-texture-coherence-binding-cache COMMAND bb-metal-texture-coherence-tests)
 set_tests_properties(darwin-metal-texture-coherence-binding-cache PROPERTIES
     ENVIRONMENT "BB_METAL_BINDING_CACHE=1" SKIP_RETURN_CODE 77 TIMEOUT 45)

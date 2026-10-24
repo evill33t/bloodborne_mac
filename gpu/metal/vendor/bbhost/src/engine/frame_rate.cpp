@@ -1,6 +1,7 @@
 #include "guest_abi.h"
 #include "engine/frame_rate.h"
 #include "gpu/metal/bbhost/timing_verify.h"
+#include "gpu/metal/bbhost/wind_vector_patch.h"
 #include "gpu/metal/bbhost/features.h"
 #include "engine/frame_rate_step.h"
 #include "engine/frame_tick.h"
@@ -1506,6 +1507,7 @@ int apply_rate(ElfImage* image, int want) {
         g_frame_time_applied = write_sites(kFrameTimeSites);
         // The task step and the play time's count, ours: written by our
         // SprjFlipper::Update every frame, in 16 bytes of the image's tail
+        // (plus an immutable 16-byte authored wind-vector scale when enabled)
         // (with the guest's, BBHOST_FRAME_SOURCE=0 or 2 at 60, the cave and
         // the game's add stay).
         const std::uint64_t block = image->tail_va + image->tail_used + kPreferredGuestSlide;  // as a BN address
@@ -1521,12 +1523,20 @@ int apply_rate(ElfImage* image, int want) {
             [&](const Site& load) {
                 return rel32(static_cast<std::int64_t>(wind_bn) - (static_cast<std::int64_t>(load.at) + 8));
             });
+        const char* wind_vector_setting = std::getenv("BBHOST_WIND_VECTOR_FIXED");
+        const bool wind_vector_enabled = !(wind_vector_setting && wind_vector_setting[0] == '0');
+        const std::uint64_t vector_bn = block + 16;
+        MacWindVectorPatch::Rewrite wind_vector_code{};
+        const bool wind_vector_ok = wind_vector_enabled && image->tail_used + 32 <= image->tail_size &&
+            vector_bn <= UINT32_MAX && MacWindVectorPatch::Build(
+                reinterpret_cast<const void*>(static_cast<std::uintptr_t>(va(MacWindVectorPatch::Site))),
+                MacWindVectorPatch::Context.size(), MacWindVectorPatch::Site, vector_bn, wind_vector_code);
         if (g_source != Source::Ours) {
             host_log("frame rate: the guest's SprjFlipper::Update runs; the task step and the play time stay the game's");
         } else if (image->tail_used + 16 > image->tail_size || !rel32(step_disp) || !rel32(play_disp) || !wind_reachable) {
             host_log("frame rate: no room in the image's tail; the task step and the play time stay the game's");
         } else {
-            image->tail_used += 16;
+            image->tail_used += wind_vector_ok ? 32 : 16;
             const auto le = [](std::int64_t d, std::uint8_t* out) {
                 const auto u = static_cast<std::uint32_t>(static_cast<std::int32_t>(d));
                 for (int k = 0; k < 4; ++k) out[k] = static_cast<std::uint8_t>(u >> (8 * k));
@@ -1552,6 +1562,25 @@ int apply_rate(ElfImage* image, int want) {
                     write(load.at + 4, &displacement, sizeof(displacement));
                 }
                 host_log("frame rate: wind follows half the task step (the original 30 fps sway speed)");
+
+                // REA: 0x2314a66's XYZ product reaches the two published wind
+                // vector banks; it is not an accumulated position. Using the
+                // fluctuating phase delta here makes bend amplitude pop with
+                // frame time. Keep the original 30-fps vector scale (1/60),
+                // while the four redirected loads continue to advance phase
+                // and fades by half the actual task step. The independent
+                // scalar product at 0x2314ae7 is deliberately unchanged.
+                if (wind_vector_ok) {
+                    const float authored[4] = {MacWindVectorPatch::AuthoredSeconds, MacWindVectorPatch::AuthoredSeconds,
+                                               MacWindVectorPatch::AuthoredSeconds, MacWindVectorPatch::AuthoredSeconds};
+                    write(static_cast<std::uint32_t>(vector_bn), authored, sizeof(authored));
+                    write(MacWindVectorPatch::Site, wind_vector_code.data(), wind_vector_code.size());
+                    host_log("frame rate: published wind XYZ uses the authored 1/60 scale; phase/fades remain variable");
+                } else if (!wind_vector_enabled) {
+                    host_log("frame rate: BBHOST_WIND_VECTOR_FIXED=0, wind XYZ retains the variable-step control");
+                } else {
+                    host_log("frame rate: wind XYZ rewrite refused (original bytes, tail capacity or rel32); phase unchanged");
+                }
             } else {
                 host_log("frame rate: 0x%x does not hold the 60 FPS++ cave's step; the cave keeps computing it", kStepLoad);
             }

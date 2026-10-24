@@ -4,11 +4,13 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CAMetalDisplayLink.h>
 #import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
 
 #include "gpu/metal/mtl_device.h"
 #include "gpu/metal/spatial_upscaler.h"
 #include "gpu/metal/frame_generation.h"
 #include "gpu/metal/stutter_trace.h"
+#include "gpu/metal/render_thread_qos.h"
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -143,6 +145,27 @@ struct PresentationTiming {
     }
 };
 
+// The producer retains this state, never Impl. Register/invalidate on the
+// worker; serialize cross-thread signal/wake against release during shutdown.
+struct PresentationWake {
+    std::mutex mutex;
+    CFRunLoopRef loop=nullptr;
+    CFRunLoopSourceRef source=nullptr;
+    void Install(CFRunLoopRef next_loop,CFRunLoopSourceRef next_source) {
+        std::scoped_lock lock(mutex);
+        loop=next_loop;source=next_source;CFRetain(loop);CFRetain(source);
+    }
+    void Notify() {
+        std::scoped_lock lock(mutex);
+        if(source) {CFRunLoopSourceSignal(source);CFRunLoopWakeUp(loop);}
+    }
+    void Close() {
+        std::scoped_lock lock(mutex);
+        if(source) {CFRunLoopSourceInvalidate(source);CFRelease(source);source=nullptr;}
+        if(loop) {CFRelease(loop);loop=nullptr;}
+    }
+};
+
 struct Presenter::Impl {
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
@@ -177,7 +200,10 @@ struct Presenter::Impl {
     double last_display_update=0;
     float display_link_latency=1;
     std::shared_ptr<PresentationTimingLog> timing_log;
+    std::shared_ptr<PresentationWake> frame_wake=std::make_shared<PresentationWake>();
+    bool event_wake=false;
 
+    void Pump();
     void ApplySettings(bool threaded);
     void EncodeTexture(id<MTLTexture>,id<CAMetalDrawable>,bool display_link,
                        double callback=0,double deadline=0,double target_presentation=0,
@@ -212,6 +238,13 @@ struct Presenter::Impl {
 
 Presenter::Presenter(Device& device, void* layer, const PresenterConfig& config)
     : impl(std::make_unique<Impl>()) {
+#if defined(__aarch64__)
+    constexpr bool default_event_wake=true;
+#else
+    constexpr bool default_event_wake=false;
+#endif
+    const char* wake=std::getenv("BB_METAL_PRESENT_EVENT_WAKE");
+    impl->event_wake=wake ? !std::strcmp(wake,"1") : default_event_wake;
     impl->device = (__bridge id<MTLDevice>)device.Handle();
     impl->queue = (__bridge id<MTLCommandQueue>)device.Queue();
     impl->upscaler=std::make_unique<SpatialUpscaler>(device.Handle());
@@ -271,7 +304,7 @@ Presenter::Presenter(Device& device, void* layer, const PresenterConfig& config)
 }
 
 Presenter::~Presenter() {
-    if(impl->worker.joinable()) {impl->worker.request_stop();impl->worker.join();}
+    if(impl->worker.joinable()) {impl->worker.request_stop();impl->frame_wake->Notify();impl->worker.join();}
     // Drain in-flight frames so their completion handlers don't outlive us.
     for (int i = 0; i < kFramesInFlight; ++i) {
         dispatch_semaphore_wait(impl->frames_in_flight, DISPATCH_TIME_FOREVER);

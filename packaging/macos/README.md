@@ -198,6 +198,15 @@ Both switches default off. CPU and GPU fixtures verify correctness, but isolated
 timing gains do not establish a gameplay FPS gain. See the
 [throughput measurements](../../docs/MACOS_METAL_THROUGHPUT_2026-10-23.md).
 
+Native arm64 presentation now wakes directly when a frame is published. The
+existing timer remains a fallback; `BB_METAL_PRESENT_EVENT_WAKE=0` selects the
+polling control. The borrowed frame is still acknowledged only after its
+presentation read has been queued. The optional
+`BB_METAL_RENDER_THREAD_QOS=1` scheduling hint applies only to the graphics and
+presentation threads and remains off by default; a separate FPS gain has not
+been established. See the [AC native-path measurements](../../docs/MACOS_NATIVE_AC_2026-10-24.md)
+for clean gameplay results, diagnostic overhead and remaining shadow coverage.
+
 `BB_METAL_SHADER_PREWARM=0` disables automatic in-game prewarming. GPU label waits now park on
 completion notifications, detect invalid mappings and report failures. Supported
 1.09 native fence-loop hooks preserve guest comparisons and timeout budgets;
@@ -473,12 +482,16 @@ also reports median, 95th-percentile and maximum intervals. This uses drawable
 callbacks and does not enable GPU counters. Average FPS alone does not measure
 frame pacing; a 30 FPS stream can still alternate short and long intervals.
 The dedicated presentation thread acknowledges each flip after committing its
-presentation read on the shared Metal queue. With V-sync on it uses drawables
-provided by `CAMetalDisplayLink`; V-sync-off acquires drawables on that worker.
+presentation read on the shared Metal queue. The native ARM64 CPU runtime acquires
+ordinary-frame drawables on that worker, including with V-sync enabled, to avoid
+waiting for a display-link callback before admitting the next game frame.
+Generated pairs retain `CAMetalDisplayLink` scheduling. Rosetta keeps its
+display-link default; V-sync-off acquires drawables on the worker.
 This keeps later rendering ordered without waiting for the GPU to finish every
 frame, and isolates it from UI-event stalls. `BB_METAL_PRESENT_THREAD=0`
-restores the UI path; `BB_METAL_DISPLAY_LINK=0` retains the worker with legacy
-drawable acquisition. Resize, refresh, V-sync and scaling changes apply live.
+restores the UI path; `BB_METAL_DISPLAY_LINK=0` explicitly selects worker drawable
+acquisition, and `=1` explicitly selects the display link. Resize, refresh,
+V-sync, frame generation and scaling changes apply live.
 
 `BB_METAL_STUTTER_TRACE=/absolute/output.csv` optionally records slow CPU stages
 without pixel readback or forced GPU drains. Most scopes use a 10 ms threshold;
@@ -486,7 +499,7 @@ whole UI iterations and frame handoffs use 50 ms. Tracing refuses paths inside
 the configured original-game directories. For timing comparisons keep the game
 visible, require positive presentation timestamps and check the
 `DC_GPU_STATS=1` unavailable-drawable skip counter. Fully occluded windows can
-stop receiving display-link updates; after 100 ms the producer may skip a frame
+stop receiving display-link updates in that mode; after 100 ms the producer may skip a frame
 to keep running. Those periods do not provide valid whole-window display FPS.
 
 Bloodborne now enables the guarded native indirect and GPU-source texture paths

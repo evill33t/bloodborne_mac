@@ -2,6 +2,7 @@
 // CPU-only differential fixtures inspired by Paleblood's limiter cases.
 // Never calls game startup, initializes SDL, or creates a Metal device/window.
 #include "gpu/metal/bbhost/timing_verify.h"
+#include "gpu/metal/bbhost/wind_vector_patch.h"
 #include "gpu/metal/vendor/paleblood/limiter.h"
 #include "engine/sprj_flipper.h"
 #include "engine/frame_rate_step.h"
@@ -27,6 +28,17 @@
 extern "C" void* runtime_low_map(std::size_t, int);
 extern "C" void bb_macos_set_guest_tls(void*);
 extern "C" void runtime_restart() { std::abort(); }
+
+#if defined(__x86_64__)
+// Tail-call the emitted instruction bytes with the original register inputs.
+// No inline-asm call/red-zone ambiguity; the snippet returns to our caller.
+extern "C" void bb_timing_fixture_wind_run(const float*, const float*, float*, const void*);
+asm(".text\n.p2align 4\n_bb_timing_fixture_wind_run:\n"
+    "vmovups (%rdi), %xmm2\n"
+    "vmovss (%rsi), %xmm14\n"
+    "vxorps %xmm1, %xmm1, %xmm1\n"
+    "jmp *%rcx\n");
+#endif
 
 namespace {
 constexpr std::uint64_t base = 0x400000, t0 = 5'000'000'000;
@@ -248,6 +260,99 @@ unsigned check_steps() {
     }
     return checks;
 }
+
+struct WindChecks { unsigned admission = 0, executed = 0; };
+WindChecks check_wind_vector() {
+    using namespace MacWindVectorPatch;
+    WindChecks checks;
+    const auto require = [&](bool ok, const char* error) {
+        if (!ok) throw std::runtime_error(error);
+        ++checks.admission;
+    };
+    Rewrite output{};
+    const Rewrite sentinel{1,2,3,4,5,6,7,8,9,10};
+    require(Build(Context.data(), Context.size(), Site, Site + 0x100, output) &&
+                output == Rewrite{0xc5,0x68,0x59,0x25,0xf8,0,0,0,0x90,0x90},
+            "Wind vector replacement does not encode xmm12=xmm2*[rip+disp32]");
+    for (std::size_t k = 0; k < Context.size(); ++k) {
+        auto changed = Context; changed[k] ^= 1;
+        output = sentinel;
+        require(!Build(changed.data(), changed.size(), Site, Site + 0x100, output) && output == sentinel,
+                "Changed original wind instruction admitted or refusal changed output");
+    }
+    for (std::size_t length : {std::size_t(0), Context.size() - 1, Context.size() + 1}) {
+        output = sentinel;
+        require(!Build(Context.data(), length, Site, Site + 0x100, output) && output == sentinel,
+                "Incomplete wind instruction admitted");
+    }
+    output = sentinel;
+    require(!Build(nullptr, Context.size(), Site, Site + 0x100, output) && output == sentinel,
+            "Null original wind instruction admitted");
+    const std::uint64_t next = 1ull << 33;
+    for (const auto delta : {std::int64_t(-0x80000000ll), std::int64_t(-1), std::int64_t(0),
+                             std::int64_t(1), std::int64_t(0x7fffffff)}) {
+        require(Build(Context.data(), Context.size(), next - 8, next + delta, output),
+                "Reachable wind constant refused");
+        std::int32_t displacement;
+        std::memcpy(&displacement, output.data() + 4, sizeof(displacement));
+        require(displacement == delta, "Wind rel32 does not reach its owned constant");
+    }
+    for (const auto delta : {std::int64_t(-0x80000001ll), std::int64_t(0x80000000ll)}) {
+        output = sentinel;
+        require(!Build(Context.data(), Context.size(), next - 8, next + delta, output) && output == sentinel,
+                "Unreachable wind constant admitted");
+    }
+    output = sentinel;
+    require(!Build(Context.data(), Context.size(), UINT64_MAX - 7, 0, output) && output == sentinel,
+            "Overflowing wind instruction admitted");
+
+#if defined(__x86_64__)
+    constexpr std::size_t size = 16384;
+    auto* code = static_cast<std::uint8_t*>(runtime_low_map(size, PROT_READ | PROT_WRITE));
+    if (!code) throw std::runtime_error("Cannot allocate wind instruction fixture");
+    struct Release { void* pointer; ~Release() { munmap(pointer, size); } } release{code};
+    constexpr std::size_t original_at = 0, replacement_at = 64, constant_at = 128;
+    const float authored[4] = {AuthoredSeconds, AuthoredSeconds, AuthoredSeconds, AuthoredSeconds};
+    std::memcpy(code + constant_at, authored, sizeof(authored));
+    // Store xmm12's product and xmm14's unchanged phase/fade step, then ret.
+    constexpr std::uint8_t finish[] = {0xc5,0x78,0x11,0x22,0xc5,0x7a,0x11,0x72,0x10,0xc3};
+    std::memcpy(code + original_at, Context.data(), Context.size());
+    std::memcpy(code + original_at + Context.size(), finish, sizeof(finish));
+    if (!Build(code + original_at, Context.size(), reinterpret_cast<std::uint64_t>(code + replacement_at),
+               reinterpret_cast<std::uint64_t>(code + constant_at), output))
+        throw std::runtime_error("Cannot build executable wind instruction fixture");
+    std::memcpy(code + replacement_at, Context.data(), Context.size());
+    std::memcpy(code + replacement_at, output.data(), output.size());
+    std::memcpy(code + replacement_at + Context.size(), finish, sizeof(finish));
+    if (mprotect(code, size, PROT_READ | PROT_EXEC)) throw std::runtime_error("Cannot execute wind instruction fixture");
+    for (const std::array<float,4>& vector : {std::array<float,4>{13.7957659f,8.6758499f,32.8494225f,0.f},
+                                            std::array<float,4>{-2.f,.5f,-.125f,4.f},
+                                            std::array<float,4>{0.f,-0.f,1.e-10f,-1.e10f}}) {
+        std::array<float,4> previous{};
+        bool have_previous = false;
+        // Includes the observed 1/80 -> 1/60 amplitude-pop transition and
+        // rates 30..240. The variable clock must survive both snippets.
+        for (const float step : {1.f/480, 1.f/240, 1.f/120, 1.f/80, 1.f/60, 1.f/80, .0031f}) {
+            float before[5]{}, after[5]{};
+            bb_timing_fixture_wind_run(vector.data(), &step, before, code + original_at);
+            bb_timing_fixture_wind_run(vector.data(), &step, after, code + replacement_at);
+            for (unsigned lane = 0; lane < 4; ++lane) {
+                if (before[lane] != vector[lane] * step || after[lane] != vector[lane] * AuthoredSeconds ||
+                    (have_previous && std::bit_cast<std::uint32_t>(after[lane]) != std::bit_cast<std::uint32_t>(previous[lane])))
+                    throw std::runtime_error("Emitted wind rewrite still changes amplitude with frame time");
+                previous[lane] = after[lane];
+            }
+            if (before[4] != step || after[4] != step)
+                throw std::runtime_error("Emitted wind rewrite changed the phase/fade clock");
+            if (step == AuthoredSeconds && std::memcmp(before, after, 4 * sizeof(float)))
+                throw std::runtime_error("Emitted wind rewrite differs from original authored 30-fps amplitude");
+            have_previous = true;
+            ++checks.executed;
+        }
+    }
+#endif
+    return checks;
+}
 }
 
 int main(int argc, char** argv) {
@@ -285,7 +390,9 @@ int main(int argc, char** argv) {
             if (ok) ++passed; else ++failed;
         }
         const unsigned steps = check_steps();
-        std::printf("],\"passed\":%u,\"failed\":%u,\"step_checks\":%u,\"mutation\":%s}\n", passed, failed, steps, mutate ? "true" : "false");
+        const auto wind = check_wind_vector();
+        std::printf("],\"passed\":%u,\"failed\":%u,\"step_checks\":%u,\"wind_patch_checks\":%u,\"wind_instruction_cases\":%u,\"mutation\":%s}\n",
+                    passed, failed, steps, wind.admission, wind.executed, mutate ? "true" : "false");
         return failed ? 1 : 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "Timing verification incomplete: %s\n", error.what());

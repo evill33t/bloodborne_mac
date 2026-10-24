@@ -16,7 +16,16 @@ int main() {
     Window compile(120);assert(compile.Request(200,true));
     assert(compile.Request(201,false) && !compile.total && compile.first==200);
     assert(!compile.Request(320,true) && !compile.Request(199,true));
-    auto r=InitialRecord();assert(r.size()==120 && sizeof(r)==480);
+    auto r=InitialRecord();assert(SchemaValue==5 && r.size()==255 && sizeof(r)==1020);
+    for(const auto counter:{FixedFetchSamples,FixedMatrixSamples,FixedUndeformedSamples,FixedDeformedSamples,FixedClipSamples})assert(!r[counter]);
+    for(const auto& [minimum,maximum,count]:{std::array<unsigned,3>{FixedFetchMin,FixedFetchMax,36},
+            std::array<unsigned,3>{FixedMatrixMin,FixedMatrixMax,19},
+            std::array<unsigned,3>{FixedUndeformedMin,FixedUndeformedMax,3},
+            std::array<unsigned,3>{FixedDeformedMin,FixedDeformedMax,3},
+            std::array<unsigned,3>{FixedClipMin,FixedClipMax,4}}) {
+        assert(minimum+count==maximum && maximum+count<=Words);
+        for(unsigned k=0;k<count;++k)assert(r[minimum+k]==~0u && !r[maximum+k]);
+    }
     assert(!MatrixIdentityUniform(r) && !MatrixVaried(r,0) && r[MatrixSelectedIndex]==~0u);
     for(auto site:{Site::Wind,Site::View,Site::Camera})assert(!Varied(r,site,0) && !SelectedLeafUniform(r,site));
     r[WindSamples]=r[ViewSamples]=r[CameraSamples]=2;
