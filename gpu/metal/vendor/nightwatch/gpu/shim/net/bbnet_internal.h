@@ -79,6 +79,7 @@ bool guest_read(std::uintptr_t addr, void* out, std::size_t n);
 // start-up. Without it guest_read checks the range with VirtualQuery first, which costs
 // milliseconds per call on Windows once the address space is large (GitHub issue #3).
 void set_guest_reader(bool (*reader)(std::uint64_t addr, void* out, std::size_t n));
+void set_guest_writer(bool (*writer)(std::uint64_t addr, const void* in, std::size_t n));
 // Writes n bytes at `addr` when the range is committed writable memory.
 bool guest_write(std::uintptr_t addr, const void* in, std::size_t n);
 // BB_PARTY_TRACE=1: log every party request and answer.

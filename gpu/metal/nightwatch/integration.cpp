@@ -9,6 +9,9 @@
 #include "../vendor/nightwatch/gpu/shim/party/party_runtime.h"
 #include "../vendor/nightwatch/gpu/shim/party/party_director.h"
 #include "../vendor/nightwatch/gpu/shim/party/coop_hooks.h"
+#include "../vendor/nightwatch/gpu/shim/party/game_state.h"
+#include "../vendor/nightwatch/gpu/shim/party/lamp_travel.h"
+#include "../vendor/nightwatch/gpu/shim/bbport_settings.h"
 #include "../vendor/nightwatch/gpu/shim/net/bbnet_internal.h"
 #include "engine/addr.h"
 extern "C" void nw_net_configure(const char*,const char*);
@@ -65,7 +68,10 @@ void Configure(const MacSettings::Values& v) {
     setenv("BB_PARTY_AUTOCONTINUE","0",1);
     setenv("BB_PARTY_RESTARTED","0",1);
 #ifdef BB_HAS_NIGHTWATCH
+    BbSettings::Get().party_rot=v.nightwatch_rot;
     nw_net_configure(std::getenv("BB_GAME_DIR"),std::getenv("BB_USER_DIR"));
+    bbnet::set_guest_reader(&coop::SafeRead);
+    bbnet::set_guest_writer(&coop::SafeWrite);
 #endif
 }
 void Register() {
@@ -86,6 +92,7 @@ void Install() {
     const char* hash=std::getenv("BB_MAC_EBOOT_SHA256");
     if (!hash || !engine_eboot_supported(hash)) throw std::runtime_error("Nightwatch requires a supported Bloodborne 1.09 executable.");
     coop::HooksInit(image,image_size);
+    coop::lamptravel::Install(image,image_size);
     BbGameMenu::InstallNightwatchMessages();
     coop::PartyInit(image,image_size);
     MacFeatures::SetGameTick(&coop::CoopTick);
