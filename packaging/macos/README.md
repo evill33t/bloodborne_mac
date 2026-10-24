@@ -359,8 +359,7 @@ Verified on an M4 Max with the supplied CUSA00900 dump:
 Remaining limitations include other tessellation layouts, some materials/effects,
 cinematic video decoding, longer gameplay/save testing and DLC-area access.
 Recognition of DLC entries does not prove DLC gameplay. Existing
-Windows FSR/DLSS/frame generation and the Windows launcher are not part of
-the Metal port. No packaged/signed app is provided yet.
+The legacy Vulkan FSR/DLSS backend and desktop launchers have been removed. No packaged/signed app is provided yet.
 
 ## Implemented and verified
 
@@ -433,14 +432,11 @@ python3 scripts/macos_preflight.py /path/to/CUSA00900 \
 The report distinguishes the SFO version from the verified patch **layout**.
 A matching patch fingerprint only covers the sites used by the built-in FPS and
 resolution patches; it does not establish that the entire executable is unmodified.
-The upstream Windows launcher's metadata-based version selection is unchanged;
-the macOS launcher requires the verified executable patch layout.
-The existing host-CPU auto-detection is Windows-specific. For development linking
-on this Mac, `BB_LEGACY_CPU=0` was used only after the Rosetta probe verified all
-required extensions; this avoids applying the experimental legacy CPU translation
-profile merely because the Python process cannot query CPUID. The macOS launcher
-advertises AVX for its child process, and the runtime checks the required CPU
-features before entering guest code.
+The macOS launcher requires the verified executable patch layout. It advertises
+AVX for its Rosetta child process, and the runtime checks the required CPU
+features before entering guest code. The optional native arm64 runtime uses
+`bbcpu` for guest instructions. Legacy host-CPU rewrites and Windows red-zone
+patches have been removed from the image preparation tools.
 
 To inspect a shader conversion:
 

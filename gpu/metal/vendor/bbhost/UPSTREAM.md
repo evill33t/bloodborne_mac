@@ -52,3 +52,10 @@ Additional dependencies:
 
 Game movies and message banks are generated locally from the user's dump into
 the writable data directory. No original executable or game assets are vendored.
+
+## macOS-only source cleanup (24 October 2026)
+
+Inactive Windows/Linux host branches were removed from the adapted sources.
+Darwin behavior, CPU architecture switches, guest ABI interfaces and original
+license notices are retained. The shared runtime errno mapping is compiled as a
+separate provider so standalone Darwin memory fixtures use the same mapping.

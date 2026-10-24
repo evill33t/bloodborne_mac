@@ -3,6 +3,7 @@
 An experimental Bloodborne port for **Apple Silicon**, with a **direct Metal renderer**
 and a macOS runtime for the original PS4 game code. Graphics commands and GCN shaders
 are translated to Metal; the Mac game process does not require Vulkan or MoltenVK.
+This repository targets macOS only.
 
 **Status: 24 October 2026.** The game boots, loads saves and supports movement,
 combat, audio, controller input and area transitions. Both the default Rosetta
@@ -97,7 +98,7 @@ cd bloodborne_mac
 bash build.sh --test
 ```
 
-On macOS this builds native Metal development tools in `out/macos/` and the
+This builds native Metal development tools in `out/macos/` and the
 Rosetta game runtime in `out/macos-runtime/`. Launch with your own paths:
 
 ```sh
@@ -191,9 +192,25 @@ rendering. Current evidence and implementation details are recorded in:
 - [bbhost timing, settings, plugins, mods and online integration](docs/BBHOST_MAC_INTEGRATION.md)
 - [External mod formats](docs/MODS.md) and [input configuration](docs/INPUT.md)
 
-Inherited Linux/Vulkan and Windows sources remain in the tree. Their build and
-feature documentation is separate: [Windows build guide](packaging/windows/README.md)
-and [original upstream README](docs/original-readme/README.md).
+The build and launch entry points support macOS only. Legacy Windows/MSYS2,
+Linux/Nix/AppImage and desktop-launcher paths, the Vulkan renderer and its
+FSR/DLSS integrations, unused submodules, and host-specific compatibility layers
+have been removed. Both Rosetta and native arm64 `bbcpu` remain supported Mac
+runtime modes; the x86-64 guest ABI and PS4 ELF/module tooling are still required.
+
+The small retained `gpu/shadps4/` subset supplies shared type definitions, GNM
+initialization packets and development host shaders. The native shader tools use
+glslang and SPIRV-Cross to translate SPIR-V intermediates to MSL. Their pinned
+SDK tag and compiler target names contain “Vulkan,” but they do not link a Vulkan
+loader or provide a Vulkan rendering backend. Source dependencies are fetched by
+CMake; no Git submodule initialization is needed.
+
+After building, run the Python tooling checks with:
+
+```sh
+ROSETTA_ADVERTISE_AVX=1 python3 -m unittest discover -s tests
+python3 scripts/macos_trophy_catalog.py --check
+```
 
 ## License
 
@@ -206,23 +223,22 @@ Game executables, assets, trophy artwork and player data are not distributed her
 ## Credits
 
 This port builds on the work below. The tables identify imported code,
-adaptations, dependencies and research references, including components retained
-from the Windows/Linux foundation. A credit for an inherited component does not
-mean that feature is enabled in the Mac renderer.
+adaptations, dependencies and research references. Historical platform names
+describe the project's origins; the supported host and renderer are macOS and Metal.
 
 ### Port foundations and adapted code
 
 | Repository | What this project uses |
 | --- | --- |
-| [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) — Mohammed Albarghouthi / Supermedo and contributors | The Windows branch this fork builds on: loader/runtime, preparation and patch/mod tooling, launcher/settings and packaging work, plus its upstream integrations. |
+| [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) — Mohammed Albarghouthi / Supermedo and contributors | The Windows branch this fork builds on: loader/runtime, preparation and patch/mod tooling, and the foundation for settings and upstream integrations. |
 | [deadinside28/bloodborne_pc](https://github.com/deadinside28/bloodborne_pc) — bbport | The original native Linux port and HLE/loader foundation. Selected dependency-free PM4 decoder code and tests are also imported at `3c57da4`; input, camera layout, temporal rendering, filtering and cache policies informed Mac adaptations. [Provenance](gpu/metal/vendor/bbport/UPSTREAM.md). |
-| [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) | PS4 GCN/PM4, shader, GPU/register, GNM, VideoOut and HLE work underlying the inherited renderer/runtime; network, NP and shadNet sources; TLS and module-API references. The inherited Vulkan tree and the selected Metal sources retain their shadPS4 notices. [GPU source record](gpu/VENDOR.txt), [network source record](gpu/bbnet/SHADNET-PORT.md). |
+| [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) | PS4 GCN/PM4, GNM initialization, shared types and development host shaders, plus HLE, TLS, module-API and network references used by the selected Metal sources and THD adapter. Original notices remain with the retained code. [GPU source record](gpu/VENDOR.txt), [network source record](gpu/bbnet/SHADNET-PORT.md). |
 | [BlackLineInteractive/Driveclub-Port](https://github.com/BlackLineInteractive/Driveclub-Port) | The selected direct Metal backend, GCN-to-MSL compiler, command processor, GNM, VideoOut and event-queue code at `408fd84`, adapted extensively for Bloodborne's resources, shaders, synchronization and presentation. [Provenance and local changes](gpu/metal/vendor/bloodborne/UPSTREAM.md). |
 | [droogie/bbhost](https://github.com/droogie/bbhost) | Selected engine timing, game-menu builders, parameter/event/player helpers, mod/patch support, plugin SDK and randomizer/boss-rush/mutator/debug-menu plugins. Its THD network/account/session code supplies the private-server client foundation. Pinned at `566184a`; adapted to Darwin and the existing Metal renderer. [Provenance](gpu/metal/vendor/bbhost/UPSTREAM.md). |
 | [bloodborne-native/bloodborne-recomp](https://github.com/bloodborne-native/bloodborne-recomp) | The `bbcpu` x86-64 decoder, interpreter, arm64 JIT, CPU fixtures and generated-library interface at `b9652d7`, with local ABI, TLS, timing and CPU-context changes. The AOT generator and generated game functions are not imported. [Provenance](third_party/bbcpu/UPSTREAM.md). |
 | [bloodborne-native/bloodborne-runtime](https://github.com/bloodborne-native/bloodborne-runtime) | Command-writer RVAs, per-buffer recursive-lock/entry guards and resolution-dependent direct-memory sizing, adapted from `6228f43`. Its renderer plan also informed later analysis. [Integration report](docs/MACOS_NATIVE_UPSTREAM_2026-10-22.md). |
 | [pyL1nx/bloodborne_pc — Achievement-System-Patch](https://github.com/pyL1nx/bloodborne_pc/tree/Achievement-System-Patch) | The achievement-system foundation: trophy catalog and `trophies.log` persistence format, preserved from [snapshot `64919f7`](https://github.com/pyL1nx/bloodborne_pc/tree/64919f7da13a24bac53578acec5f74f959fe5c4e). Adapted into the shared C runtime, native Mac achievement window and in-game banners. [Achievement implementation notes](packaging/macos/README.md#achievements). |
-| [Awakenchan/BloodBorneButPc, now LanternEngine](https://github.com/Awakenchan/LanternEngine) — Awaken | The shadPS4/shadNet and bbhost THD online integration assembled for the upstream Windows port and inherited in `gpu/bbnet/`. [Attribution](gpu/bbnet/SHADNET-PORT.md). |
+| [Awakenchan/BloodBorneButPc, now LanternEngine](https://github.com/Awakenchan/LanternEngine) — Awaken | The upstream integration from which the selected bbhost THD client in `gpu/bbnet/thd/` was adapted. The unused shadNet backend has been removed. [Attribution](gpu/bbnet/SHADNET-PORT.md). |
 | [Wozzardman/shadp2p](https://github.com/Wozzardman/shadp2p) | Historical foundation of bbport's first online implementation and shadNet server reference. The Mac client currently uses the selected THD integration. |
 
 ### Libraries and tools used by the macOS path
@@ -241,40 +257,10 @@ mean that feature is enabled in the Mac renderer.
 | [madler/zlib](https://github.com/madler/zlib) | Compression support used by the engine integration and inherited networking. |
 | [Kitware/CMake](https://github.com/Kitware/CMake), [llvm/llvm-project](https://github.com/llvm/llvm-project) and [python/cpython](https://github.com/python/cpython) | Build configuration, Apple Clang/LLVM compilation and Python preparation, mod, patch and verification tooling. |
 
-### Dependencies retained from the Windows/Linux and Vulkan paths
-
-| Repository | What remains in this tree or its build tooling |
-| --- | --- |
-| [FireBurn/FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) | Native Vulkan FSR providers, with local patches. Mac presentation uses MetalFX. |
-| [GPUOpen-LibrariesAndSDKs/FidelityFX-SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | AMD FidelityFX/FSR shader and API work, including headers used by the retained FSR asset tools. |
-| [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX) | Source of the optional FSR 4 v07 shader/model asset downloads used by the Vulkan path. |
-| [IFreemz/shadPS4-Bloodborne-DLSS-FSR, now eFMann/shadPS4-Bloodborne-DLSS-FSR](https://github.com/eFMann/shadPS4-Bloodborne-DLSS-FSR) | Adapted Windows DLSS bridge. Original attribution is retained in [its license](gpu/dlss_bridge/LICENSE.txt). |
-| [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) | SDK/runtime required by the optional Windows DLSS build, under NVIDIA's separate terms. |
-| [HansKristian-Work/dxil-spirv](https://github.com/HansKristian-Work/dxil-spirv) | Pinned DXIL-to-SPIR-V translator, with a local patch, for FSR asset extraction/verification tooling. |
-| [KhronosGroup/Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) and [KhronosGroup/Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader) | Vulkan API headers and loader for the inherited backend. |
-| [GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | Vulkan allocation management. |
-| [shadps4-emu/sirit](https://github.com/shadps4-emu/sirit) and [KhronosGroup/SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers) | SPIR-V emission and instruction definitions for the inherited shader compiler. |
-| [ocornut/imgui](https://github.com/ocornut/imgui) | Dear ImGui interfaces in the inherited backend. |
-| [FFmpeg/FFmpeg](https://github.com/FFmpeg/FFmpeg) | Media decoding in the non-Mac backend; Mac cinematic playback remains unimplemented. |
-| [fmtlib/fmt](https://github.com/fmtlib/fmt), [boostorg/boost](https://github.com/boostorg/boost) and [Tessil/robin-map](https://github.com/Tessil/robin-map) | Formatting, utility headers and hash containers used by the inherited graphics/network code. |
-| [Neargye/magic_enum](https://github.com/Neargye/magic_enum) | Compile-time enum reflection. |
-| [richgel999/miniz](https://github.com/richgel999/miniz) | Compression/archive utilities. |
-| [herumi/xbyak](https://github.com/herumi/xbyak) | x86 code emission in the inherited renderer/resource paths. |
-| [piscisaureus/wepoll](https://github.com/piscisaureus/wepoll) | Windows epoll-compatible networking. |
-| [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib) | HTTP client/server support in the inherited network bridge. |
-| [protocolbuffers/protobuf](https://github.com/protocolbuffers/protobuf) and [abseil/abseil-cpp](https://github.com/abseil/abseil-cpp) | shadNet protocol serialization and packaged Protobuf support dependencies. Abseil-derived utility helpers also appear in the vendored JSON header used on Mac. |
-| [openssl/openssl](https://github.com/openssl/openssl) and [miniupnp/miniupnp](https://github.com/miniupnp/miniupnp) | TLS and Windows UPnP/router traversal for the inherited online client. |
-| [kkAyataka/plusaes](https://github.com/kkAyataka/plusaes) | AES implementation retained in shadPS4's common code. |
-| [red-prig/fpPS4](https://github.com/red-prig/fpPS4) | Register/PM4 values credited by the retained shadPS4 AMD GPU register code. |
-| [KhronosGroup/Vulkan-ValidationLayers](https://github.com/KhronosGroup/Vulkan-ValidationLayers) | Vulkan format-compatibility classifications and referenced shader/format handling in inherited sources. |
-| [chaotic-cx/mesa-mirror](https://github.com/chaotic-cx/mesa-mirror) | RADV sampler-address mapping reference in the inherited Vulkan conversion code. |
-| [seladb/PcapPlusPlus](https://github.com/seladb/PcapPlusPlus) | Darwin gateway-discovery code adapted into the retained shadPS4 network utility. |
-| [pyinstaller/pyinstaller](https://github.com/pyinstaller/pyinstaller) and [python-pillow/Pillow](https://github.com/python-pillow/Pillow) | Windows launcher packaging and inherited image/launcher tooling. |
-| [msys2/MSYS2-packages](https://github.com/msys2/MSYS2-packages), [msys2/MINGW-packages](https://github.com/msys2/MINGW-packages) and [ninja-build/ninja](https://github.com/ninja-build/ninja) | Windows build/distribution environment and Ninja builds. |
-
-The inherited half-precision library is Christian Rau's
-[half](https://half.sourceforge.net/), with its [license retained here](gpu/third_party/half/LICENSE.txt).
-The debug-menu font is generated from the public-domain X11 k14/7x14 fonts;
+The retained development shader headers include AMD's
+[FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) helpers, with
+their embedded MIT notices. Production scaling uses MetalFX. The debug-menu font
+is generated from the public-domain X11 k14/7x14 fonts;
 [bbhost's provenance](gpu/metal/vendor/bbhost/UPSTREAM.md) records that source.
 
 ### Research and verification references

@@ -96,3 +96,10 @@ encoder boundaries. It retains nonblocking commit, fence and snapshot lifetime
 paths. Native-1080p comparisons did not establish a repeatable FPS gain, so
 it remains disabled by default. See
 [the scheduling report](../../../../docs/MACOS_PIPELINE_SCHEDULING_2026-10-22.md).
+
+## macOS-only source cleanup (24 October 2026)
+
+Inactive Windows/Linux host branches were removed from the adapted sources.
+Darwin behavior, CPU architecture switches, guest ABI interfaces and original
+license notices are retained. The shared runtime errno mapping is compiled as a
+separate provider so standalone Darwin memory fixtures use the same mapping.
