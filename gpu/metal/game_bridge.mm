@@ -344,8 +344,6 @@ extern "C" int bbgpu_overlay_captures_input(void) {
         MacAchievements::CapturesInput.load(std::memory_order_acquire) ||
         MacInput::CapturesInput.load(std::memory_order_acquire);
 }
-extern "C" int vulkan_smoke(void) { return -1; }
-
 extern "C" int bbmetal_window_main(int argc,char** argv,int (*guest_main)(int,char**)) {
     if (!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMEPAD)) {
         fprintf(stderr,"SDL video: %s\n",SDL_GetError()); return 1;

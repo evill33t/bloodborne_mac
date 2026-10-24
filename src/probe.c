@@ -1,4 +1,4 @@
-/* Minimal x86-64 native loader experiment. Not a PS4 emulator or game port. */
+/* macOS loader for PS4 guest images, using Rosetta or the arm64 bbcpu translator. */
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
@@ -15,7 +15,7 @@
 #include "runtime_trophy.h"
 #include "gpu/bbgpu.h"
 #if (!defined(__x86_64__) && !defined(BB_CPU_TRANSLATOR)) || !defined(__GNUC__)
-#error This prototype requires x86-64 GCC or Clang (including MinGW).
+#error The Rosetta runtime requires x86-64 Clang; use BB_CPU_TRANSLATOR for arm64.
 #endif
 #include <sys/mman.h>
 #include <unistd.h>
@@ -47,7 +47,6 @@ static LinkedModule modules[16];
 static uint64_t module_count;
 static int entered_game;
 static int gpu_enabled;
-int vulkan_smoke(void);
 
 static __attribute__((noreturn)) void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -93,7 +92,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
-#if !defined(_WIN32) && !defined(BB_CPU_TRANSLATOR)
+#ifndef BB_CPU_TRANSLATOR
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
 __asm__(".text\n.globl _enter_on_stack\n_enter_on_stack:\n"
@@ -102,19 +101,13 @@ __asm__(".text\n.globl _enter_on_stack\n_enter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
-/* The game is built for the PS4's AMD Jaguar CPU: AVX throughout, and BMI1 (andn, bextr, blsi, blsr,
- * tzcnt), MOVBE, LZCNT and POPCNT in thousands of places, its libc's string functions among them.
- * Without them it stopped at the first one with an illegal instruction (0xc000001d in libc.prx
- * while module 0 initialized), except LZCNT, which older Intel CPUs run as BSR (other results).
- * Exit code 24 with a message instead; BB_SKIP_CPU_CHECK=1 starts anyway. The Legacy CPU profile
- * (scripts/cpu_compat.py; run.py sets BB_CPU_COMPAT=1) translates BMI1, LZCNT and MOVBE in the
- * linked image, so only the others stop the game then. */
+/* Rosetta must expose the instruction set used by the PS4's AMD Jaguar CPU.
+ * The native arm64 runtime delegates those instructions to bbcpu instead. */
 static void check_cpu(void) {
 #ifdef BB_CPU_TRANSLATOR
     puts("CPU: native arm64 host with bbcpu x86-64 translation");
 #else
     if (getenv("BB_SKIP_CPU_CHECK")) return;
-    const int translated=getenv("BB_CPU_COMPAT")!=NULL;
     unsigned a=0, b=0, c=0, d=0, basic=0, leaf7=0, extended=0;
     if (__get_cpuid(1,&a,&b,&c,&d)) basic=c;
     if (__get_cpuid_max(0,NULL)>=7) { __cpuid_count(7,0,a,b,c,d); leaf7=b; }
@@ -125,18 +118,16 @@ static void check_cpu(void) {
         __asm__ volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
         avx=(low&6)==6;
     }
-    const struct { int present, translatable; const char *name; } features[]={
-        {avx,0,"AVX"}, {(leaf7>>3)&1,1,"BMI1"}, {(basic>>22)&1,1,"MOVBE"}, {(extended>>5)&1,1,"LZCNT"},
-        {(basic>>23)&1,0,"POPCNT"}, {(basic>>20)&1,0,"SSE4.2"},
+    const struct { int present; const char *name; } features[]={
+        {avx,"AVX"}, {(leaf7>>3)&1,"BMI1"}, {(basic>>22)&1,"MOVBE"}, {(extended>>5)&1,"LZCNT"},
+        {(basic>>23)&1,"POPCNT"}, {(basic>>20)&1,"SSE4.2"},
     };
-    char missing[64]="", translations[64]="";
+    char missing[64]="";
     for (size_t i=0;i<sizeof(features)/sizeof(*features);++i) {
         if (features[i].present) continue;
-        char *list=translated && features[i].translatable ? translations : missing;
-        if (*list) strcat(list,", ");
-        strcat(list,features[i].name);
+        if (*missing) strcat(missing,", ");
+        strcat(missing,features[i].name);
     }
-    if (*translations) printf("CPU: no %s; the Legacy CPU translations run instead (best effort)\n",translations);
     if (!*missing) return;
     unsigned words[12]={0};
     char brand[49]="";
@@ -147,7 +138,7 @@ static void check_cpu(void) {
     const char *name=brand;
     while (*name==' ') ++name;
     if (!*name) name="unknown processor";
-    fprintf(stderr,"STOP: unsupported CPU %s: missing %s (needs Intel Core 4th generation or newer, or AMD Ryzen)\n",name,missing);
+    fprintf(stderr,"STOP: Rosetta CPU %s is missing %s (enable ROSETTA_ADVERTISE_AVX=1 or use BB_MAC_CPU=bbcpu)\n",name,missing);
     exit(24);
 #endif
 }
@@ -342,7 +333,6 @@ void runtime_restart(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     check_cpu();
     int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
@@ -358,7 +348,7 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds]\n", argv[0]);
         return 1;
     }
     if (content_profile) {

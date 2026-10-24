@@ -29,4 +29,3 @@ void bbgpu_mouse_camera_configure(int a,float b,float x,float y,int sync) { (voi
 int bbgpu_audio_muted(void) { return 0; }
 void bbgpu_prompts_configure(const char *const *inputs,int count) { (void)inputs;(void)count; }
 unsigned bbgpu_symbol_count(void) { return 0; }
-int vulkan_smoke(void) { return -1; }

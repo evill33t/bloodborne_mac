@@ -247,7 +247,7 @@ def prepare(game, out):
                   libc_evidence=libc_evidence,
                   bundled_modules=sorted(p.name for p in (game / 'sce_module').iterdir()),
                   resources=dict(resources), resource_bytes=total_bytes,
-                  status='Prepared only; execution and Vulkan are tested separately.')
+                  status='Prepared only; guest execution and Metal rendering are tested separately.')
     (out / 'analysis.json').write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n',
                                        encoding='utf-8')
     print(f"{report['sfo'].get('TITLE')} | entry={header[4]:#x} | image={size:,} bytes")
