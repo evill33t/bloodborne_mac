@@ -25,6 +25,7 @@ coverage. Rendering correctness, performance and longer sessions remain active w
 | Presentation | MetalFX Spatial scaling and optional temporal AA. Experimental MetalFX frame interpolation is integrated and gameplay-tested, with separate rendered/displayed counters. |
 | Stability | Short gameplay and transition replays pass. Longer native runs exposed missing CPU/runtime behavior; segment-register saves, module unwind queries and guest `msync` now have fixes and focused tests. Completion of the original exception path and a post-fix long-session pass remain unproven. |
 | Online | The Hunter's Dream client, server selection and Keychain-backed device sign-in are integrated. Offline is the default; live authentication, summons and cross-client compatibility still need validation. |
+| Nightwatch Co-op | Experimental source integration with Host/Join settings, encrypted peer networking, shared progression hooks and isolated saves. Requires Rosetta; live co-op gameplay and Internet/NAT traversal on Mac remain unverified. |
 
 The [24 October resource and shadow report](docs/MACOS_METAL_RESOURCES_2026-10-24.md)
 records the latest changes and test boundaries. Earlier clean native 1080p replays
@@ -63,6 +64,9 @@ benchmarks or an isolated speedup claim. See the
 - **External mods and patches:** replacement files, parameter edits, XML/TOML
   patches and opt-in randomizer, boss rush, mutator and developer-menu plugins.
   The original dump stays read-only; generated images and overlays live separately.
+- **Nightwatch Co-op (experimental):** Host/Join controls in Settings, 2–4 hunters,
+  Internet/LAN party codes, leave/rejoin, and optional Rot penalties. Co-op saves
+  and launch snapshots are separate from single-player data. See setup below.
 - **DLC discovery and separate player data:** matching DLC folders can be found
   automatically, with explicit overrides for DLC, saves, settings and build paths.
 
@@ -150,12 +154,53 @@ Settings support keyboard, mouse and controller navigation. Opening settings or
 text entry releases mouse capture; the game continues running behind settings.
 Return or Cross/A confirms character-name entry; Escape or Circle/B cancels.
 
+### Nightwatch Co-op (experimental)
+
+This is a modified macOS integration of
+[Nightwatch Co-op](https://github.com/vladtepes22/NightwatchCoop), pinned at
+[`db7c9fb2`](https://github.com/vladtepes22/NightwatchCoop/commit/db7c9fb2f07a007a9bb53d3056a425c887c9d4b3).
+It retains the direct Metal renderer and existing Mac controls. The Windows
+launcher is not used. **Live multiplayer gameplay has not been verified on Mac.**
+
+1. Build the default Rosetta runtime and launch with `bash run.sh`. Native
+   `BB_MAC_CPU=bbcpu` currently does not support Nightwatch's x86 hook callbacks.
+2. Open Settings with F1 or Command-comma. Under **Nightwatch Co-op**, choose
+   **Host a party** or **Join a party**, set a unique hunter name and the same
+   party size (2–4). A joiner pastes the host's full `BBP3-…` code.
+3. Disable gameplay plugins, then choose **Apply & restart**. Continue a co-op
+   character or create a new one; new characters finish their prologue first.
+4. The host copies the **Internet code** or **LAN code** from Settings and shares
+   it with invited players. **Leave party** and **Rejoin party** operate on the
+   current session. Select **Off** and restart to return to single-player saves
+   and the existing private-server option.
+
+Use matching Mac builds, game executables, frame caps, patches and loose-file
+mods on every machine. Build, hook and content compatibility checks remain
+enabled; compatibility with upstream Windows Nightwatch releases is not claimed.
+Nightwatch replaces The Hunter's Dream networking for the run and uses direct
+player connections. Internet connections need a reachable host port (default
+**9307 TCP/UDP**); Mac UPnP port mapping is not implemented. DHT rendezvous stays
+off. A LAN code is for players on the same network or an appropriate VPN.
+
+Co-op uses `$BB_USER_DIR/nightwatch/` beneath the original selected user root,
+including its own `savedata/`, trophies and party state. Existing solo characters
+are not copied automatically. Before each co-op launch, existing co-op saves are
+snapshotted under `nightwatch/save_backups/`; snapshots are retained. Shared
+progression and NPC choices can persist in co-op saves. Keep all players on the
+same frame cap, and treat higher rates as experimental.
+
+Credits: **Nightwatch Co-op by vladtepes22**, **visy's seamless co-op**, and
+**Lantern Engine by Awaken (https://github.com/Awakenchan/LanternEngine)**.
+This is an unofficial, modified integration, not an official Lantern Engine
+release. [Source provenance, notices and port boundaries](gpu/metal/vendor/nightwatch/UPSTREAM.md).
+
 The default writable root is `out/macos-data/`:
 
 | Path or override | Purpose |
 | --- | --- |
 | `prepared/` | Generated executable, patches and content metadata. |
 | `user/` | Game saves and `trophies.log`. |
+| `user/nightwatch/` | Isolated Nightwatch saves, trophies, party state and launch snapshots. |
 | `macos-settings.ini` | Saved Mac display, graphics and runtime settings. |
 | `mods/`, `mods.json`, `bbhost.toml` | External mods, plugin and engine configuration. |
 | `BB_DATA_DIR` | Change the complete writable root. |
@@ -216,7 +261,9 @@ python3 scripts/macos_trophy_catalog.py --check
 
 The root project is **GPL-2.0-or-later**; see [LICENSE](LICENSE). As recorded in the
 [bbhost notices](gpu/metal/vendor/bbhost/UPSTREAM.md), the combined macOS runtime
-incorporating bbhost is **GPL-3.0-or-later**. Third-party components retain their
+incorporating bbhost is **GPL-3.0-or-later**. Selected Nightwatch/Lantern code also
+retains the [Lantern attribution and modified-version terms](gpu/metal/vendor/nightwatch/NOTICE).
+Third-party components retain their
 own licenses and copyright notices; include those when distributing builds.
 Game executables, assets, trophy artwork and player data are not distributed here.
 
@@ -235,6 +282,7 @@ describe the project's origins; the supported host and renderer are macOS and Me
 | [shadps4-emu/shadPS4](https://github.com/shadps4-emu/shadPS4) | PS4 GCN/PM4, GNM initialization, shared types and development host shaders, plus HLE, TLS, module-API and network references used by the selected Metal sources and THD adapter. Original notices remain with the retained code. [GPU source record](gpu/VENDOR.txt), [network source record](gpu/bbnet/SHADNET-PORT.md). |
 | [BlackLineInteractive/Driveclub-Port](https://github.com/BlackLineInteractive/Driveclub-Port) | The selected direct Metal backend, GCN-to-MSL compiler, command processor, GNM, VideoOut and event-queue code at `408fd84`, adapted extensively for Bloodborne's resources, shaders, synchronization and presentation. [Provenance and local changes](gpu/metal/vendor/bloodborne/UPSTREAM.md). |
 | [droogie/bbhost](https://github.com/droogie/bbhost) | Selected engine timing, game-menu builders, parameter/event/player helpers, mod/patch support, plugin SDK and randomizer/boss-rush/mutator/debug-menu plugins. Its THD network/account/session code supplies the private-server client foundation. Pinned at `566184a`; adapted to Darwin and the existing Metal renderer. [Provenance](gpu/metal/vendor/bbhost/UPSTREAM.md). |
+| [vladtepes22/NightwatchCoop](https://github.com/vladtepes22/NightwatchCoop), visy, and Lantern Engine by Awaken (https://github.com/Awakenchan/LanternEngine) | Selected party engine, peer networking, shared campaign rules, byte-checked hooks and co-op patch definitions at `db7c9fb2`. Modified for Darwin, our existing timing callback, native Mac settings and separate saves; no Windows launcher or Vulkan renderer. [Provenance and notices](gpu/metal/vendor/nightwatch/UPSTREAM.md). |
 | [bloodborne-native/bloodborne-recomp](https://github.com/bloodborne-native/bloodborne-recomp) | The `bbcpu` x86-64 decoder, interpreter, arm64 JIT, CPU fixtures and generated-library interface at `b9652d7`, with local ABI, TLS, timing and CPU-context changes. The AOT generator and generated game functions are not imported. [Provenance](third_party/bbcpu/UPSTREAM.md). |
 | [bloodborne-native/bloodborne-runtime](https://github.com/bloodborne-native/bloodborne-runtime) | Command-writer RVAs, per-buffer recursive-lock/entry guards and resolution-dependent direct-memory sizing, adapted from `6228f43`. Its renderer plan also informed later analysis. [Integration report](docs/MACOS_NATIVE_UPSTREAM_2026-10-22.md). |
 | [pyL1nx/bloodborne_pc — Achievement-System-Patch](https://github.com/pyL1nx/bloodborne_pc/tree/Achievement-System-Patch) | The achievement-system foundation: trophy catalog and `trophies.log` persistence format, preserved from [snapshot `64919f7`](https://github.com/pyL1nx/bloodborne_pc/tree/64919f7da13a24bac53578acec5f74f959fe5c4e). Adapted into the shared C runtime, native Mac achievement window and in-game banners. [Achievement implementation notes](packaging/macos/README.md#achievements). |

@@ -38,7 +38,7 @@ if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
         add_executable(bb-nightwatch-${name}-tests "${NW_VENDOR}/tests/test_party_${name}.cpp"
             "${NW_SHIM}/party/party_${name}.cpp" "${NW_SHIM}/net/json.cpp")
         target_include_directories(bb-nightwatch-${name}-tests PRIVATE "${NW_SHIM}" "${NW_SHIM}/net")
-        target_compile_definitions(bb-nightwatch-${name}-tests PRIVATE BB_PARTY_PROGRESS_NO_GAME=1 BB_PARTY_TRAVEL_NO_GAME=1 BB_PARTY_CHALICE_NO_GAME=1)
+        target_compile_definitions(bb-nightwatch-${name}-tests PRIVATE BB_SOURCE_DIR="${NW_VENDOR}" BB_PARTY_PROGRESS_NO_GAME=1 BB_PARTY_TRAVEL_NO_GAME=1 BB_PARTY_CHALICE_NO_GAME=1)
         target_compile_options(bb-nightwatch-${name}-tests PRIVATE -UNDEBUG)
         add_test(NAME darwin-nightwatch-${name} COMMAND bb-nightwatch-${name}-tests)
         set_tests_properties(darwin-nightwatch-${name} PROPERTIES TIMEOUT 30)
