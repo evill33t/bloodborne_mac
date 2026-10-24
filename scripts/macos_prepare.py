@@ -2,6 +2,7 @@
 """Prepare an isolated macOS boot image; the source dump is read-only."""
 import argparse
 import json
+import hashlib
 import os
 from pathlib import Path
 import struct
@@ -10,7 +11,7 @@ import sys
 
 from macos_preflight import inspect_game
 from macos_patch_analysis import check_selected
-from macos_nightwatch import mode as nightwatch_mode, PARTY_XML, PARTY_PATCHES, write_mod_identity
+from macos_nightwatch import mode as nightwatch_mode, frame_cap, PARTY_XML, PARTY_PATCHES, write_mod_identity
 from patches import (EBOOT_BASE, compile_patches, eboot_segments, resolution_writes, read_settings,
                      EFFECTS, external_patches, external_selection, compile_external)
 
@@ -100,9 +101,7 @@ def main():
     patches_config=Path(os.environ.get('BB_PATCHES_CONFIG',str(out.parent/'patches.json')))
     selected = external_selection(external_patches(patches_dir), patches_config)
     try:
-        fps = int(settings.get('frame_cap', '120'))
-        if fps not in (0, 30, 60, 90, 120, 144, 165, 240):
-            fps = 120  # Same fallback as the Mac settings store.
+        fps = frame_cap(settings)
         patch_report = check_selected(selected, writes, segments, fps=fps)
         patch_report['identity'] = report['loaded_image_sha256']
     except (ValueError, TypeError) as error:
@@ -115,11 +114,15 @@ def main():
     for offset, data in writes:
         blob += struct.pack('<QQ', offset, len(data)) + data
     (out / 'patches.bin').write_bytes(blob)
+    if nightwatch_mode(settings):
+        identity = hashlib.blake2b(blob + f'frame_cap={fps}\n'.encode(), digest_size=32).hexdigest()
+        (out / 'party_patch_hash.txt').write_text(f'hash {identity}\npatch Mac generated patches and {fps} FPS timing\n')
     (out / 'macos-runtime-options.json').write_text(json.dumps({
         'render_width': size[0], 'render_height': size[1],
         'direct_memory_mb': direct_memory_mb(size),
         'variable_timestep': True, 'settings': str(settings_path.resolve()),
         'engine_timing': engine_timing, 'elf_sha256': report['elf_sha256'],
+        'nightwatch_mode': nightwatch_mode(settings),
     }, indent=2) + '\n')
     print(f'macOS: prepared verified 1.09 boot image; graphics profile {args.graphics_profile}')
     print('Generated-image patches: ' + ', '.join(names))

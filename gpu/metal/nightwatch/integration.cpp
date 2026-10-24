@@ -41,7 +41,14 @@ bool ValidJoinCode(const std::string& text) {
 void Configure(const MacSettings::Values& v) {
     enabled=Available() && v.nightwatch_mode!=0;
     setenv("BB_PARTY",enabled ? (v.nightwatch_mode==1 ? "host" : "join") : "0",1);
-    if (!enabled) return;
+    if (!enabled) {
+        if (const auto previous=std::getenv("BB_MAC_NIGHTWATCH_PREVIOUS_ONLINE")) {
+            if (std::string(previous)=="unset") unsetenv("BB_ONLINE");
+            else setenv("BB_ONLINE",previous,1);
+            unsetenv("BB_MAC_NIGHTWATCH_PREVIOUS_ONLINE");
+        }
+        return;
+    }
     const char* base=std::getenv("BB_MAC_BASE_USER_DIR"),*user=std::getenv("BB_USER_DIR");
     if (!base || !user || std::filesystem::absolute(std::filesystem::path(base)/"nightwatch").lexically_normal()!=std::filesystem::absolute(user).lexically_normal())
         throw std::runtime_error("Launch Nightwatch through run.sh to keep co-op saves separate.");
@@ -55,6 +62,10 @@ void Configure(const MacSettings::Values& v) {
         if (plugin.loaded && plugin.enabled) throw std::runtime_error("Disable gameplay plugins before starting Nightwatch co-op.");
     setenv("BB_OUT_DIR",(std::filesystem::path(std::getenv("BB_DATA_DIR"))/"prepared").c_str(),1);
     setenv("BB_GPU_USER_DIR",std::getenv("BB_USER_DIR"),1);
+    if (!std::getenv("BB_MAC_NIGHTWATCH_PREVIOUS_ONLINE")) {
+        const auto previous=std::getenv("BB_ONLINE");
+        setenv("BB_MAC_NIGHTWATCH_PREVIOUS_ONLINE",previous ? previous : "unset",1);
+    }
     setenv("BB_ONLINE","1",1);
     setenv("BB_PARTY_NAME",v.nightwatch_name.c_str(),1);
     setenv("BB_PARTY_CODE",v.nightwatch_code.c_str(),1);

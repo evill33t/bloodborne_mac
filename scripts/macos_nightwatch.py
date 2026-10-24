@@ -45,6 +45,14 @@ def user_directory(settings, base, cpu='rosetta'):
     return target
 
 
+def frame_cap(settings):
+    try:
+        value = float(settings.get('frame_cap', '30'))
+    except ValueError:
+        return 30
+    return int(value) if value in (0, 30, 60, 90, 120, 144, 165, 240) else 30
+
+
 def snapshot(user):
     """Back up only this mode's existing saves, before the runtime can write them."""
     user = Path(user)
@@ -88,7 +96,8 @@ def write_mod_identity(game, source, out):
             continue
         name = rel.as_posix()
         names.append(name)
-        digest.update(name.encode() + b'\0')
+        encoded = name.encode()
+        digest.update(len(encoded).to_bytes(8, 'little') + encoded + file.stat().st_size.to_bytes(8, 'little'))
         with file.open('rb') as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                 digest.update(chunk)
