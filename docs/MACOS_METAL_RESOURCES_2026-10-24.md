@@ -273,6 +273,24 @@ preflight and separate preparation pass, and the complete relative-name,
 size/mtime inventory matches the previous sources. The new gameplay cohort
 keeps the previous evidence intact; see [SSD validation](MACOS_SSD_TESTS_2026-10-24.md).
 
+The first SSD replay then identified the original failure: `std::bad_alloc`
+on `GXRenderThread`, followed by an uncaught-exception debug termination.
+The optional throw observer ran before cleanup. This failed interval lasts
+581.223 seconds to the last submission, with four travel requests; a complete
+780-second pass is not claimed. The immediate throw caller is a libc helper,
+so the failed allocation's size and heap are not yet identified. See the SSD
+report for the binary identity, counters and unchanged-source verification.
+
+A separate quiet CPU benchmark compared the exact payload loop with system
+`memcmp` and wider bounded NEON loops. For a 256 MiB source pass plus separate
+baselines, medians were 4.954 ms for the current loop, 5.099 ms for `memcmp`
+and 4.882 ms for the best wider loop. Smaller source sizes showed no consistent
+gain. All bounded correctness checks passed. The approximately 72 microsecond
+best streaming difference does not justify a production change; `EqualBytes`
+and complete-validation policy remain unchanged. Complete private synthetic
+inputs, binaries, CSVs and limits are retained in
+`out/metal-resource-2026-10-24/exact-compare-review/report.txt`.
+
 The original-file inventory/hash verification passes after these changes:
 28,779 game files and35 DLC files retain sizes/mtimes, the original eboot and
 prepared-original ELF retain their expected SHA256 values, and all16 master
