@@ -115,7 +115,8 @@ def main():
     try:
         user = user_directory(settings, args.user, args.cpu)
         if mode(settings):
-            user.mkdir(parents=True, exist_ok=True)
+            user.mkdir(mode=0o700, parents=True, exist_ok=True)
+            user.chmod(0o700)
             snapshot(user)
         print(user)
     except (ValueError, OSError) as error:

@@ -18,6 +18,29 @@ template<class T> T read(const std::vector<unsigned char>& bytes,std::size_t at)
     assert(at+sizeof(T)<=bytes.size()); T result; std::memcpy(&result,bytes.data()+at,sizeof(T)); return result;
 }
 int main(int argc,char** argv) {
+    if(argc==1) {
+        char directory[]="/tmp/bb-nightwatch-config-XXXXXX";assert(mkdtemp(directory));
+        const auto root=std::filesystem::path(directory),user=root/"nightwatch";
+        std::filesystem::create_directories(user);
+        setenv("BB_DATA_DIR",directory,1);setenv("BB_MAC_BASE_USER_DIR",directory,1);
+        setenv("BB_USER_DIR",user.c_str(),1);setenv("BB_GAME_DIR",(root/"game").c_str(),1);
+        setenv("BB_ONLINE","0",1);
+        MacSettings::Values host;host.nightwatch_mode=1;host.nightwatch_players=4;host.nightwatch_port=47600;
+        MacNightwatch::Configure(host);
+        assert(MacNightwatch::Active() && std::string(std::getenv("BB_ONLINE"))=="1");
+        assert(std::string(std::getenv("BB_PARTY_MAX"))=="4" && std::string(std::getenv("BB_PARTY_PORT"))=="47600");
+        assert(MacNightwatch::ValidJoinCode("BBP3-NJR0-E43N-WWN9-2C2P"));
+        assert(!MacNightwatch::ValidJoinCode("BBP3-invalid"));
+        MacNightwatch::Configure(MacSettings::Values{});
+        assert(!MacNightwatch::Active() && std::string(std::getenv("BB_ONLINE"))=="0");
+        unsetenv("BB_ONLINE");MacNightwatch::Configure(host);MacNightwatch::Configure(MacSettings::Values{});
+        assert(!std::getenv("BB_ONLINE"));
+        setenv("BB_ONLINE","1",1);MacNightwatch::Configure(host);MacNightwatch::Configure(MacSettings::Values{});
+        assert(std::string(std::getenv("BB_ONLINE"))=="1");
+        std::filesystem::remove_all(root);
+        puts("Nightwatch configuration: strict code validation, mode environment and online restoration passed");
+        return 0;
+    }
     if(argc!=3) return 77;
     std::ifstream f(argv[1],std::ios::binary);
     std::vector<unsigned char> elf(std::istreambuf_iterator<char>(f),{});

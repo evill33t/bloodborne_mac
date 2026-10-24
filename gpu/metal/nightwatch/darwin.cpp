@@ -19,7 +19,7 @@
 #include <atomic>
 #include <pthread.h>
 
-extern "C" void restore_guest_fs() {} // Darwin's guest GS remains installed by the runtime.
+extern "C" void restore_guest_fs() {} // Darwin preserves the runtime's guest TLS selector across waits.
 extern "C" const char* bbport_build_id() { return BB_NIGHTWATCH_BUILD_ID; }
 namespace BbSettings {
 #include "party_settings.inc"

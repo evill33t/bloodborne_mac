@@ -5,12 +5,18 @@ import tempfile
 import unittest
 import zipfile
 
-from macos_nightwatch import mode, user_directory, snapshot, write_mod_identity, PARTY_PATCHES
+from macos_nightwatch import mode, frame_cap, user_directory, snapshot, write_mod_identity, PARTY_PATCHES
 from macos_prepare import settings_patches
 from test_patches import SEGMENTS
 
 
 class NightwatchTests(unittest.TestCase):
+    def test_timing_identity_uses_the_settings_loader_defaults(self):
+        for value in ('garbage', 'nan', '-1', '59', '1.5'):
+            self.assertEqual(frame_cap({'frame_cap': value}), 30)
+        self.assertEqual(frame_cap({}), 30)
+        self.assertEqual(frame_cap({'frame_cap': '60.0'}), 60)
+
     def test_off_and_malformed_modes_leave_the_save_root_alone(self):
         with tempfile.TemporaryDirectory() as tmp:
             for value in ('0', 'off', 'nan', '1.5', '3', '-1'):

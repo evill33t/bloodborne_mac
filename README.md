@@ -182,12 +182,16 @@ player connections. Internet connections need a reachable host port (default
 **9307 TCP/UDP**); Mac UPnP port mapping is not implemented. DHT rendezvous stays
 off. A LAN code is for players on the same network or an appropriate VPN.
 
-Co-op uses `$BB_USER_DIR/nightwatch/` beneath the original selected user root,
+Co-op uses a `nightwatch/` subfolder of your original `BB_USER_DIR`,
 including its own `savedata/`, trophies and party state. Existing solo characters
 are not copied automatically. Before each co-op launch, existing co-op saves are
 snapshotted under `nightwatch/save_backups/`; snapshots are retained. Shared
 progression and NPC choices can persist in co-op saves. Keep all players on the
 same frame cap, and treat higher rates as experimental.
+
+Before switching to `BB_MAC_CPU=bbcpu`, turn Nightwatch Off and restart. You can
+also disable it before launch by setting `nightwatch_mode=0` in `macos-settings.ini`
+(`1` hosts, `2` joins).
 
 Credits: **Nightwatch Co-op by vladtepes22**, **visy's seamless co-op**, and
 **Lantern Engine by Awaken (https://github.com/Awakenchan/LanternEngine)**.

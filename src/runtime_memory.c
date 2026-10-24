@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <stdatomic.h>
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it
  * for resolution-dependent targets; the macOS launcher sizes it from scene pixels. */
 static uint64_t pool_size_bytes(void) {
@@ -136,6 +137,49 @@ static size_t allocations, maps, flexible_maps, protects, queries;
 static uint64_t msync_calls;
 static uint64_t live_bytes, flexible_bytes;
 
+typedef struct { int checked,value; } HostMemoryError;
+typedef struct {
+    const char *operation;
+    uintptr_t address,output;
+    uint64_t bytes,alignment,overlap;
+    int64_t low,high,offset;
+    int address_known,prot,flags,type,fd;
+} MemoryFailureRequest;
+static _Atomic unsigned memory_failure_rows;
+/* Failure-only, bounded diagnostics. Do not infer a host error from errno
+ * after validation, and never dereference a guest stack to obtain a caller. */
+static int32_t memory_failure(MemoryFailureRequest request,const char *reason,
+                              int32_t result,HostMemoryError host) {
+    const int saved_errno=errno;
+    const int32_t saved_guest_errno=*runtime_errno();
+    const char *enabled=getenv("BB_RUNTIME_EXIT_AUDIT");
+    if(enabled && !strcmp(enabled,"1")) {
+        unsigned row=atomic_load_explicit(&memory_failure_rows,memory_order_relaxed);
+        while(row<64 && !atomic_compare_exchange_weak_explicit(&memory_failure_rows,&row,row+1,
+              memory_order_relaxed,memory_order_relaxed)){}
+        if(row<64) {
+            read_lock();
+            const uint64_t direct_live=live_bytes,flex_live=flexible_bytes;
+            const size_t regions=vma_count;
+            read_unlock();
+            char thread[64]={0};pthread_getname_np(pthread_self(),thread,sizeof(thread));
+            if(!thread[0])strcpy(thread,"unnamed");
+            fprintf(stderr,"Runtime memory audit: sequence=%u operation=%s reason=%s thread=%s"
+                " guest_caller=unavailable address_known=%d address=%#" PRIxPTR " output=%#" PRIxPTR
+                " bytes=%" PRIu64 " alignment=%" PRIu64 " low=%" PRId64 " high=%" PRId64
+                " prot=%#x flags=%#x type=%d fd=%d offset=%" PRId64 " result=%#x"
+                " host_errno_checked=%d host_errno=%d direct_live=%" PRIu64 " direct_budget=%" PRIu64
+                " flexible_live=%" PRIu64 " flexible_budget=%" PRIu64 " overwritten_flexible=%" PRIu64
+                " regions=%zu\n",row,request.operation,reason,thread,request.address_known,request.address,
+                request.output,request.bytes,request.alignment,request.low,request.high,request.prot,
+                request.flags,request.type,request.fd,request.offset,(unsigned)result,host.checked,
+                host.checked ? host.value : 0,direct_live,POOL_SIZE,flex_live,FLEXIBLE_SIZE,request.overlap,regions);
+        }
+    }
+    *runtime_errno()=saved_guest_errno;errno=saved_errno;
+    return result;
+}
+
 static int valid_alignment(uint64_t a) { return a >= PAGE && a <= POOL_SIZE && !(a & (a-1)); }
 static uint64_t align_up(uint64_t n, uint64_t a) { return (n+a-1) & ~(a-1); }
 static int host_prot(int prot) {
@@ -182,10 +226,10 @@ static int pool(void) {
     pool_fd=darwin_pool_fd();
     if (pool_fd<0) return -1;
     if (ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) {
-        close(pool_fd); pool_fd=-1; return -1;
+        int error=errno;close(pool_fd); pool_fd=-1;errno=error;return -1;
     }
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
-    if (view==MAP_FAILED) { close(pool_fd); pool_fd=-1; return -1; }
+    if (view==MAP_FAILED) { int error=errno;close(pool_fd); pool_fd=-1;errno=error;return -1; }
     backing_base=view;
     return 0;
 }
@@ -319,7 +363,8 @@ static void drop_range(uintptr_t start, uintptr_t end) {
 }
 /* Places a host mapping; with MAP_FIXED it replaces what the guest had there. */
 static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t alignment,
-                     int kind, int type, uint64_t phys) {
+                     int kind, int type, uint64_t phys,HostMemoryError *host_error) {
+    if(host_error)*host_error=(HostMemoryError){0};
     uintptr_t address=(uintptr_t)*inout;
     if (flags & MAP_FIXED_FLAG) {
         if (!address || address%PAGE) return INVALID;
@@ -328,10 +373,17 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
         address=find_free(address,size,alignment);
         if (!address) return NO_MEMORY;
     }
-    if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) return NO_MEMORY;
+    if(address<USER_MIN || address>=USER_MAX || size>USER_MAX-address)return NO_MEMORY;
+    if (host_map(address,size,host_prot(prot),kind==KIND_RESERVED,phys)) {
+        if(host_error)*host_error=(HostMemoryError){1,errno};
+        return NO_MEMORY;
+    }
     void *mapped=(void *)address;
     drop_range(address,address+size);
-    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys,++next_mapping_identity})) return NO_MEMORY;
+    if (vma_insert(vma_index(address),(Vma){address,address+size,kind,prot,type,phys,++next_mapping_identity})) {
+        if(host_error)*host_error=(HostMemoryError){1,errno};
+        return NO_MEMORY;
+    }
     if (kind==KIND_FLEXIBLE) flexible_bytes+=size;
     if (kind!=KIND_RESERVED) queue_hook(HOOK_MAP,address,size);
     *inout=mapped;
@@ -356,18 +408,23 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
+    const MemoryFailureRequest request={.operation="direct_allocate",.output=(uintptr_t)out,
+        .bytes=size,.alignment=alignment,.low=low,.high=high,.type=type,.fd=-1};
     if (!alignment) alignment = PAGE;
     if (!out || low < 0 || high < 0 || !size || size % PAGE || !valid_alignment(alignment) || type < 0 || type > 10)
-        return INVALID;
+        return memory_failure(request,"invalid-request",INVALID,(HostMemoryError){0});
     uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE;
-    if ((uint64_t)low >= end || size > end - (uint64_t)low) return NO_SPACE;
+    if ((uint64_t)low >= end || size > end - (uint64_t)low)
+        return memory_failure(request,"search-range-too-small",NO_SPACE,(HostMemoryError){0});
     write_lock();
-    if (pool()) { write_unlock(); return NO_MEMORY; }
+    if (pool()) { const int error=errno;write_unlock();return memory_failure(request,"host-pool",NO_MEMORY,(HostMemoryError){1,error}); }
     uint64_t start = align_up((uint64_t)low, alignment);
     int slot = -1;
     for (int i=0; i<LIMIT; ++i) if (!blocks[i].used) { slot=i; break; }
     for (;;) {
-        if (slot<0 || start > end || size > end-start) { write_unlock(); return NO_SPACE; }
+        if (slot<0 || start > end || size > end-start) {
+            write_unlock();return memory_failure(request,slot<0 ? "block-record-limit" : "no-contiguous-range",NO_SPACE,(HostMemoryError){0});
+        }
         int overlap = 0;
         for (int i=0; i<LIMIT; ++i) {
             Block b = blocks[i];
@@ -388,7 +445,7 @@ static int32_t map_direct_locked(void **out, uint64_t size, int prot, int flags,
     if (!out || physical < 0 || (uint64_t)physical % PAGE || !size || size % PAGE || !valid_alignment(alignment) ||
         (prot & ~0x37)) return INVALID;
     if (!direct_range_allocated((uint64_t)physical,size)) return INVALID;
-    int32_t result=place(out,size,prot,flags,alignment,KIND_DIRECT,block_type((uint64_t)physical),(uint64_t)physical);
+    int32_t result=place(out,size,prot,flags,alignment,KIND_DIRECT,block_type((uint64_t)physical),(uint64_t)physical,NULL);
     if (!result) ++maps;
     return result;
 }
@@ -469,11 +526,37 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     return 0;
 }
 static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags) {
-    if (!inout || !size || size%PAGE || (prot & ~0x37)) return INVALID;
-    if (flexible_bytes+size>FLEXIBLE_SIZE || pool()) return NO_MEMORY;
+    MemoryFailureRequest request={.operation="map_flexible",.output=(uintptr_t)inout,
+        .bytes=size,.prot=prot,.flags=flags,.fd=-1};
+    if (!inout || !size || size%PAGE || (prot & ~0x37))
+        return memory_failure(request,"invalid-request",INVALID,(HostMemoryError){0});
+    request.address=(uintptr_t)*inout;request.address_known=1;
+    if(flags&MAP_FIXED_FLAG) {
+        if(!request.address || request.address%PAGE)
+            return memory_failure(request,"invalid-fixed-address",INVALID,(HostMemoryError){0});
+        if(request.address<USER_MIN || request.address>=USER_MAX || size>USER_MAX-request.address)
+            return memory_failure(request,"fixed-address-outside-guest-range",NO_MEMORY,(HostMemoryError){0});
+        const uintptr_t end=request.address+size;
+        if((flags&MAP_NO_OVERWRITE) && overlaps(request.address,end,1))
+            return memory_failure(request,"no-overwrite",NO_MEMORY,(HostMemoryError){0});
+        for(size_t i=vma_index(request.address);i<vma_count && vmas[i].start<end;++i)if(vmas[i].kind==KIND_FLEXIBLE) {
+            const uintptr_t first=vmas[i].start>request.address ? vmas[i].start : request.address;
+            const uintptr_t last=vmas[i].end<end ? vmas[i].end : end;
+            request.overlap+=last-first;
+        }
+    }
+    // Replacement consumes only its net additional flexible bytes. Direct or
+    // reserved mappings do not contribute quota credit; do not drop or alter
+    // any existing mapping before the complete replacement has been admitted.
+    if(request.overlap>flexible_bytes || flexible_bytes-request.overlap>FLEXIBLE_SIZE ||
+        size>FLEXIBLE_SIZE-(flexible_bytes-request.overlap))
+        return memory_failure(request,"flexible-quota",NO_MEMORY,(HostMemoryError){0});
+    if(pool())return memory_failure(request,"host-pool",NO_MEMORY,(HostMemoryError){1,errno});
     uint64_t phys=flex_alloc(size);
-    if (phys==UINT64_MAX) return NO_MEMORY;
-    int32_t result=place(inout,size,prot,flags,PAGE,KIND_FLEXIBLE,0,phys);
+    if (phys==UINT64_MAX)return memory_failure(request,"no-contiguous-flex-backing",NO_MEMORY,(HostMemoryError){0});
+    HostMemoryError host_error={0};
+    int32_t result=place(inout,size,prot,flags,PAGE,KIND_FLEXIBLE,0,phys,&host_error);
+    if(result)memory_failure(request,"place",result,host_error);
     if (result) flex_free(phys,size); else ++flexible_maps;
     return result;
 }
@@ -501,16 +584,18 @@ static int32_t map_anonymous(void **out, uint64_t size, int prot, int flags,
     const unsigned shared=1, private_map=2, anonymous=0x1000, no_core=0x20000;
     const unsigned allowed=shared|private_map|anonymous|no_core|MAP_FIXED_FLAG|MAP_NO_OVERWRITE;
     const uintptr_t address=out ? (uintptr_t)*out : 0;
+    const MemoryFailureRequest request={.operation="map_anonymous",.address=address,.address_known=out!=NULL,
+        .output=(uintptr_t)out,.bytes=size,.prot=prot,.flags=flags,.fd=fd,.offset=offset};
     if (!out || !size || size>USER_MAX-USER_MIN || (prot&~7) ||
         ((unsigned)flags&~allowed) ||
         ((flags&(shared|private_map))!=shared && (flags&(shared|private_map))!=private_map))
-        return INVALID;
-    if (!(flags&anonymous)) return (int32_t)UINT32_C(0x80020013); /* ENODEV: file mappings */
-    if (fd!=-1 || offset) return INVALID;
+        return memory_failure(request,"invalid-request",INVALID,(HostMemoryError){0});
+    if (!(flags&anonymous))return memory_failure(request,"file-mapping-unsupported",(int32_t)UINT32_C(0x80020013),(HostMemoryError){0});
+    if (fd!=-1 || offset)return memory_failure(request,"anonymous-fd-or-offset",INVALID,(HostMemoryError){0});
     size=align_up(size,PAGE);
     if ((flags&MAP_FIXED_FLAG) &&
         (address<USER_MIN || address%PAGE || address>=USER_MAX || size>USER_MAX-address))
-        return INVALID;
+        return memory_failure(request,"invalid-fixed-address",INVALID,(HostMemoryError){0});
     return map_flexible(out,size,prot,flags&(MAP_FIXED_FLAG|MAP_NO_OVERWRITE));
 }
 static ABI int32_t kernel_mmap(void *address, uint64_t size, int prot, int flags,
@@ -612,7 +697,7 @@ static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_
     if ((flags & MAP_FIXED_FLAG) && overlaps((uintptr_t)*inout,(uintptr_t)*inout+size,0)) {
         write_unlock();end_memory_mutation();return NO_MEMORY;
     }
-    int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
+    int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0,NULL);
     write_unlock();
     end_memory_mutation();
     if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
