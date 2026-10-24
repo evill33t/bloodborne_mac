@@ -74,15 +74,11 @@ def main():
         parser.error('This experimental runtime requires the verified 1.09 executable layout')
     out.mkdir(parents=True, exist_ok=True)
     (out / 'macos-preflight.json').write_text(json.dumps(report, indent=2) + '\n')
-    # The executable checks its required CPU features before entering guest code.
-    # Python's Windows-only CPU autodetection would otherwise add experimental
-    # legacy instruction rewrites to a Rosetta image that already supports AVX.
-    env = dict(os.environ, BB_LEGACY_CPU='0')
     for script in ('prepare.py', 'link_libc.py', 'link_modules.py', 'content_profile.py'):
         cmd = [sys.executable, str(ROOT / 'scripts' / script), str(game), '--out', str(out)]
         if script == 'content_profile.py':
             cmd += ['--sku', os.environ.get('BB_CONTENT_SKU', 'full')]
-        subprocess.run(cmd, env=env, check=True)
+        subprocess.run(cmd, check=True)
     # This path rebuilds on every preparation. Refuse stale/mismatched linker
     # output instead of advertising unwind readiness for a legacy boot image.
     with (out / 'boot-linked.bin').open('rb') as linked:

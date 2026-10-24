@@ -5,17 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
-#ifdef _WIN32
-#include <direct.h>
-#define MAKE_DIR(path) _mkdir(path)
-#define REMOVE_DIR(path) _rmdir(path)
-#define SET_ENV(name,value) _putenv_s(name,value)
-#else
 #include <unistd.h>
 #define MAKE_DIR(path) mkdir(path,0755)
 #define REMOVE_DIR(path) rmdir(path)
 #define SET_ENV(name,value) setenv(name,value,1)
-#endif
 /* The user folder add-ons are listed from (runtime_file.c in the game): a temporary one here. */
 static char user_dir[512];
 const char *runtime_file_user_dir(void) { return user_dir; }

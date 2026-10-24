@@ -288,7 +288,7 @@ not create extra entries or banners. Platinum is awarded after the other 33
 base-game trophies; DLC trophies are excluded. Unrecorded achievements from old
 saves are only added when the game reports an unlock.
 
-The shared C catalog is generated from `launcher/bbport_trophies.py`:
+The shared C catalog is generated from `scripts/trophies.py`:
 
 ```sh
 python3 scripts/macos_trophy_catalog.py --check

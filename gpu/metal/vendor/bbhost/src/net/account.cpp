@@ -6,9 +6,7 @@
 #include <cstdlib>
 #include <mutex>
 
-#if !defined(_WIN32)
 #include <unistd.h>
-#endif
 
 namespace net {
 
@@ -107,12 +105,8 @@ void account_mark_refused(const std::string& reason) {
 
 std::string account_device_name() {
     std::string host;
-#if defined(_WIN32)
-    if (const char* c = std::getenv("COMPUTERNAME")) host = c;
-#else
     char buf[256] = {};
     if (gethostname(buf, sizeof(buf) - 1) == 0) host = buf;
-#endif
     return host.empty() ? "bbhost" : "bbhost on " + host.substr(0, 48);
 }
 

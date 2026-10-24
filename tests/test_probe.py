@@ -116,6 +116,28 @@ def exit_audit_package():
             struct.pack('<8Q',1024,1,0,0,1032,1,1,0)+image,exit_return)
 
 
+def signal_return_package(pc):
+    """Owned synthetic caller checks predicate value and guest errno through real NIDs."""
+    code=bytearray(b'\x48\x83\xec\x18')
+    def rip(opcode,target):
+        code.extend(opcode);code.extend(struct.pack('<i',target-(len(code)+4)))
+    rip(b'\xff\x15',520) # __error returns the calling guest thread's errno
+    code.extend(bytes.fromhex('48890424c7005b000000')) # save pointer; errno=91
+    if pc is None:
+        rip(b'\x48\x8d\x3d',0) # ordinary known instruction address
+    else:
+        code.extend(b'\x48\xbf'+struct.pack('<Q',pc))
+    rip(b'\xff\x15',512)
+    code.extend(bytes.fromhex('89c7488b1424833a5b7405bf010000004883c418'))
+    rip(b'\xff\x25',528)
+    image=bytes(code).ljust(16384,b'\0')
+    names=('crb5j7mkk1c#p#J','9BcDykPmo1I#p#J','after-signal-return')
+    return (struct.pack('<8s6Q',b'BBPROBE2',len(image),0,1,3,3,1)+
+            struct.pack('<3Q',0,len(image),5)+
+            b''.join(n.encode().ljust(128,b'\0') for n in names)+
+            struct.pack('<12Q',512,1,0,0,520,1,1,0,528,1,2,0)+image)
+
+
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
     def test_invalid_content_profile_is_rejected(self):
@@ -172,6 +194,17 @@ class LoaderTests(unittest.TestCase):
         r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':'0'})
         self.assertEqual(r.returncode,1,r.stdout+r.stderr)
         self.assertNotIn('Runtime exit audit:',r.stderr)
+
+    def test_signal_return_predicate_has_no_guest_trampolines(self):
+        # Values are PCs, not readable pointers. In particular bbcpu's outer
+        # return sentinel is not an installed guest signal-return trampoline.
+        for pc in (None,0,1,0x700000000010,0x700000000020,0x100000000000,
+                   0xbb6a7d0000000000,0xffffffffffffffff):
+            with self.subTest(pc=pc):
+                r=self.run_image(signal_return_package(pc))
+                self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+                self.assertIn('first unsupported PS4 import: after-signal-return',r.stdout)
+                self.assertIn('first argument: 0x0',r.stdout)
 
     def test_native_initializer_and_export_return(self):
         r=self.run_image(native_package())

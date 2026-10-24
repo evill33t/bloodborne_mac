@@ -1718,11 +1718,7 @@ extern "C" GUEST_ABI std::uint64_t frame_after() {
     return p.ret;
 }
 extern "C" void* g_frame_after_thunk = nullptr;
-#if defined(_WIN32) || defined(__APPLE__)
 #define FR_TYPE_(n)
-#else
-#define FR_TYPE_(n) ".type " #n ", @function\n"
-#endif
 #ifndef BB_CPU_TRANSLATOR
 asm(".text\n .globl _frame_ret\n" FR_TYPE_(frame_ret) "_frame_ret:\n"
     "push %rax\n push %rdx\n call *_g_frame_after_thunk(%rip)\n"

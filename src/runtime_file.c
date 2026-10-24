@@ -15,20 +15,10 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#ifdef _WIN32
-#include <windows.h>
-/* 64-bit sizes and times; directories are never opened as CRT descriptors. */
-typedef struct _stat64 HostStat;
-#define host_stat(path,s) _stat64(path,s)
-#define host_fstat(fd,s) _fstat64(fd,s)
-#define host_lseek _lseeki64
-#define O_DIRECTORY 0x40000000 /* bbport marker, removed before _open */
-#else
 typedef struct stat HostStat;
 #define host_stat(path,s) stat(path,s)
 #define host_fstat(fd,s) fstat(fd,s)
 #define host_lseek lseek
-#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define MAX_FILES 1024
 #define MAX_MOUNTS 16
@@ -197,9 +187,6 @@ static int host_flags(int flags) {
     if (flags&0x400) r|=O_TRUNC;
     if (flags&0x800) r|=O_EXCL;
     if (flags&0x20000) r|=O_DIRECTORY;
-#ifdef _WIN32
-    r|=O_BINARY;
-#endif
     return r|O_CLOEXEC;
 }
 static void free_listing(Listing *l) { if (l) { free(l->names); free(l->offsets); free(l->types); free(l); } }
@@ -220,12 +207,6 @@ static Listing *list_directory(const char *path) {
         if (!l->offsets || !l->types || !l->names) { fputs("Out of memory listing directory\n",stderr); exit(1); }
         memcpy(l->names+bytes,e->d_name,n);
         l->offsets[l->count]=bytes;
-#ifdef _WIN32
-        /* MinGW's dirent has no d_type. */
-        char child[1100]; HostStat entry;
-        snprintf(child,sizeof(child),"%s/%s",path,e->d_name);
-        l->types[l->count]=host_stat(child,&entry) ? 0 : S_ISDIR(entry.st_mode) ? 4 : S_ISREG(entry.st_mode) ? 8 : 0;
-#else
         unsigned char type=e->d_type;
         if (type==DT_LNK || type==DT_UNKNOWN) {
             struct stat entry;
@@ -233,7 +214,6 @@ static Listing *list_directory(const char *path) {
                 type=S_ISDIR(entry.st_mode) ? DT_DIR : S_ISREG(entry.st_mode) ? DT_REG : type;
         }
         l->types[l->count]=type==DT_DIR ? 4 : type==DT_REG ? 8 : type==DT_LNK ? 10 : 0;
-#endif
         ++l->count; bytes+=n;
     }
     closedir(d);
@@ -244,26 +224,11 @@ static void convert_stat(const HostStat *s,GuestStat *g) {
     g->dev=(uint32_t)s->st_dev; g->ino=(uint32_t)s->st_ino;
     g->nlink=(uint16_t)s->st_nlink;
     g->size=s->st_size;
-#ifdef _WIN32
-    /* FreeBSD mode bits: directories rwxr-xr-x, files rw-r--r--. */
-    g->mode=(uint16_t)(S_ISDIR(s->st_mode) ? 0040755 : 0100644);
-    g->blocks=(s->st_size+511)/512; g->blksize=4096;
-    g->atime=(GuestTimespec){s->st_atime,0};
-    g->mtime=(GuestTimespec){s->st_mtime,0};
-    g->ctime=(GuestTimespec){s->st_ctime,0};
-#else
     g->mode=(uint16_t)s->st_mode;
     g->blocks=s->st_blocks; g->blksize=(uint32_t)s->st_blksize;
-#ifdef __APPLE__
     g->atime=(GuestTimespec){s->st_atimespec.tv_sec,s->st_atimespec.tv_nsec};
     g->mtime=(GuestTimespec){s->st_mtimespec.tv_sec,s->st_mtimespec.tv_nsec};
     g->ctime=(GuestTimespec){s->st_ctimespec.tv_sec,s->st_ctimespec.tv_nsec};
-#else
-    g->atime=(GuestTimespec){s->st_atim.tv_sec,s->st_atim.tv_nsec};
-    g->mtime=(GuestTimespec){s->st_mtim.tv_sec,s->st_mtim.tv_nsec};
-    g->ctime=(GuestTimespec){s->st_ctim.tv_sec,s->st_ctim.tv_nsec};
-#endif
-#endif
     g->birthtime=g->ctime;
 }
 static File *get(int fd) {
@@ -308,12 +273,7 @@ static void current_copy(char *path,size_t size,int write) {
 /* Returns the descriptor of the copy, or -(errno). */
 static int open_for_commit(const char *path,const char *source,int flags,int mode,char **commit,char **temp) {
     int hf=host_flags(flags)&~O_DIRECTORY;
-#ifdef _WIN32
-    const int file_mode=_S_IREAD|_S_IWRITE;
-    (void)mode;
-#else
     const int file_mode=mode ? mode : 0644;
-#endif
     struct stat s;
     int exists=!stat(source,&s);
     if (exists && !S_ISREG(s.st_mode)) { int h=open(path,hf,file_mode); return h<0 ? -errno : h; }
@@ -323,18 +283,10 @@ static int open_for_commit(const char *path,const char *source,int flags,int mod
     char *t=malloc(n), *c=strdup(path);
     if (!t || !c) { free(t); free(c); return -ENOMEM; }
     snprintf(t,n,"%s.%u.bbtmp",path,__atomic_add_fetch(&temp_serial,1,__ATOMIC_RELAXED));
-#ifdef _WIN32
-    int out=open(t,O_WRONLY|O_CREAT|O_TRUNC|O_BINARY,file_mode);
-#else
     int out=open(t,O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC,exists ? (int)(s.st_mode&07777) : file_mode);
-#endif
     int e=out<0 ? errno : 0;
     if (!e && exists && !(hf&O_TRUNC)) {
-#ifdef _WIN32
-        int in=open(source,O_RDONLY|O_BINARY);
-#else
         int in=open(source,O_RDONLY|O_CLOEXEC);
-#endif
         if (in<0 || copy_contents(in,out)) e=errno ? errno : EIO;
         if (in>=0) close(in);
     }
@@ -352,19 +304,12 @@ static int commit_file(const File *f) {
     if (!f->dirty) { close(f->host); unlink(f->temp); return 0; } /* opened for writing, not written */
     int e=fsync(f->host) ? errno : 0;
     close(f->host);
-#ifdef _WIN32
-    /* POSIX rename replaces the old file in one step; MoveFileEx does with REPLACE_EXISTING. */
-    if (!e && !MoveFileExA(f->temp,f->commit,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-        e=compat_errno_from_win32(GetLastError());
-#else
     if (!e && rename(f->temp,f->commit)) e=errno;
-#endif
     if (e) {
         fprintf(stderr,"Runtime: save file %s not replaced (%s); the old one is kept\n",f->path,strerror(e));
         unlink(f->temp);
         return -e;
     }
-#ifndef _WIN32
     char dir[1024];
     snprintf(dir,sizeof(dir),"%s",f->commit);
     char *slash=strrchr(dir,'/');
@@ -373,7 +318,6 @@ static int commit_file(const File *f) {
         int d=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
         if (d>=0) { fsync(d); close(d); }
     }
-#endif
     return 0;
 }
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
@@ -384,40 +328,6 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     char *commit=NULL, *temp=NULL;
-#ifdef _WIN32
-    /* Windows cannot open a directory as a CRT descriptor: directories are listings only. */
-    (void)mode;
-    HostStat s;
-    Listing *dir=NULL;
-    int host=-1;
-    if (!host_stat(path,&s) && S_ISDIR(s.st_mode)) {
-        if (flags&3) return -EISDIR;
-        if (!(dir=list_directory(path))) return -EACCES;
-    } else if (flags&0x20000) {
-        e=errno==ENOENT ? ENOENT : ENOTDIR;
-        if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
-        return -e;
-    } else {
-        if (save_path(guest) && (flags&3)) {
-            char current[1024];
-            snprintf(current,sizeof(current),"%s",path);
-            current_copy(current,sizeof(current),0);
-            host=open_for_commit(path,current,flags,mode,&commit,&temp);
-            if (host<0) { errno=-host; host=-1; }
-        } else {
-            if (save_path(guest)) current_copy(path,sizeof(path),0);
-            host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
-        }
-        if (save_trace() && save_path(guest))
-            printf("Save trace: open(%s, flags 0x%x) -> host %d%s%s\n",guest,flags,host,temp ? ", copy " : "",temp ? temp : "");
-        if (host<0) {
-            e=errno;
-            if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
-            return -e;
-        }
-        if (host_fstat(host,&s)) memset(&s,0,sizeof(s));
-    }
-#else
     int host;
     if (save_path(guest) && (flags&3)) {
         char current[1024];
@@ -439,7 +349,6 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     struct stat s;
     Listing *dir=NULL;
     if (!fstat(host,&s) && S_ISDIR(s.st_mode)) dir=list_directory(path);
-#endif
     pthread_mutex_lock(&lock);
     int fd=-1;
     for (int i=3;i<MAX_FILES;++i) if (!files[i].used) { fd=i; break; }
@@ -496,14 +405,8 @@ static int host_fd_written(int fd) {
     f->dirty=1;
     return f->host;
 }
-#ifdef _WIN32
-/* The CRT reads and writes at most INT_MAX bytes per call. */
-static ssize_t host_read(int h,void *buffer,uint64_t size) { return read(h,buffer,(unsigned)(size>0x7ffff000 ? 0x7ffff000 : size)); }
-static ssize_t host_write(int h,const void *buffer,uint64_t size) { return write(h,buffer,(unsigned)(size>0x7ffff000 ? 0x7ffff000 : size)); }
-#else
 #define host_read read
 #define host_write write
-#endif
 /* Pages of the destination may be write-protected for GPU tracking: the kernel's copy then
  * fails with EFAULT instead of faulting to our handler. A user-mode write to each page first
  * goes through the handler, which unprotects it (and records the upcoming write). */
@@ -562,17 +465,7 @@ static int64_t do_lseek(int fd,int64_t offset,int whence) {
 static int64_t do_fstat(int fd,GuestStat *out) {
     int h=host_fd(fd);
     HostStat s;
-#ifdef _WIN32
-    if (h<0) { /* directory: a listing only, stat the path it was opened with */
-        File *f=get(fd); char path[1024];
-        if (!f || !f->dir) return -EBADF;
-        if (!out) return -EFAULT;
-        if (translate(f->path,path,sizeof(path)) || host_stat(path,&s)) return -EBADF;
-        convert_stat(&s,out); return 0;
-    }
-#else
     if (h<0) return -EBADF;
-#endif
     if (!out) return -EFAULT;
     if (host_fstat(h,&s)) return -errno;
     convert_stat(&s,out); return 0;
@@ -629,21 +522,12 @@ static int64_t do_rename(const char *from,const char *to) {
     int e=translate(from,a,sizeof(a));
     if (!e) e=translate(to,b,sizeof(b));
     if (e) return -e;
-#ifdef _WIN32
-    /* POSIX rename replaces an existing target; the CRT's fails. */
-    return MoveFileExA(a,b,MOVEFILE_REPLACE_EXISTING) ? 0 : -compat_errno_from_win32(GetLastError());
-#else
     return rename(a,b) ? -errno : 0;
-#endif
 }
 static int64_t do_ftruncate(int fd,int64_t length) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
-#ifdef _WIN32
-    return _chsize_s(h,length) ? -errno : 0;
-#else
     return ftruncate(h,length) ? -errno : 0;
-#endif
 }
 static int64_t do_truncate(const char *guest,int64_t length) {
     if (game_path(guest)) return -EROFS;
@@ -651,15 +535,7 @@ static int64_t do_truncate(const char *guest,int64_t length) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (save_path(guest)) current_copy(path,sizeof(path),1);
-#ifdef _WIN32
-    int h=open(path,O_RDWR|O_BINARY);
-    if (h<0) return -errno;
-    int r=_chsize_s(h,length) ? -errno : 0;
-    close(h);
-    return r;
-#else
     return truncate(path,length) ? -errno : 0;
-#endif
 }
 static int64_t do_fsync(int fd) { int h=host_fd(fd); if (h<0) return -EBADF; return fsync(h) ? -errno : 0; }
 static int64_t do_access(const char *guest,int mode) {
@@ -667,11 +543,7 @@ static int64_t do_access(const char *guest,int mode) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (save_path(guest)) current_copy(path,sizeof(path),0);
-#ifdef _WIN32
-    return access(path,mode&6) ? -errno : 0; /* X_OK is invalid for the CRT */
-#else
     return access(path,mode&7) ? -errno : 0;
-#endif
 }
 
 /* Convention adapters: sceKernel* -> Orbis error codes, POSIX -> -1 + errno. */

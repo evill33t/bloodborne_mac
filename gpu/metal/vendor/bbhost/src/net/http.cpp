@@ -59,12 +59,6 @@ HttpResult perform(const std::string& url, const std::string* post, int timeout_
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
     }
-#if defined(_WIN32)
-    // schannel also asks the CA whether the certificate was revoked and fails
-    // when that lookup cannot be made (firewalls, captive networks); the chain
-    // and name are still checked.
-    curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_REVOKE_BEST_EFFORT));
-#endif
     if (post) {
         curl_easy_setopt(c, CURLOPT_POST, 1L);
         curl_easy_setopt(c, CURLOPT_POSTFIELDS, post->c_str());

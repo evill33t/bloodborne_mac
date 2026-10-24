@@ -8,15 +8,8 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
-#ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#elif defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/uio.h>
-#include <unistd.h>
-#endif
 
 _Static_assert(sizeof(RuntimeModuleSegment)==16,"module segment ABI");
 _Static_assert(sizeof(RuntimeModuleInfo)==424,"module info ABI");
@@ -73,17 +66,9 @@ int runtime_modules_install(const RuntimeModuleInfo *records,size_t count) {
  * These bounded self-process copies honor VM read/write permissions. */
 static int copy_from_guest(void *out,const void *guest,size_t size) {
     if(!guest || (uintptr_t)guest>UINTPTR_MAX-size)return 0;
-#ifdef __APPLE__
     mach_vm_size_t read=0;
     return mach_vm_read_overwrite(mach_task_self(),(mach_vm_address_t)(uintptr_t)guest,size,
         (mach_vm_address_t)(uintptr_t)out,&read)==KERN_SUCCESS && read==size;
-#elif defined(_WIN32)
-    SIZE_T read=0;
-    return ReadProcessMemory(GetCurrentProcess(),guest,out,size,&read) && read==size;
-#else
-    struct iovec local={out,size},remote={(void *)guest,size};
-    return process_vm_readv(getpid(),&local,1,&remote,1,0)==(ssize_t)size;
-#endif
 }
 static int copy_to_guest(void *guest,const void *value,size_t size) {
     if(!guest || (uintptr_t)guest>UINTPTR_MAX-size)return 0;
@@ -101,16 +86,8 @@ static int copy_to_guest(void *guest,const void *value,size_t size) {
         }
     pthread_mutex_unlock(&module_lock);
     if(!permitted)return 0;
-#ifdef __APPLE__
     return mach_vm_write(mach_task_self(),(mach_vm_address_t)(uintptr_t)guest,
         (vm_offset_t)(uintptr_t)value,(mach_msg_type_number_t)size)==KERN_SUCCESS;
-#elif defined(_WIN32)
-    SIZE_T written=0;
-    return WriteProcessMemory(GetCurrentProcess(),guest,value,size,&written) && written==size;
-#else
-    struct iovec local={(void *)value,size},remote={guest,size};
-    return process_vm_writev(getpid(),&local,1,&remote,1,0)==(ssize_t)size;
-#endif
 }
 ABI int32_t runtime_module_info_from_addr(uint64_t address,uint32_t flags,RuntimeModuleInfo *out) {
     uint64_t output_size=0;

@@ -2,11 +2,7 @@
 // The Hunter's Dream backend: settings, the account, the session service client, the dispatcher,
 // the peer table, the event poller and the keepalive. Adapted from droogie/bbhost
 // src/net/{http,account,session}.cpp and src/engine/summon_invite.cpp (566184a).
-#ifndef __APPLE__
-#include "httplib.h"
-#else
 #include "gpu/metal/bbhost/network.h"
-#endif
 
 #include "thd.h"
 #include "thd_internal.h"
@@ -26,11 +22,7 @@
 #include <random>
 #include <thread>
 
-#ifdef _WIN32
-#include <ws2tcpip.h>
-#else
 #include <arpa/inet.h>
-#endif
 
 namespace BbEngine {
 bool host_read_safe(const void* p, void* out, std::size_t n);
@@ -106,17 +98,9 @@ std::string g_name, g_token;
 bool g_refused = false;
 // Read on first use: the game may ask for its NP state before the online start.
 void LoadAccountLocked() {
-#ifdef __APPLE__
     const auto next_token=MacNetwork::AccountToken();
     if (g_token!=next_token) g_refused=false;
     g_name=MacNetwork::AccountName(); g_token=next_token; return;
-#else
-    static bool loaded = false;
-    if (loaded) return;
-    loaded = true;
-    g_name = Env("BB_THD_ONLINE_ID").substr(0, 16);
-    g_token = Env("BB_THD_TOKEN");
-#endif
 }
 } // namespace
 
@@ -200,58 +184,11 @@ struct HttpResult {
 // One keep-alive connection per thread and server: the poller asks four times a second.
 HttpResult Perform(const std::string& base, const std::string& path, const std::string* post,
                    int timeout_ms) {
-#ifdef __APPLE__
     const auto result=MacNetwork::Request(base+path,post,timeout_ms,Cfg().verify_tls,
         {{"Accept","application/json"},{"Content-Type","application/json"},
          {"User-Agent",Cfg().client},{"X-BBHost-Ruleset",MacNetwork::Ruleset()},
          {"X-BB-Token",AccountToken()}});
     return {result.status,result.body,result.error};
-#else
-    thread_local std::map<std::string, std::unique_ptr<httplib::Client>> clients;
-    auto& cli = clients[base];
-    const auto timeout = std::chrono::milliseconds(timeout_ms);
-    auto open = [&] {
-        cli = std::make_unique<httplib::Client>(base);
-        cli->set_keep_alive(true);
-        cli->set_follow_location(false);
-#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        cli->enable_server_certificate_verification(Cfg().verify_tls);
-#endif
-    };
-    const bool reused = cli != nullptr;
-    if (!cli) open();
-    httplib::Headers headers{{"Accept", "application/json"},
-                             {"User-Agent", Cfg().client},
-                             {"X-BBHost-Ruleset", Cfg().ruleset}};
-    if (const std::string token = AccountToken(); !token.empty()) {
-        headers.emplace("X-BB-Token", token);
-    }
-    // Connecting and sending stay short; only the read waits as long as the request asks (a
-    // long poll waits 30 s for its answer, its connection and TLS a few seconds).
-    const auto short_timeout = std::min(timeout, std::chrono::milliseconds(5000));
-    auto send = [&] {
-        cli->set_connection_timeout(short_timeout);
-        cli->set_read_timeout(timeout);
-        cli->set_write_timeout(short_timeout);
-        return post ? cli->Post(path, headers, *post, "application/json") : cli->Get(path, headers);
-    };
-    HttpResult r;
-    httplib::Result res = send();
-    // A kept-alive connection the server closed meanwhile fails on its first read or write
-    // ("Failed to read connection"): once more on a new one, as bbhost's fresh request would.
-    if (!res && reused && (res.error() == httplib::Error::Read || res.error() == httplib::Error::Write)) {
-        open();
-        res = send();
-    }
-    if (!res) {
-        r.error = httplib::to_string(res.error());
-        cli.reset(); // a fresh connection next time
-        return r;
-    }
-    r.status = res->status;
-    r.body = res->body;
-    return r;
-#endif
 }
 
 bool ParseReply(const std::string& what, const HttpResult& r, Json& out, std::string& error) {

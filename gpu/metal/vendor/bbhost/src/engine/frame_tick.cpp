@@ -15,11 +15,7 @@
 #include <cstring>
 #include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
 #include <sys/mman.h>
-#endif
 
 namespace {
 
@@ -36,12 +32,8 @@ std::atomic<int> g_ticks{1};
 double g_carry = 0.0;
 
 void* exec_page() {
-#if defined(_WIN32)
-    return VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-#else
     void* p = mmap(nullptr, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     return p == MAP_FAILED ? nullptr : p;
-#endif
 }
 
 // The hooked entry: saved[0..5] are r9 r8 rcx rdx rsi rdi as the call

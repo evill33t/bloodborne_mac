@@ -18,15 +18,7 @@
 #include <setjmp.h>
 #include <errno.h>
 #include <unistd.h>
-#ifdef _WIN32
-#include <windows.h>
-#elif !defined(__APPLE__)
-#include <sys/syscall.h>
 #include <sys/mman.h>
-#include <asm/prctl.h>
-#else
-#include <sys/mman.h>
-#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
 #define STACK_MARGIN (256*1024)
@@ -64,11 +56,7 @@ typedef struct GuestThread {
     int restored,native_started;
     uint64_t module_mappings[8],module_sizes[8];
 #endif
-#ifdef _WIN32
-    bb_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
-#else
     jmp_buf exit_jump;
-#endif
     struct GuestThread *next;
 } GuestThread;
 #ifdef BB_CHECKPOINT_RUNTIME
@@ -93,30 +81,8 @@ void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
-#ifdef _WIN32
-/* TEB TlsSlots[64] start at gs:0x1480; slots 64+ live elsewhere and cannot be used. */
-static DWORD tls_slot=TLS_OUT_OF_INDEXES;
-uint32_t runtime_thread_tcb_offset(void) {
-    if (tls_slot==TLS_OUT_OF_INDEXES) {
-        tls_slot=TlsAlloc();
-        if (tls_slot>=64) { fprintf(stderr,"STOP: no TEB TLS slot below 64 (got %lu)\n",tls_slot); exit(21); }
-    }
-    return 0x1480+8*(uint32_t)tls_slot;
-}
-static void set_gs(void *base) {
-    runtime_thread_tcb_offset();
-    if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
-}
-#define tls_block_alloc(size) _aligned_malloc(size,64)
-#elif defined(__APPLE__)
 static void set_gs(void *base) { bb_macos_set_guest_tls(base); }
 #define tls_block_alloc(size) runtime_low_map(size,PROT_READ|PROT_WRITE)
-#else
-static void set_gs(void *base) {
-    if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
-}
-#define tls_block_alloc(size) aligned_alloc(64,size)
-#endif
 /* Build TCB/static TLS for the calling host thread and point GS at it. */
 static void attach(GuestThread *t) {
     uint64_t offset=tls_offset();
@@ -146,13 +112,9 @@ static void attach(GuestThread *t) {
     current=t;
 }
 static GuestThread *new_thread(void) {
-#ifdef __APPLE__
     /* Bloodborne packs the thread identity into 40-bit lock-owner fields.
      * Darwin's malloc may return a higher address even in a non-PIE process. */
     GuestThread *t=runtime_low_map(sizeof(*t),PROT_READ|PROT_WRITE);
-#else
-    GuestThread *t=calloc(1,sizeof(*t));
-#endif
     if (!t) return NULL;
     t->attr=(ThreadAttr){.magic=ATTR_MAGIC,.policy=1,.prio=DEFAULT_PRIO,.stack=DEFAULT_STACK,.affinity=0x7f};
     return t;
@@ -304,19 +266,10 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
 static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
-#ifdef __APPLE__
     pthread_setname_np(host);
-#else
-    pthread_setname_np(pthread_self(),host);
-#endif
 }
-#ifdef _WIN32
-#define exit_setjmp(t) bb_setjmp((t)->exit_jump)
-#define exit_longjmp(t) bb_longjmp((t)->exit_jump,1)
-#else
 #define exit_setjmp(t) setjmp((t)->exit_jump)
 #define exit_longjmp(t) longjmp((t)->exit_jump,1)
-#endif
 static void *host_start(void *p) {
     GuestThread *t=p;
 #ifdef BB_CHECKPOINT_RUNTIME
@@ -376,11 +329,6 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     t->translated_stack_size=stack_bytes;
     pthread_attr_setstacksize(&host,stack_bytes);
 #else
-#ifdef _WIN32
-    /* Windows places the stack itself (low: no high-entropy ASLR) and commits all of it:
-     * guest code has no stack probes and would step over the guard page. */
-    pthread_attr_setstacksize(&host,stack_bytes);
-#else
 #ifdef BB_CHECKPOINT_RUNTIME
     if (bb_checkpoint_runtime_enabled()) pthread_attr_setstacksize(&host,stack_bytes);
     else
@@ -390,7 +338,6 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
         if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
         else pthread_attr_setstacksize(&host,stack_bytes);
     }
-#endif
 #endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */

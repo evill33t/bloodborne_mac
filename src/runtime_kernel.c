@@ -18,12 +18,7 @@
 #else
 #include <x86intrin.h>
 #endif
-#ifndef _WIN32
-#ifndef __APPLE__
-#include <sys/random.h>
-#endif
 #include <sys/resource.h>
-#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define PAGE 16384
 
@@ -56,11 +51,7 @@ static int host_clock(uint32_t id,clockid_t *out) {
     case 0: case 9: case 10: *out=CLOCK_REALTIME; return 1;            /* REALTIME(_PRECISE/_FAST) */
     case 4: case 11: case 12: case 5: case 7: case 8: *out=CLOCK_MONOTONIC; return 1; /* MONOTONIC/UPTIME */
     case 13:
-#ifdef __APPLE__
         *out=CLOCK_REALTIME;
-#else
-        *out=CLOCK_REALTIME_COARSE;
-#endif
         return 1;                    /* SECOND */
     case 14: *out=CLOCK_THREAD_CPUTIME_ID; return 1;
     case 2: case 15: *out=CLOCK_PROCESS_CPUTIME_ID; return 1;         /* PROF/PROCTIME */
@@ -108,11 +99,7 @@ static ABI uint64_t tsc_frequency(void) {
     if (!tsc_hz) {
         struct timespec a,b,nap={0,20000000};
         clock_gettime(CLOCK_MONOTONIC,&a); uint64_t t0=__rdtsc();
-#ifdef _WIN32
-        (void)nap; compat_sleep_ns(20000000);
-#else
         nanosleep(&nap,NULL);
-#endif
         clock_gettime(CLOCK_MONOTONIC,&b); uint64_t t1=__rdtsc();
         uint64_t ns=(uint64_t)(b.tv_sec-a.tv_sec)*1000000000+(uint64_t)(b.tv_nsec-a.tv_nsec);
         tsc_hz=(t1-t0)*1000000000/(ns ? ns : 1);
@@ -125,12 +112,8 @@ uint64_t runtime_process_time_us(void) { return process_time(); }
 uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
 uint64_t runtime_tsc_frequency(void) { return tsc_frequency(); }
 static int sleep_ns(uint64_t ns) {
-#ifdef _WIN32
-    compat_sleep_ns(ns);
-#else
     struct timespec t={.tv_sec=(time_t)(ns/1000000000),.tv_nsec=(long)(ns%1000000000)};
     while (nanosleep(&t,&t)) if (errno!=EINTR) return errno;
-#endif
     return 0;
 }
 static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
@@ -149,12 +132,8 @@ typedef struct { int32_t minuteswest, dsttime; } GuestTimezone;
 static ABI int32_t kernel_gettimezone(GuestTimezone *tz) {
     if (!tz) return ERR(22);
     time_t now=time(NULL);
-#ifdef _WIN32
-    tz->minuteswest=(int32_t)(-compat_utc_offset(now)/60); tz->dsttime=0;
-#else
     struct tm local; localtime_r(&now,&local);
     tz->minuteswest=(int32_t)(-local.tm_gmtoff/60); tz->dsttime=0;
-#endif
     return 0;
 }
 static ABI int32_t posix_gettimeofday(GuestTimeval *tv,GuestTimezone *tz) {
@@ -198,6 +177,16 @@ static ABI uintptr_t guest_signal(int sig,uintptr_t handler) {
     printf("Runtime: guest signal(%d) handler recorded (host signals are not forwarded)\n",sig);
     return old;
 }
+static ABI int32_t guest_is_signal_return(uint64_t pc) {
+    /* Membership in the guest signal-return trampoline set, not a mapped-PC
+     * validator. This runtime records handlers but never dispatches guest
+     * signals or installs a guest sigreturn trampoline, so that set is empty.
+     * Host fault handlers and bbcpu's end-of-stack sentinels are not guest
+     * signal frames. Do not dereference an arbitrary unwind PC or set errno.
+     * Implement actual trampoline membership before adding guest delivery. */
+    (void)pc;
+    return 0;
+}
 static ABI int32_t guest_sigprocmask(int how,const GuestSigset *set,GuestSigset *old) {
     uint32_t *bits=signal_mask.bits;
 #ifdef BB_CHECKPOINT_RUNTIME
@@ -219,22 +208,11 @@ typedef struct { GuestTimeval utime, stime; int64_t rest[14]; } GuestRusage;
 static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     if (!out || (who!=0 && who!=1)) return fail_posix(EINVAL);
     memset(out,0,sizeof(*out));
-#ifdef _WIN32
-    int64_t user=0,kernel=0;
-    compat_cpu_times(who,&user,&kernel);
-    out->utime=(GuestTimeval){user/1000000,user%1000000};
-    out->stime=(GuestTimeval){kernel/1000000,kernel%1000000};
-#else
     struct rusage r;
-#ifdef __APPLE__
     if (who==0) getrusage(RUSAGE_SELF,&r);
     else if (bb_macos_thread_rusage(&r)) return fail_posix(EIO);
-#else
-    getrusage(who==0 ? RUSAGE_SELF : RUSAGE_THREAD,&r);
-#endif
     out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
     out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
-#endif
     return 0;
 }
 static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,uint64_t *oldlen,const void *new_value,uint64_t newlen) {
@@ -242,13 +220,7 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
     if (!name || namelen<2 || new_value) return fail_posix(EINVAL);
     if (name[0]==1 && name[1]==37) { /* kern.arandom */
         if (!old || !oldlen) return fail_posix(EINVAL);
-#ifdef _WIN32
-        if (compat_random(old,(size_t)*oldlen)) return fail_posix(EIO);
-#elif defined(__APPLE__)
         arc4random_buf(old,(size_t)*oldlen);
-#else
-        if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);
-#endif
         return 0;
     }
     if (name[0]==6 && (name[1]==7 || name[1]==3)) { /* hw.pagesize / hw.ncpu */
@@ -353,6 +325,7 @@ static const RuntimeExport exports[]={
     {"sceKernelDebugRaiseExceptionOnReleaseMode",raise_exception},
     {"sceKernelPrintBacktraceWithModuleInfo",print_backtrace},
     {"signal",guest_signal}, {"sigprocmask",guest_sigprocmask}, {"_sigprocmask",guest_sigprocmask},
+    {"_is_signal_return",guest_is_signal_return},
     {"sigfillset",guest_sigfillset}, {"sigemptyset",guest_sigemptyset},
     {"getrusage",guest_getrusage}, {"sysctl",guest_sysctl},
     {"scePthreadOnce",thread_once}, {"pthread_once",posix_once},

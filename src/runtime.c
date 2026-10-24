@@ -108,17 +108,11 @@ void runtime_start(uint64_t flags) {
     capabilities = flags;
     runtime_modules_install(NULL,0);
     if (!(flags & 1)) return;
-#ifdef _WIN32
-    unsigned int halves[2];
-    if (rand_s(&halves[0]) || rand_s(&halves[1])) { fputs("Cannot initialize stack canary\n", stderr); exit(1); }
-    memcpy(&stack_canary, halves, sizeof(stack_canary));
-#else
     FILE *random = fopen("/dev/urandom", "rb");
     if (!random || fread(&stack_canary, sizeof(stack_canary), 1, random) != 1) {
         fputs("Cannot initialize stack canary\n", stderr); exit(1);
     }
     fclose(random);
-#endif
     stack_canary &= ~UINT64_C(255);
 }
 void runtime_report(void) {
@@ -152,9 +146,7 @@ static int exit_audit_enabled(void) {
 }
 static void exit_audit_thread(char name[64]) {
     name[0]=0;
-#ifdef __APPLE__
     pthread_getname_np(pthread_self(),name,64);
-#endif
     if(!name[0])memcpy(name,"unnamed",8);
 }
 static void audit_exit_request(int status,uintptr_t native_return) {

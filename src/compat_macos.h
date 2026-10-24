@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef BB_COMPAT_MACOS_H
 #define BB_COMPAT_MACOS_H
-#ifdef __APPLE__
 #include <pthread.h>
 #include <stdint.h>
 #include <time.h>
@@ -20,6 +19,5 @@ int bb_macos_thread_rusage(struct rusage *usage);
 int bb_macos_read_memory(uintptr_t source,void *destination,size_t size);
 #ifdef __cplusplus
 }
-#endif
 #endif
 #endif

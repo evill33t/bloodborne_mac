@@ -1,7 +1,5 @@
 #include "engine/patch_manifest.h"
-#if defined(__APPLE__)
 #include "gpu/metal/bbhost/timing_verify.h"
-#endif
 
 #include "core/config.h"
 #include "core/elf.h"
@@ -134,13 +132,11 @@ void apply(ElfImage* image, const Manifest& m) {
     GuestMemory& mem = image->mem;
     // Every site checked before any is written.
     for (const Site& s : m.sites) {
-#if defined(__APPLE__)
         if (MacTimingVerify::Conflicts(s.address, s.bytes.size())) {
             host_log("patch: %s refused: site %s overlaps installed bbhost timing at 0x%llx", m.name.c_str(), s.id.c_str(),
                      static_cast<unsigned long long>(s.address));
             return;
         }
-#endif
         if (s.address < kPreferredGuestSlide) {
             host_log("patch: %s refused: site %s address 0x%llx is below the image", m.name.c_str(), s.id.c_str(),
                      static_cast<unsigned long long>(s.address));

@@ -5,7 +5,7 @@ endif()
 project(bloodborne_mac LANGUAGES C CXX)
 
 if(NOT APPLE)
-    message(FATAL_ERROR "This entry point builds the macOS port. Use build.sh for Linux/Windows.")
+    message(FATAL_ERROR "Bloodborne for macOS requires macOS and Xcode command-line tools.")
 endif()
 enable_language(OBJCXX)
 set(CMAKE_CXX_STANDARD 20)

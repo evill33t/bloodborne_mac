@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import struct
 from prepare import parse_self, span, unpack
-from cpu_compat import atomic_output, patch_libc
+from artifacts import atomic_output
 
 
 def encode_id(value):
@@ -75,7 +75,6 @@ def module(path):
 def link(game, out):
     main = module(game/'eboot.bin')
     libc = module(game/'sce_module/libc.prx')
-    cpu_compat = patch_libc(libc)
     raw = (out/'boot.bin').read_bytes()
     magic, size, entry, ns, nr, ni, flags = unpack('<8s6Q', raw, 0)
     if magic != b'BBPROBE2':
@@ -195,7 +194,7 @@ def link(game, out):
             f.write(name.encode().ljust(128,b'\0'))
         for relocation in relocs: f.write(struct.pack('<QQqq',*relocation))
         f.write(image)
-    report = dict(base=hex(base),size=libsize,sha256=libc['sha256'],cpu_compat=cpu_compat,init=hex(metadata[2]),
+    report = dict(base=hex(base),size=libsize,sha256=libc['sha256'],init=hex(metadata[2]),
                   bindings=len(bindings),tls_module_id=2,fs_loads_patched=patched,
                   main_tls=dict(zip(('vaddr','filesz','memsz','align'),main_tls_values)),tls_relocations=tls_count,
                   tls_template_bytes=tls['filesz'],tls_memory_bytes=tls['memsz'],

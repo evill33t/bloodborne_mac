@@ -11,9 +11,7 @@ extern "C" {
 #endif
 
 /* bbcpu is built on macOS (src/cpu, build.sh); elsewhere guest code runs natively. */
-#if defined(__APPLE__)
 #define BB_HAVE_BBCPU 1
-#endif
 #ifdef BB_HAVE_BBCPU
 
 /* Whether guest code runs through bbcpu (BB_CPU=interp in x86-64 builds; always on arm64). */

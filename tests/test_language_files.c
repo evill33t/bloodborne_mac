@@ -9,11 +9,7 @@ uintptr_t runtime_lookup(const RuntimeExport *table,size_t n,const char *name) {
     return 0;
 }
 static void variable(const char *key,const char *value) {
-#ifdef _WIN32
-    assert(!_putenv_s(key,value));
-#else
     assert(!setenv(key,value,1));
-#endif
 }
 static void folder(const char *path) { assert(!mkdir(path,0755)); }
 static void file(const char *path) { FILE *f=fopen(path,"wb"); assert(f && !fclose(f)); }
@@ -22,16 +18,8 @@ static void path(char *out,size_t size,const char *root,const char *suffix) {
 }
 int main(void) {
     char root[512],p[1024],resolved[1024],expected[1024];
-#ifdef _WIN32
-    char temp[MAX_PATH];
-    assert(GetTempPathA(sizeof(temp),temp));
-    assert(GetTempFileNameA(temp,"bbp",0,root));
-    assert(DeleteFileA(root));
-    folder(root);
-#else
     snprintf(root,sizeof(root),"/tmp/bbport-language-XXXXXX");
     assert(mkdtemp(root));
-#endif
     path(p,sizeof(p),root,"dvdroot_ps4"); folder(p);
     path(p,sizeof(p),root,"dvdroot_ps4/msg"); folder(p);
     path(p,sizeof(p),root,"dvdroot_ps4/msg/porbr"); folder(p);

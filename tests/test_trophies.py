@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location('bbport_trophies', ROOT / 'launcher/bbport_trophies.py')
+spec = importlib.util.spec_from_file_location('bbport_trophies', ROOT / 'scripts/trophies.py')
 trophies = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trophies)
 
@@ -26,7 +26,7 @@ class TrophyTests(unittest.TestCase):
         self.assertEqual(len(trophies.PLATINUM_NEEDS), 33)
         self.assertEqual(sum(t[4] == trophies.DLC for t in trophies.TROPHIES), 6)
 
-    def test_mac_runtime_catalog_matches_the_launcher(self):
+    def test_mac_runtime_catalog_matches_the_catalog(self):
         subprocess.run([sys.executable, str(ROOT / 'scripts/macos_trophy_catalog.py'), '--check'], check=True)
 
     def test_read_log_keeps_earliest_and_skips_garbage(self):

@@ -587,7 +587,7 @@ void input_config_defaults(InputConfig *out) {
 /* ---- Default file text (section 4.3) -------------------------------------------------- */
 
 /* In sections: input_config_load adds the controller and keyboard ones to a file without a
- * single binding of that kind. launcher/bbport_input_config.py has a copy of the whole text
+ * single binding of that kind. scripts/input_config.py has a copy of the whole text
  * (tests/test_input_defaults.py checks that they match). */
 #define DEFAULT_HEADER \
 "# bbport input (shadPS4 syntax: output = input, one input per line).\n" \
@@ -689,10 +689,6 @@ int input_config_path(char *out, size_t out_size) {
     const char *config = getenv("BB_CONFIG");
     if (!config || !*config) config = "bbport.ini";
     const char *slash = strrchr(config, '/');
-#ifdef _WIN32
-    const char *bslash = strrchr(config, '\\');
-    if (!slash || (bslash && bslash > slash)) slash = bslash;
-#endif
     size_t dir_len = slash ? (size_t)(slash - config) : 0;
     const char *suffix = "input.ini";
     size_t needed = dir_len + (dir_len ? 1 : 0) + strlen(suffix) + 1;

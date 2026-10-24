@@ -8,18 +8,8 @@
 #include "checkpoint/process.h"
 uint64_t runtime_thread_run_guest(void *entry,void *arg0,void *arg1,size_t stack_size);
 #endif
-#ifdef __APPLE__
 #include "compat_macos.h"
-#endif
-#ifdef _WIN32
-#include "compat_win.h"
-/* No signals on Windows: the exception handler resumes the thread in bb_longjmp
- * (gpu/shim/bbport_toggles.h uses the same buffer type). */
-typedef bb_jmp_buf sigjmp_buf;
-#define sigsetjmp(buffer, save) bb_setjmp(buffer)
-#else
 #include <setjmp.h>
-#endif
 /* Recovery point for speculative guest memory reads on this thread (probe.c fault handler). */
 extern __thread sigjmp_buf *runtime_fault_recover;
 /* Restarts the game (in-game settings menu, render resolution change). */

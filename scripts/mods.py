@@ -6,7 +6,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import sys
 import tempfile
 
@@ -138,92 +137,25 @@ def mod_files(folder):
             yield relative, source
 
 
-# Windows: files are always hard links (copies across volumes), never symlinks. The runtime's
-# UCRT _stat64 and FindFirstFileA report a file symlink's own size (0), not its target's, and
-# the game panics loading it (FileTransferTask.cpp(865)). Directories are symlinks, or
-# junctions without the symlink privilege (Developer Mode off). Hard links and junctions are
-# not symlinks, so the overlay remembers what it linked and where to. Keys are normalized:
-# MSYS2's Python spells joined paths with '/' and listed ones with '\'.
-LINKED = {}
-
-
-def key(path):
-    return os.path.normcase(os.path.normpath(str(path)))
-
-
 def make_link(link, target):
-    if os.name != 'nt':
-        link.symlink_to(target, target_is_directory=target.is_dir())
-        return
-    if target.is_dir():
-        try:
-            link.symlink_to(target, target_is_directory=True)
-            return
-        except OSError:
-            import _winapi
-            _winapi.CreateJunction(str(target), str(link))
-    else:
-        try:
-            os.link(target, link)
-        except OSError:
-            shutil.copy2(target, link)
-    LINKED[key(link)] = target
+    link.symlink_to(target, target_is_directory=target.is_dir())
 
 
 def is_link(path):
-    return path.is_symlink() or key(path) in LINKED or (hasattr(path, 'is_junction') and path.is_junction())
+    return path.is_symlink()
 
 
 def link_target(path):
-    return LINKED.get(key(path)) or path.resolve(strict=True)
+    return path.resolve(strict=True)
 
 
 def remove_link(path):
-    if hasattr(path, 'is_junction') and path.is_junction():
-        os.rmdir(path)
-    else:
-        unlink_file(path, LINKED.get(key(path)))
-    LINKED.pop(key(path), None)
-
-
-def unlink_file(path, linked=None):
-    """Windows refuses to delete a read-only file (WinError 5), and a hard link shares the
-    attribute with the file it links: game files copied from a read-only source keep it. It is
-    cleared for the deletion and set again on `linked`, the file that stays. From emurphy04
-    (PR #77)."""
-    try:
-        path.unlink()
-        return
-    except PermissionError:
-        mode = path.stat().st_mode
-        if os.name != 'nt' or mode & stat.S_IWRITE:
-            raise
-    os.chmod(path, mode | stat.S_IWRITE)
-    try:
-        path.unlink()
-    finally:
-        rest = path if path.exists() else linked
-        if rest is not None and rest.exists():
-            os.chmod(rest, mode)
+    path.unlink()
 
 
 def remove_overlay(overlay, game=None):
-    """shutil.rmtree for an overlay, whose read-only links are deleted as remove_link does
-    (`game`: the game folder it mirrors, for links made by another run)."""
-    def retry(function, path, error):
-        path = Path(path)
-        if function not in (os.unlink, os.remove) or not path.is_file():
-            raise error[1] if isinstance(error, tuple) else error
-        linked = LINKED.get(key(path))
-        if linked is None and game is not None:
-            mirror = Path(game) / path.relative_to(overlay)
-            if mirror.is_file() and os.path.samefile(path, mirror):
-                linked = mirror
-        unlink_file(path, linked)
-    if sys.version_info >= (3, 12):
-        shutil.rmtree(overlay, onexc=retry)
-    else:
-        shutil.rmtree(overlay, onerror=retry)
+    """Remove the generated view without following links into the source dump."""
+    shutil.rmtree(overlay)
 
 
 def expand(directory):
@@ -242,7 +174,7 @@ def expand(directory):
         directory.mkdir(exist_ok=True)
 
 
-def build_overlay(game, out, mods, beside_game=True):
+def build_overlay(game, out, mods):
     """beside_game: on another drive than the game, the view goes next to the game (hard links
     reach only one volume); False keeps it in `out` (files are then copied, folders linked)."""
     game = Path(game).resolve(strict=True)
@@ -262,9 +194,6 @@ def build_overlay(game, out, mods, beside_game=True):
         return game
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    if beside_game and os.name == 'nt' and out.drive.casefold() != game.drive.casefold():
-        # Hard links only reach files on the same volume: the overlay goes beside the game.
-        out = game.parent
     overlay = Path(tempfile.mkdtemp(prefix='mod-game-', dir=out))
     try:
         for entry in game.iterdir():
@@ -315,19 +244,7 @@ def main():
         else:
             for name in selected(args.mods_dir, args.config):
                 layers.append((name, args.mods_dir / name))
-    try:
-        print(build_overlay(args.game, args.out, layers))
-    except OSError as error:
-        # [WinError 1] "Incorrect function": without symlink rights a folder becomes a junction,
-        # and junctions exist only on NTFS. A port on an exFAT or FAT32 drive (USB, external)
-        # gets its game view in the system drive's temporary folder instead, which is NTFS.
-        if os.name != 'nt' or getattr(error, 'winerror', None) != 1:
-            raise
-        fallback = Path(tempfile.gettempdir()) / 'bbport-game-view'
-        fallback.mkdir(parents=True, exist_ok=True)
-        print(f'Mods: links are not supported on the drive of {args.out}; '
-              f'the game view is made in {fallback}', file=sys.stderr)
-        print(build_overlay(args.game, fallback, layers, beside_game=False))
+    print(build_overlay(args.game, args.out, layers))
 
 
 if __name__ == '__main__':

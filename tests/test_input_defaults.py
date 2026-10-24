@@ -6,7 +6,7 @@ import re
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location('bbport_input_config', ROOT / 'launcher/bbport_input_config.py')
+spec = importlib.util.spec_from_file_location('bbport_input_config', ROOT / 'scripts/input_config.py')
 config = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(config)
 
@@ -22,7 +22,7 @@ def game_default_text():
 
 
 class InputDefaultsTests(unittest.TestCase):
-    def test_launcher_default_matches_the_game(self):
+    def test_shared_default_matches_the_game(self):
         self.assertEqual(config.DEFAULT_INPUT_INI, game_default_text())
 
     def test_saving_before_the_game_made_the_file_keeps_the_controller(self):

@@ -12,10 +12,6 @@
 #include <ctime>
 #include <string>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#endif
 #include <time.h>  // clock_gettime: winpthreads' on Windows
 
 inline constexpr int kSceOk = 0;
@@ -26,81 +22,6 @@ inline int to_freebsd(int e) {
     if (e == 0) {
         return 0;
     }
-#if defined(__linux__) || defined(_WIN32)
-    switch (e) {
-        case EAGAIN: return 35;
-        case EDEADLK: return 11;
-        case EINPROGRESS: return 36;
-        case EALREADY: return 37;
-        case ENOTSOCK: return 38;
-        case EDESTADDRREQ: return 39;
-        case EMSGSIZE: return 40;
-        case EPROTOTYPE: return 41;
-        case ENOPROTOOPT: return 42;
-        case EPROTONOSUPPORT: return 43;
-#ifdef ESOCKTNOSUPPORT
-        case ESOCKTNOSUPPORT: return 44;
-#endif
-        case EOPNOTSUPP: return 45;
-#ifdef EPFNOSUPPORT
-        case EPFNOSUPPORT: return 46;
-#endif
-        case EAFNOSUPPORT: return 47;
-        case EADDRINUSE: return 48;
-        case EADDRNOTAVAIL: return 49;
-        case ENETDOWN: return 50;
-        case ENETUNREACH: return 51;
-        case ENETRESET: return 52;
-        case ECONNABORTED: return 53;
-        case ECONNRESET: return 54;
-        case ENOBUFS: return 55;
-        case EISCONN: return 56;
-        case ENOTCONN: return 57;
-#ifdef ESHUTDOWN
-        case ESHUTDOWN: return 58;
-#endif
-#ifdef ETOOMANYREFS
-        case ETOOMANYREFS: return 59;
-#endif
-        case ETIMEDOUT: return 60;
-        case ECONNREFUSED: return 61;
-        case ELOOP: return 62;
-        case ENAMETOOLONG: return 63;
-#ifdef EHOSTDOWN
-        case EHOSTDOWN: return 64;
-#endif
-        case EHOSTUNREACH: return 65;
-        case ENOTEMPTY: return 66;
-#ifdef EUSERS
-        case EUSERS: return 68;
-#endif
-#ifdef EDQUOT
-        case EDQUOT: return 69;
-#endif
-#ifdef ESTALE
-        case ESTALE: return 70;
-#endif
-#ifdef EREMOTE
-        case EREMOTE: return 71;
-#endif
-        case ENOLCK: return 77;
-        case ENOSYS: return 78;
-        case EIDRM: return 82;
-        case ENOMSG: return 83;
-        case EOVERFLOW: return 84;
-        case ECANCELED: return 85;
-        case EILSEQ: return 86;
-        case EBADMSG: return 89;
-#ifdef EMULTIHOP
-        case EMULTIHOP: return 90;
-#endif
-        case ENOLINK: return 91;
-        case EPROTO: return 92;
-        case ENOTRECOVERABLE: return 95;
-        case EOWNERDEAD: return 96;
-        default: break;
-    }
-#endif
     return e;
 }
 

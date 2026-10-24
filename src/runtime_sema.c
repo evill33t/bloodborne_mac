@@ -36,11 +36,7 @@ static void host_check(int e) {
 }
 /* Waits use this clock for their deadlines. winpthreads condition variables accept only
  * CLOCK_REALTIME (pthread_condattr_setclock(CLOCK_MONOTONIC) fails with EINVAL). */
-#if defined(_WIN32) || defined(__APPLE__)
 #define WAIT_CLOCK CLOCK_REALTIME
-#else
-#define WAIT_CLOCK CLOCK_MONOTONIC
-#endif
 static uint64_t now_ns(void) {
     struct timespec t;
     if (clock_gettime(WAIT_CLOCK,&t)) { perror("clock_gettime"); exit(1); }
@@ -82,9 +78,6 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         Waiter w={.need=need};
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
-#ifndef __APPLE__
-        host_check(pthread_condattr_setclock(&attr,WAIT_CLOCK));
-#endif
         host_check(pthread_cond_init(&w.event,&attr));
         host_check(pthread_condattr_destroy(&attr));
         Waiter **tail=&s->first;

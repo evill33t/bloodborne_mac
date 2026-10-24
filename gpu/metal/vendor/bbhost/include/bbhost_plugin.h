@@ -37,17 +37,8 @@ extern "C" {
 
 #define BB_PLUGIN_API_VERSION 11
 
-#if defined(_WIN32)
-#define BB_PLUGIN_EXPORT __declspec(dllexport)
-#if defined(__clang__) || defined(__GNUC__)
-#define BB_GUEST_ABI __attribute__((sysv_abi))
-#else
-#define BB_GUEST_ABI /* not expressible: do not use register_hle from MSVC */
-#endif
-#else
 #define BB_PLUGIN_EXPORT __attribute__((visibility("default")))
 #define BB_GUEST_ABI
-#endif
 
 /* The guest's argument registers as a hooked function was entered. */
 typedef struct BbHookFrame {

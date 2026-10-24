@@ -1,11 +1,7 @@
 /* bbcpu_hostcall(fn, BbHostArgs *a): calls host function fn with a guest call's arguments.
  * BbHostArgs (cpu_internal.h): gpr[8] @0, stack[16] @64, xmm[8] (32-byte slots) @192,
  * rax @448, rdx @456, xmm0 @464, xmm1 @496. */
-#if defined(__APPLE__)
 #define SYMBOL(name) _##name
-#else
-#define SYMBOL(name) name
-#endif
 
 #if defined(__x86_64__)
     .text

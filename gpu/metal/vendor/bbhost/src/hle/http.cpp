@@ -22,9 +22,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
-#if !defined(_WIN32)
 #include <pthread.h>
-#endif
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -241,13 +239,9 @@ std::size_t write_cb(char* ptr, std::size_t size, std::size_t nmemb, void* user)
 
 // The calling thread's name, for the log.
 std::string thread_name_now() {
-#if !defined(_WIN32)
     char n[32] = {};
     pthread_getname_np(pthread_self(), n, sizeof(n));
     return n;
-#else
-    return "?";
-#endif
 }
 
 // BBHOST_HTTP_DELAY_MS (tests): every response held back that long before it
@@ -290,12 +284,6 @@ void perform(const std::string& url, int method, const Effective& eff, std::vect
             curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);
             curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
         }
-#if defined(_WIN32)
-        // schannel also asks the CA whether the certificate was revoked and fails
-        // when that lookup cannot be made (firewalls, captive networks); the chain
-        // and name are still checked.
-        curl_easy_setopt(c, CURLOPT_SSL_OPTIONS, static_cast<long>(CURLSSLOPT_REVOKE_BEST_EFFORT));
-#endif
         // The game's own user agent with bbhost's name and version after it,
         // so a server can tell bbhost clients and their versions apart. The
         // game's text stays the prefix, which is what anything matching on

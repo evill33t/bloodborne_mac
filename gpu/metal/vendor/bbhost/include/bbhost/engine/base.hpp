@@ -43,11 +43,7 @@ inline constexpr Rva MAX_ADDRESS{0x56d55e7};
 // call game code through these pointers directly - the host must switch to
 // the guest's thread state first (BbHostApi::call_guest); the typedefs are
 // what the functions take.
-#if defined(_WIN32)
-#define BB_GAME_ABI __attribute__((sysv_abi))
-#else
 #define BB_GAME_ABI
-#endif
 
 // Bytes whose meaning is not established. Kept as arrays so the struct's
 // size and offsets match the game's.

@@ -17,13 +17,7 @@
 #if (!defined(__x86_64__) && !defined(BB_CPU_TRANSLATOR)) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <sys/mman.h>
-#ifndef __APPLE__
-#include <malloc.h>
-#endif
 #include <unistd.h>
 #include <signal.h>
 #include <sys/ucontext.h>
@@ -32,7 +26,6 @@
 #include <execinfo.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
-#ifdef __APPLE__
 #ifdef BB_CPU_TRANSLATOR
 #define UC_RIP(uc) ((uc)->uc_mcontext->__ss.__pc)
 #define UC_RBP(uc) ((uc)->uc_mcontext->__ss.__fp)
@@ -41,12 +34,6 @@
 #define UC_RIP(uc) ((uc)->uc_mcontext->__ss.__rip)
 #define UC_RBP(uc) ((uc)->uc_mcontext->__ss.__rbp)
 #define UC_RDI(uc) ((uc)->uc_mcontext->__ss.__rdi)
-#endif
-#else
-#define UC_RIP(uc) ((uc)->uc_mcontext.gregs[REG_RIP])
-#define UC_RBP(uc) ((uc)->uc_mcontext.gregs[REG_RBP])
-#define UC_RDI(uc) ((uc)->uc_mcontext.gregs[REG_RDI])
-#endif
 #endif
 
 typedef struct { uint64_t address, size, flags; } Segment;
@@ -74,24 +61,11 @@ static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_s
 static void *allocate(size_t size) {
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
     if (low) return low;
-#ifdef _WIN32
-    void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (!p) fail("VirtualAlloc failed");
-#else
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) fail("mmap failed");
-#endif
     return p;
 }
 static void protect(void *p, size_t size, unsigned flags) {
-#ifdef _WIN32
-    DWORD old, mode = PAGE_NOACCESS;
-    if (flags & 1) mode = (flags & 2) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
-    else if (flags & 2) mode = PAGE_READWRITE;
-    else if (flags & 4) mode = PAGE_READONLY;
-    if (!VirtualProtect(p, size, mode, &old)) fail("VirtualProtect failed");
-    FlushInstructionCache(GetCurrentProcess(), p, size);
-#else
     int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
 #ifdef BB_CPU_TRANSLATOR
     // The arm64 JIT executes a separate MAP_JIT allocation. Guest x86 bytes
@@ -102,7 +76,6 @@ static void protect(void *p, size_t size, unsigned flags) {
     size=round_page((uintptr_t)p-start+size);p=(void *)start;
 #endif
     if (mprotect(p, size, mode)) fail("mprotect failed");
-#endif
 }
 static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argument) {
     if (id >= import_count) fail("bad import trap index");
@@ -123,11 +96,7 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
 #if !defined(_WIN32) && !defined(BB_CPU_TRANSLATOR)
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-#ifdef __APPLE__
 __asm__(".text\n.globl _enter_on_stack\n_enter_on_stack:\n"
-#else
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
-#endif
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
@@ -179,144 +148,26 @@ static void check_cpu(void) {
     while (*name==' ') ++name;
     if (!*name) name="unknown processor";
     fprintf(stderr,"STOP: unsupported CPU %s: missing %s (needs Intel Core 4th generation or newer, or AMD Ryzen)\n",name,missing);
-#ifdef _WIN32
-    char text[512];
-    snprintf(text,sizeof(text),"This processor cannot run the game:\n%s\n\nMissing instructions: %s\n\n"
-             "The game uses instructions of the PS4's processor. They need an Intel Core of the 4th "
-             "generation (Haswell, 2013) or newer, or an AMD Ryzen.",name,missing);
-    MessageBoxA(NULL,text,"Bloodborne",MB_OK|MB_ICONERROR|MB_SETFOREGROUND);
-#endif
     exit(24);
 #endif
 }
-#ifdef _WIN32
-static void describe_address(char *out, size_t size, uintptr_t address) {
-    HMODULE module=NULL;
-    char name[MAX_PATH]="?";
-    if (image && address-(uintptr_t)image<0x20000000) { snprintf(out,size,"guest offset 0x%" PRIxPTR,address-(uintptr_t)image); return; }
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&module) && module) {
-        GetModuleFileNameA(module,name,sizeof(name));
-        const char *base=strrchr(name,'\\');
-        snprintf(out,size,"%s+0x%" PRIxPTR,base ? base+1 : name,address-(uintptr_t)module);
-        return;
-    }
-    snprintf(out,size,"%p",(void *)address);
-}
-static int fatal_reported;
-static LONG fatal_exception(EXCEPTION_POINTERS *info) {
-    if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
-    const EXCEPTION_RECORD *record=info->ExceptionRecord;
-    const CONTEXT *c=info->ContextRecord;
-    char where[MAX_PATH+64];
-    describe_address(where,sizeof(where),(uintptr_t)c->Rip);
-    if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
-        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu)\n",
-                record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
-                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
-    else
-        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
-    fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
-            c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
-    if (gpu_enabled) bbgpu_dump_guest_writes(info);
-    /* Return addresses near the top of the stack: system libraries (the C runtime's memcpy)
-     * keep no frame pointers, so the rbp chain below can skip their caller. */
-    for (int slot=0, shown=0; slot<64 && shown<6; ++slot) {
-        uintptr_t value=0;
-        SIZE_T got=0;
-        if (!ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rsp+slot*8),&value,sizeof(value),&got) || got!=sizeof(value)) break;
-        HMODULE owner=NULL;
-        int code_ref=(image && value-(uintptr_t)image<0x20000000) ||
-                     (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)value,&owner) && owner==GetModuleHandleA(NULL));
-        if (!code_ref) continue;
-        describe_address(where,sizeof(where),value);
-        fprintf(stderr,"  [rsp+0x%x] %s\n",slot*8,where);
-        ++shown;
-    }
-    /* rbp chain (guest and host code keep frame pointers). */
-    uintptr_t rbp=(uintptr_t)c->Rbp;
-    for (int depth=0; depth<24 && rbp; ++depth) {
-        uintptr_t frame[2];
-        SIZE_T got=0;
-        if (!ReadProcessMemory(GetCurrentProcess(),(void *)rbp,frame,sizeof(frame),&got) || got!=sizeof(frame) || frame[0]<=rbp) break;
-        describe_address(where,sizeof(where),frame[1]);
-        fprintf(stderr,"  #%d %s\n",depth,where);
-        rbp=frame[0];
-    }
-    fflush(NULL);
-    TerminateProcess(GetCurrentProcess(),3);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
-    const EXCEPTION_RECORD *record=info->ExceptionRecord;
-    DWORD code=record->ExceptionCode;
-    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
-        /* GPU page tracking (write-protected guest pages) is resolved first. */
-        if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
-        if (runtime_fault_recover) {
-            /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
-             * in bb_longjmp, outside the exception dispatcher, back at its recovery point. */
-            unsigned long long *buffer=*runtime_fault_recover;
-            runtime_fault_recover=NULL;
-            CONTEXT *c=info->ContextRecord;
-            c->Rsp=((c->Rsp-128)&~(DWORD64)15)-40;
-            c->Rcx=(DWORD64)(uintptr_t)buffer;
-            c->Rdx=1;
-            c->Rip=(DWORD64)(uintptr_t)bb_longjmp;
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-    }
-    if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
-        code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
-        /* Faults in guest code, the loader or the runtime end the process with a report; drivers
-         * and system libraries may handle their own exceptions. */
-        uintptr_t rip=(uintptr_t)info->ContextRecord->Rip;
-        HMODULE self=GetModuleHandleA(NULL), module=NULL;
-        int ours=(image && rip-(uintptr_t)image<0x20000000) ||
-                 (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)rip,&module) && module==self) ||
-                 !module;
-        /* bbport: the C runtime handles none of its own faults (a bad pointer to memcpy or
-         * free from the port or the game): reported with the call chain into them, instead of
-         * Windows ending the process without a word (crashes after 1-2 hours in ucrtbase.dll). */
-        if (!ours && module && (module==GetModuleHandleA("ucrtbase.dll") || module==GetModuleHandleA("msvcrt.dll") ||
-                                module==GetModuleHandleA("vcruntime140.dll")))
-            ours=1;
-        if (ours) return fatal_exception(info);
-    }
-    /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
-    if (code==0xC0000008 /* STATUS_INVALID_HANDLE */) return fatal_exception(info);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
-#endif
-#if defined(_WIN32) || defined(__APPLE__)
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
-#ifdef _WIN32
-uint32_t runtime_thread_tcb_offset(void);
-#endif
 static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     static const unsigned char load[]={0x65,0x48,0x8b,0x04,0x25,0,0,0,0};
-#ifdef _WIN32
-    uint32_t displacement=runtime_thread_tcb_offset();
-#else
     uint32_t displacement=0; /* Darwin guest TLS uses FS; GS belongs to libpthread. */
-#endif
     uint64_t patched=0;
     for (uint64_t s=0;s<count;++s) {
         if (!(segments[s].flags&1) || segments[s].size<sizeof(load)) continue;
         unsigned char *at=image+segments[s].address, *end=at+segments[s].size-sizeof(load);
         for (; at<=end; ++at)
             if (at[0]==0x65 && !memcmp(at,load,sizeof(load))) {
-#ifdef __APPLE__
                 at[0]=0x64;
-#endif
                 memcpy(at+5,&displacement,4); ++patched; at+=sizeof(load)-1;
             }
     }
     return patched;
 }
-#endif
-#ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
 #ifdef BB_CPU_TRANSLATOR
     if (sig==SIGBUS && bbcpu_handle_alignment_fault(context)) return;
@@ -379,8 +230,6 @@ static void fault(int sig, siginfo_t *info, void *context) {
     }
     _exit(128 + sig);
 }
-#endif
-#ifndef _WIN32
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
 static uintptr_t exe_base;
@@ -391,11 +240,7 @@ static void write_hex(char *out, uint64_t v) {
 static void dump_frames(ucontext_t *uc) {
     char line[] = "  tid=0000000000000000 rip=0000000000000000 image-relative=0000000000000000 host-relative=0000000000000000\n";
     uintptr_t rip=(uintptr_t)UC_RIP(uc), rbp=(uintptr_t)UC_RBP(uc);
-#ifdef __APPLE__
     uint64_t tid=0; pthread_threadid_np(NULL,&tid);
-#else
-    uint64_t tid=(uint64_t)gettid();
-#endif
     /* First argument register: the lock address when a thread waits on a futex. */
     char arg[]="  tid=0000000000000000 rdi=0000000000000000\n";
     write_hex(arg+6,tid); write_hex(arg+27,(uint64_t)UC_RDI(uc));
@@ -404,12 +249,7 @@ static void dump_frames(ucontext_t *uc) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
         { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
         uintptr_t frame[2];
-#ifdef __APPLE__
         if (!rbp || !bb_macos_read_memory(rbp,frame,sizeof(frame))) break;
-#else
-        struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
-        if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
-#endif
         if (frame[0]<=rbp) break;
         rbp=frame[0]; rip=frame[1];
     }
@@ -420,23 +260,9 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     const char head[]="STOP: watchdog timeout; thread stacks:\n";
     { ssize_t written_=write(2,head,sizeof(head)-1); (void)written_; }
     dump_frames(context);
-#ifndef __APPLE__
-    int dir=open("/proc/self/task",O_RDONLY|O_DIRECTORY);
-    char buffer[4096];
-    long n;
-    pid_t self=gettid();
-    while (dir>=0 && (n=syscall(SYS_getdents64,dir,buffer,sizeof(buffer)))>0)
-        for (long at=0; at<n;) {
-            struct { uint64_t ino; int64_t off; unsigned short reclen; unsigned char type; char name[]; } *d=(void *)(buffer+at);
-            pid_t tid=(pid_t)strtol(d->name,NULL,10);
-            if (tid>0 && tid!=self) { syscall(SYS_tgkill,getpid(),tid,SIGUSR2); usleep(20000); }
-            at+=d->reclen;
-        }
-#endif
     usleep(100000);
     _exit(128 + sig);
 }
-#endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -507,52 +333,17 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
  * released before the new process opens its own. */
 void runtime_restart(void) {
     fflush(NULL);
-#ifdef _WIN32
-    /* run.py sets BB_RESTART_COMMAND: the launch command line, started again (new patches). */
-    const char *command=getenv("BB_RESTART_COMMAND");
-    puts("Runtime: restarting through run.py");
-    if (!command || !*command) { fputs("runtime_restart: BB_RESTART_COMMAND is not set\n",stderr); _exit(1); }
-    char *line=_strdup(command);
-    /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
-    STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
-                          .hStdInput=GetStdHandle(STD_INPUT_HANDLE),.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE),
-                          .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
-    PROCESS_INFORMATION process;
-    if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
-        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
-    }
-    CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    /* The new launch waits for this process's GPU device to go away (run.py --after). */
-    TerminateProcess(GetCurrentProcess(),0);
-#else
     puts("Runtime: restarting through run.sh");
-#ifdef __APPLE__
     for (int fd=3,limit=getdtablesize();fd<limit;++fd) close(fd);
-#else
-    syscall(SYS_close_range, 3u, ~0u, 0u);
-#endif
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
     _exit(1);
-#endif
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifdef __linux__
-    /* Keep host heap objects handed to the guest (thread handles, TLS) in the
-       non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
-    mallopt(M_ARENA_MAX,1);
-    mallopt(M_MMAP_THRESHOLD,32*1024*1024);
-#endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     check_cpu();
-#ifdef _WIN32
-    /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
-     * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
-    runtime_memory_reserve();
-    runtime_thread_tcb_offset();
-#endif
     int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
@@ -597,19 +388,6 @@ int main(int argc, char **argv) {
         bbnet_configure(app0,serial,title,version);
     }
     bbgpu_register_kernel();
-#ifdef _WIN32
-    SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
-    AddVectoredExceptionHandler(1, vectored_fault);
-    SetUnhandledExceptionFilter(unhandled_fault);
-    if (getenv("BB_STRICT_HANDLES")) {
-        PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
-        strict.RaiseExceptionOnInvalidHandleReference=1;
-        strict.HandleExceptionsPermanentlyEnabled=1;
-        if (!SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy,&strict,sizeof(strict)))
-            fprintf(stderr,"BB_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
-    }
-    (void)timeout_seconds; /* no watchdog on Windows */
-#else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
@@ -621,7 +399,6 @@ int main(int argc, char **argv) {
     struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
     sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
     alarm(timeout_seconds); /* 0 disables the watchdog */
-#endif
     FILE *f = fopen(argv[1], "rb");
     if (!f) fail("cannot open boot file; run prepare.py first");
     char magic[8];
@@ -778,12 +555,8 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-#ifdef __APPLE__
     /* Contiguous, nonexecuted storage for guarded engine timing slots and translated text. */
     image = allocate(round_page(size)+16*1024*1024);
-#else
-    image = allocate(round_page(size));
-#endif
 #ifdef BB_CPU_TRANSLATOR
     extern uint64_t bb_image_base;
     bb_image_base=(uintptr_t)image;
@@ -873,11 +646,7 @@ int main(int argc, char **argv) {
     /* The Hunter's Dream backend reads the game's code before the patches change it. */
     bbnet_set_image(image, size);
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-#ifdef _WIN32
-    printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
-#elif defined(__APPLE__)
     printf("Guest TCB loads restored to Darwin FS segments: %" PRIu64 "\n",patch_tcb_loads(segments,ns));
-#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
 #ifdef BB_CHECKPOINT_RUNTIME
     if (checkpoint_imports) {
@@ -917,7 +686,6 @@ int main(int argc, char **argv) {
     bbcpu_add_guest_code((uintptr_t)traps,round_page((import_count+1)*32));
     bbcpu_set_tls_displacement(0);
 #endif
-#ifdef __APPLE__
     if (!cpu_only) {
         extern void bbmac_features_segment(uint64_t,uint64_t,uint32_t);
         extern void bbmac_features_relative(uint64_t,uint64_t);
@@ -926,7 +694,6 @@ int main(int argc, char **argv) {
         for (uint64_t i=0;i<nr;++i) if (!relocs[i].kind) bbmac_features_relative(relocs[i].target,relocs[i].value);
         bbmac_features_install();
     }
-#endif
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     if (native_libc) {
@@ -981,10 +748,6 @@ int main(int argc, char **argv) {
         fail("entry unexpectedly returned");
     }
 #endif
-#ifdef _WIN32
-    typedef void (ABI *Entry)(void *, void (ABI *)(void));
-    ((Entry)(image + entry))(&params, guest_exit);
-#else
     /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
     enum { MAIN_STACK=8*1024*1024 };
     unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
@@ -994,7 +757,6 @@ int main(int argc, char **argv) {
     bbcpu_call_on_stack((uintptr_t)(image+entry),2,entry_args,stack,MAIN_STACK-64);
 #else
     enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
-#endif
 #endif
     fail("entry unexpectedly returned");
 }

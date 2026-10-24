@@ -41,12 +41,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
 #include <dlfcn.h>
-#endif
 
 namespace {
 
@@ -74,31 +69,17 @@ struct Hook {
 std::vector<Hook> g_hooks;  // by id, from 1
 
 void* sym(void* handle, const char* name) {
-#if defined(_WIN32)
-    return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), name));
-#else
     return dlsym(handle, name);
-#endif
 }
 
 void* open_lib(const std::string& path, std::string* err) {
-#if defined(_WIN32)
-    HMODULE h = LoadLibraryA(path.c_str());
-    if (!h) *err = "error " + std::to_string(GetLastError());
-    return h;
-#else
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!h) *err = dlerror();
     return h;
-#endif
 }
 
 void close_lib(void* handle) {
-#if defined(_WIN32)
-    FreeLibrary(static_cast<HMODULE>(handle));
-#else
     dlclose(handle);
-#endif
 }
 
 // --- the API -----------------------------------------------------------
@@ -854,11 +835,7 @@ PluginEntry entry_of(const std::string& file_name, const std::string& path, cons
 }
 
 bool is_plugin_file(const std::string& n) {
-#if defined(_WIN32)
-    return n.size() > 4 && n.compare(n.size() - 4, 4, ".dll") == 0;
-#else
     return n.size() > 6 && n.compare(n.size() - 6, 6, ".dylib") == 0;
-#endif
 }
 
 }  // namespace

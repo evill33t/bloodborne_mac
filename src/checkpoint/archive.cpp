@@ -122,13 +122,8 @@ struct VerifiedArchive::Impl {
     bool Unchanged() const {
         struct stat current{};if(fstat(fd.value,&current))return false;
         if(current.st_dev!=stamp.st_dev || current.st_ino!=stamp.st_ino || current.st_size!=stamp.st_size)return false;
-#ifdef __APPLE__
         return current.st_mtimespec.tv_sec==stamp.st_mtimespec.tv_sec && current.st_mtimespec.tv_nsec==stamp.st_mtimespec.tv_nsec &&
                current.st_ctimespec.tv_sec==stamp.st_ctimespec.tv_sec && current.st_ctimespec.tv_nsec==stamp.st_ctimespec.tv_nsec;
-#else
-        return current.st_mtim.tv_sec==stamp.st_mtim.tv_sec && current.st_mtim.tv_nsec==stamp.st_mtim.tv_nsec &&
-               current.st_ctim.tv_sec==stamp.st_ctim.tv_sec && current.st_ctim.tv_nsec==stamp.st_ctim.tv_nsec;
-#endif
     }
 };
 VerifiedArchive::VerifiedArchive()=default;

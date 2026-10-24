@@ -96,11 +96,7 @@ static int32_t acquire(Rwlock **handle, enum Operation op, const GuestTime *time
         if (!time || time->nanoseconds<0 || time->nanoseconds>=1000000000) e=EINVAL;
         else {
             struct timespec deadline={.tv_sec=(time_t)time->seconds,.tv_nsec=(long)time->nanoseconds};
-#ifdef __APPLE__
             e=writer ? bb_macos_rwlock_timedwrlock(&r->native,&deadline) : bb_macos_rwlock_timedrdlock(&r->native,&deadline);
-#else
-            e=writer ? pthread_rwlock_timedwrlock(&r->native,&deadline) : pthread_rwlock_timedrdlock(&r->native,&deadline);
-#endif
         }
     }
     pthread_mutex_lock(&registry_lock);

@@ -16,13 +16,8 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#else
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
 
 #define BBHOST_CONFIG_VERSION BBHOST_VERSION
 
@@ -209,17 +204,6 @@ void apply_values(const std::map<std::string, std::string>& kv, HostConfig* c) {
 std::map<std::string, std::string> g_values;  // the config file's raw values, for config_value
 
 std::string exe_dir() {
-#if defined(_WIN32)
-    char buf[4096];
-    const DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
-    if (n == 0 || n >= sizeof(buf)) return ".";
-    std::string p(buf, n);
-    for (char& ch : p) {
-        if (ch == '\\') ch = '/';
-    }
-    const std::size_t slash = p.find_last_of('/');
-    return slash == std::string::npos ? "." : p.substr(0, slash);
-#else
     char buf[4096];
     uint32_t size = sizeof(buf);
     ssize_t n = _NSGetExecutablePath(buf, &size) == 0 ? std::strlen(buf) : -1;
@@ -230,7 +214,6 @@ std::string exe_dir() {
     std::string p(buf);
     std::size_t slash = p.find_last_of('/');
     return slash == std::string::npos ? "." : p.substr(0, slash);
-#endif
 }
 
 bool file_exists(const std::string& p) {
@@ -239,13 +222,8 @@ bool file_exists(const std::string& p) {
 }
 
 bool dir_exists(const std::string& p) {
-#if defined(_WIN32)
-    const DWORD a = GetFileAttributesA(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
-#else
     struct stat st {};
     return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-#endif
 }
 
 // The template's stand-in paths. A config still holding one has not been
@@ -270,22 +248,14 @@ std::string env_dir(const char* name) {
 // a portable setup).
 std::string user_config_dir() {
     if (std::string d = env_dir("BBHOST_CONFIG_DIR"); !d.empty()) return d;
-#if defined(_WIN32)
-    if (std::string d = env_dir("APPDATA"); !d.empty()) return d + "/bbhost";
-#else
     if (std::string d = env_dir("XDG_CONFIG_HOME"); !d.empty()) return d + "/bbhost";
     if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.config/bbhost";
-#endif
     return exe_dir();
 }
 
 std::string user_data_dir() {
-#if defined(_WIN32)
-    if (std::string d = env_dir("LOCALAPPDATA"); !d.empty()) return d + "/bbhost/data";
-#else
     if (std::string d = env_dir("XDG_DATA_HOME"); !d.empty()) return d + "/bbhost/data";
     if (std::string d = env_dir("HOME"); !d.empty()) return d + "/.local/share/bbhost/data";
-#endif
     return exe_dir() + "/data";
 }
 
@@ -294,11 +264,7 @@ bool make_dirs(const std::string& path) {
     for (std::size_t i = 0; i <= path.size(); ++i) {
         if (i == path.size() || path[i] == '/') {
             if (!cur.empty() && !(cur.size() == 2 && cur[1] == ':') && !dir_exists(cur)) {
-#if defined(_WIN32)
-                CreateDirectoryA(cur.c_str(), nullptr);
-#else
                 ::mkdir(cur.c_str(), 0755);
-#endif
             }
         }
         if (i < path.size()) cur += path[i];

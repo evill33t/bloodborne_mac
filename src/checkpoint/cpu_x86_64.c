@@ -22,11 +22,7 @@ int bb_checkpoint_cpu_valid(const BbCheckpointCpu *cpu) {
 }
 
 #if defined(__x86_64__)
-#ifdef __APPLE__
 #define SYM(name) "_" name
-#else
-#define SYM(name) name
-#endif
 #define SAVE_YMM(n,off) "vextractf128 $1,%ymm" #n "," #off "(%rdi)\n"
 #define LOAD_YMM(n,off) "vinsertf128 $1," #off "(%rdi),%ymm" #n ",%ymm" #n "\n"
 __asm__(".text\n.p2align 4\n.globl " SYM("bb_checkpoint_cpu_save") "\n"

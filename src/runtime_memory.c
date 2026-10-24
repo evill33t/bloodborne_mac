@@ -18,18 +18,12 @@
 #include <pthread.h>
 #include <time.h>
 #include <errno.h>
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#ifdef __APPLE__
 #include <sys/stat.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-#endif
-#endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. BB_DMEM_MB raises it
  * for resolution-dependent targets; the macOS launcher sizes it from scene pixels. */
 static uint64_t pool_size_bytes(void) {
@@ -45,13 +39,9 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
-#ifdef __APPLE__
 /* Darwin reserves [64,448) GiB even under Rosetta. Keep guest mappings above
  * that aperture and the host allocator, while retaining 40-bit GPU pointers. */
 #define USER_MIN UINT64_C(0x8000000000)
-#else
-#define USER_MIN UINT64_C(0x1000000000)
-#endif
 #define USER_MAX UINT64_C(0xfc00000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
@@ -138,9 +128,7 @@ static void end_memory_mutation(void) {
 }
 static Block blocks[LIMIT];
 static Vma *vmas; static size_t vma_count, vma_capacity;
-#ifndef _WIN32
 static int pool_fd=-1;
-#endif
 static unsigned char *backing_base; /* second view of the pool: host writes bypass guest/GPU page protection */
 #define FLEX_SPAN (UINT64_C(1024) * 1024 * 1024)
 static uint64_t flex_bitmap[FLEX_SPAN/PAGE/64];
@@ -160,178 +148,7 @@ static int host_prot(int prot) {
     /* GPU read/write bits (0x10/0x20) need host access for the future GPU backend. */
     return ((prot & 0x11) ? PROT_READ : 0) | ((prot & 0x22) ? PROT_WRITE|PROT_READ : 0) | ((prot & 4) ? PROT_EXEC|PROT_READ : 0);
 }
-#ifdef _WIN32
-/* ---- host mappings (Windows) ----
- * [USER_MIN,USER_MAX) is covered by regions, each one placeholder or one view of the
- * section. Mapping a range carves it out as a single placeholder first: views overlapping
- * it are unmapped, placeholders coalesced and split, and the parts of views outside the
- * range mapped again with the page protections they had (GPU page tracking included). */
-typedef struct { uintptr_t start, end; uint64_t phys; int mapped; } HostRegion;
-typedef struct { uintptr_t start, end; DWORD protect; } ProtRun;
-static HostRegion *regions; static size_t region_count, region_capacity;
-static HANDLE section;
-static DWORD win_prot(int prot) {
-    if (prot & PROT_EXEC) return (prot & PROT_WRITE) ? PAGE_EXECUTE_READWRITE : (prot & PROT_READ) ? PAGE_EXECUTE_READ : PAGE_EXECUTE;
-    if (prot & PROT_WRITE) return PAGE_READWRITE;
-    return (prot & PROT_READ) ? PAGE_READONLY : PAGE_NOACCESS;
-}
-static void win_fail(const char *what, uintptr_t address, uint64_t size) {
-    fprintf(stderr,"STOP: %s failed at %p (+0x%" PRIx64 "), error %lu\n",what,(void *)address,size,GetLastError());
-    exit(21);
-}
-static size_t region_index(uintptr_t a) { /* first region with end > a */
-    size_t lo=0, hi=region_count;
-    while (lo<hi) { size_t mid=(lo+hi)/2; if (regions[mid].end<=a) lo=mid+1; else hi=mid; }
-    return lo;
-}
-static void region_insert(size_t at, HostRegion r) {
-    if (region_count==region_capacity) {
-        size_t capacity=region_capacity ? region_capacity*2 : 256;
-        HostRegion *next=realloc(regions,capacity*sizeof(*regions));
-        if (!next) { fputs("Out of memory (host regions)\n",stderr); exit(1); }
-        regions=next; region_capacity=capacity;
-    }
-    memmove(regions+at+1,regions+at,(region_count-at)*sizeof(*regions));
-    regions[at]=r; ++region_count;
-}
-static void region_erase(size_t at, size_t n) {
-    memmove(regions+at,regions+at+n,(region_count-at-n)*sizeof(*regions)); region_count-=n;
-}
-/* The guest range is reserved before anything else can be placed there (runtime_start). */
-void runtime_memory_reserve(void) {
-    if (region_count) return;
-    if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
-        win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
-    region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
-}
-/* Guest memory committed only as the game maps it: the whole pool did not fit Windows' commit
- * limit (RAM + page file) at once (pool()). */
-static int commit_on_map;
-static void commit_backing(uint64_t phys, uint64_t size) {
-    if (!commit_on_map || VirtualAlloc(backing_base+phys,size,MEM_COMMIT,PAGE_READWRITE)) return;
-    fprintf(stderr,"Runtime: cannot commit %" PRIu64 " MiB more guest memory (error %lu): Windows' "
-            "page file is too small for this resolution; let Windows manage its size, or use a "
-            "lower output resolution\n",size>>20,GetLastError());
-    win_fail("committing guest memory",(uintptr_t)(backing_base+phys),size);
-}
-static void view_map(const HostRegion *r, DWORD protect) {
-    DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
-    commit_backing(r->phys,r->end-r->start);
-    if (!MapViewOfFile3(section,GetCurrentProcess(),(void *)r->start,r->phys,r->end-r->start,MEM_REPLACE_PLACEHOLDER,initial,NULL,0))
-        win_fail("MapViewOfFile3",r->start,r->end-r->start);
-    if (initial!=protect && !VirtualProtect((void *)r->start,r->end-r->start,protect,&old))
-        win_fail("VirtualProtect",r->start,r->end-r->start);
-}
-static size_t save_protections(uintptr_t start, uintptr_t end, ProtRun **runs, size_t count, size_t *capacity) {
-    for (uintptr_t at=start; at<end;) {
-        MEMORY_BASIC_INFORMATION m;
-        if (!VirtualQuery((void *)at,&m,sizeof(m))) win_fail("VirtualQuery",at,0);
-        uintptr_t next=(uintptr_t)m.BaseAddress+m.RegionSize;
-        if (next>end) next=end;
-        if (count==*capacity) { *capacity=*capacity ? *capacity*2 : 16; *runs=realloc(*runs,*capacity*sizeof(**runs)); }
-        (*runs)[count++]=(ProtRun){at,next,m.Protect};
-        at=next;
-    }
-    return count;
-}
-/* Leaves [a,b) as exactly one unmapped placeholder; returns its region index. */
-static size_t carve_host(uintptr_t a, uintptr_t b) {
-    size_t first=region_index(a), last=first;
-    if (first==region_count || regions[first].start>a) win_fail("guest range outside the reservation",a,b-a);
-    while (last<region_count && regions[last].start<b) ++last;
-    if (regions[last-1].end<b) win_fail("guest range outside the reservation",a,b-a);
-    uintptr_t lo=regions[first].start, hi=regions[last-1].end;
-    HostRegion left=regions[first], right=regions[last-1];
-    int keep_left=left.mapped && lo<a, keep_right=right.mapped && b<hi;
-    if (first==last-1 && !left.mapped && lo==a && hi==b) return first;
-    ProtRun *runs=NULL; size_t nruns=0, capacity=0, left_runs=0;
-    if (keep_left) left_runs=nruns=save_protections(lo,a,&runs,nruns,&capacity);
-    if (keep_right) nruns=save_protections(b,hi,&runs,nruns,&capacity);
-    for (size_t i=first;i<last;++i) if (regions[i].mapped) {
-        if (!UnmapViewOfFile2(GetCurrentProcess(),(void *)regions[i].start,MEM_PRESERVE_PLACEHOLDER))
-            win_fail("UnmapViewOfFile2",regions[i].start,regions[i].end-regions[i].start);
-    }
-    if (last-first>1 && !VirtualFree((void *)lo,hi-lo,MEM_RELEASE|MEM_COALESCE_PLACEHOLDERS))
-        win_fail("coalescing placeholders",lo,hi-lo);
-    region_erase(first,last-first);
-    region_insert(first,(HostRegion){lo,hi,0,0});
-    size_t at=first;
-    if (lo<a) {
-        if (!VirtualFree((void *)lo,a-lo,MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER)) win_fail("splitting a placeholder",lo,a-lo);
-        regions[at].end=a;
-        region_insert(at+1,(HostRegion){a,hi,0,0});
-        if (keep_left) {
-            regions[at].phys=left.phys; regions[at].mapped=1;
-            view_map(&regions[at],PAGE_READWRITE);
-        }
-        ++at;
-    }
-    if (b<hi) {
-        if (!VirtualFree((void *)a,b-a,MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER)) win_fail("splitting a placeholder",a,b-a);
-        regions[at].end=b;
-        region_insert(at+1,(HostRegion){b,hi,0,0});
-        if (keep_right) {
-            regions[at+1].phys=right.phys+(b-right.start); regions[at+1].mapped=1;
-            view_map(&regions[at+1],PAGE_READWRITE);
-        }
-    }
-    for (size_t i=0;i<nruns;++i) {
-        DWORD old;
-        if (runs[i].protect!=PAGE_READWRITE && !VirtualProtect((void *)runs[i].start,runs[i].end-runs[i].start,runs[i].protect,&old))
-            win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
-    }
-    (void)left_runs;
-    free(runs);
-    return at;
-}
-static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
-    size_t i=carve_host(address,address+size);
-    if (reserved) return 0;
-    regions[i].phys=phys; regions[i].mapped=1;
-    view_map(&regions[i],win_prot(prot));
-    return 0;
-}
-static int host_unmap(uintptr_t address, uint64_t size) { carve_host(address,address+size); return 0; }
-static int host_protect(uintptr_t address, uint64_t size, int prot) {
-    DWORD protect=win_prot(prot), old;
-    uintptr_t end=address+size;
-    for (size_t i=region_index(address); i<region_count && regions[i].start<end; ++i) {
-        if (!regions[i].mapped) continue;
-        uintptr_t a=regions[i].start>address ? regions[i].start : address, b=regions[i].end<end ? regions[i].end : end;
-        if (!VirtualProtect((void *)a,b-a,protect,&old)) return -1;
-    }
-    return 0;
-}
-/* Released pages read as zero when reused, like the memfd's punched holes. */
-static void host_discard(uint64_t phys, uint64_t size) { commit_backing(phys,size); memset(backing_base+phys,0,size); }
-/* Direct memory occupies [0,POOL_SIZE) of the section, flexible memory [POOL_SIZE,+FLEX_SPAN). */
-static int pool(void) {
-    if (backing_base) return 0;
-    runtime_memory_reserve();
-    uint64_t bytes=POOL_SIZE+FLEX_SPAN;
-    /* BB_GUEST_COMMIT_ON_MAP=1: the fallback below from the start (tests). */
-    const char *on_map=getenv("BB_GUEST_COMMIT_ON_MAP");
-    if (on_map && on_map[0]=='1') SetLastError(ERROR_COMMITMENT_LIMIT);
-    else section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
-    if (!section && (GetLastError()==ERROR_NO_SYSTEM_RESOURCES || GetLastError()==ERROR_COMMITMENT_LIMIT)) {
-        /* The pool is sized for the largest resolutions (BB_DMEM_MB, 12+ GiB) and committed at
-         * once it exceeded RAM + page file (error 1450) although the game maps much less: then
-         * it is reserved and committed as the game maps it (commit_backing). */
-        DWORD error=GetLastError();
-        section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_RESERVE,bytes,NULL,NULL,0);
-        if (section) {
-            commit_on_map=1;
-            printf("Runtime: %" PRIu64 " MiB of guest memory do not fit Windows' commit limit at once "
-                   "(error %lu): committed as the game maps it\n",bytes>>20,error);
-        }
-    }
-    if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
-    backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
-    return backing_base ? 0 : -1;
-}
-#else
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
-#ifdef __APPLE__
 /* Darwin has no memfd_create. An immediately unlinked, sparse temporary file
  * provides the same aliasing semantics; only committed guest pages consume
  * storage. Never create anything in the game or save directories. */
@@ -365,15 +182,10 @@ static void darwin_reserve_range(void) {
 void runtime_memory_reserve(void) {
     pthread_once(&darwin_reserve_once,darwin_reserve_range);
 }
-#endif
 static int pool(void) {
     if (pool_fd>=0) return 0;
-#ifdef __APPLE__
     runtime_memory_reserve();
     pool_fd=darwin_pool_fd();
-#else
-    pool_fd=memfd_create("bb-guest-memory", MFD_CLOEXEC);
-#endif
     if (pool_fd<0) return -1;
     if (ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) {
         close(pool_fd); pool_fd=-1; return -1;
@@ -383,44 +195,30 @@ static int pool(void) {
     backing_base=view;
     return 0;
 }
-#ifndef __APPLE__
-void runtime_memory_reserve(void) {}
-#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
-#ifdef __APPLE__
     runtime_memory_reserve();
     if (address<USER_MIN || address>=USER_MAX || size>USER_MAX-address) return -1;
-#endif
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
     return mapped==MAP_FAILED ? -1 : 0;
 }
 static int host_unmap(uintptr_t address, uint64_t size) {
-#ifdef __APPLE__
     if (address<USER_MIN || address>=USER_MAX || size>USER_MAX-address) return -1;
     /* Keep ownership after unmapping so a host allocation cannot enter the
      * address range before the next fixed guest mapping. */
     return mmap((void *)address,size,PROT_NONE,
         MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0)==MAP_FAILED ? -1 : 0;
-#else
-    return munmap((void *)address,size);
-#endif
 }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
-#ifdef __APPLE__
     struct fpunchhole hole={.fp_offset=(off_t)phys,.fp_length=(off_t)size};
     if (fcntl(pool_fd,F_PUNCHHOLE,&hole)) {
         /* A non-APFS temporary volume may not implement hole punching. Reuse
          * must still return zeroed pages, including through every alias. */
         memset(backing_base+phys,0,size);
     }
-#else
-    fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
-#endif
 }
-#endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     GpuRange hook = kind==HOOK_MAP ? hook_map : kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
     if (!hook) return;
@@ -736,12 +534,10 @@ static ABI void *posix_mmap(void *address, uint64_t size, int prot, int flags,
     *runtime_errno()=(uint32_t)result&0xffff;
     return (void *)(uintptr_t)UINTPTR_MAX;
 }
-#ifndef _WIN32
 /* FreeBSD's zero-length msync flushes the VM region containing the address.
  * Guest direct/flexible regions use our own table; low guest stacks/images
  * have actual anonymous host mappings and must use the host's region bounds. */
 static int msync_host_region(uintptr_t address,uintptr_t *start,uintptr_t *end) {
-#ifdef __APPLE__
     mach_vm_address_t region=address;
     mach_vm_size_t length=0;
     vm_region_basic_info_data_64_t info;
@@ -753,19 +549,7 @@ static int msync_host_region(uintptr_t address,uintptr_t *start,uintptr_t *end) 
     if(result!=KERN_SUCCESS || region>address || !length || region>UINTPTR_MAX-length)return 0;
     *start=(uintptr_t)region;*end=(uintptr_t)(region+length);
     return address<*end;
-#else
-    FILE *maps_file=fopen("/proc/self/maps","r");
-    if(!maps_file)return 0;
-    char line[512];unsigned long long low,high;
-    int found=0;
-    while(fgets(line,sizeof(line),maps_file))
-        if(sscanf(line,"%llx-%llx",&low,&high)==2 && address>=low && address<high) {
-            *start=(uintptr_t)low;*end=(uintptr_t)high;found=1;break;
-        }
-    fclose(maps_file);return found;
-#endif
 }
-#endif
 /* The PS4 inherits FreeBSD9's MS_SYNC=0, MS_ASYNC=1, MS_INVALIDATE=2.
  * Its kernel rounds addresses (including libunwind's 4 KiB probes) to its
  * 16 KiB pages. Passing guest flags/unaligned addresses straight to Darwin
@@ -781,11 +565,6 @@ static ABI int32_t posix_msync(void *address,uint64_t size,int flags) {
     }
     uint64_t length=align_up(size+offset,PAGE);
     if(start>UINTPTR_MAX-length) {*runtime_errno()=22;return -1;}
-#ifdef _WIN32
-    /* FlushViewOfFile is not a POSIX msync substitute for anonymous/private
-     * mappings. This macOS implementation does not claim Windows support. */
-    *runtime_errno()=78;return -1;
-#else
     read_lock();
     int valid=1;
     if(!length) {
@@ -822,7 +601,6 @@ static ABI int32_t posix_msync(void *address,uint64_t size,int flags) {
      * msync return ENOMEM for that case. Other real I/O errors remain errors. */
     *runtime_errno()=host_error==ENOMEM ? 22 : runtime_guest_errno(host_error);
     return -1;
-#endif
 }
 static ABI int32_t posix_munmap(void *address, uint64_t size) {
     const uintptr_t start=(uintptr_t)address;
@@ -1184,11 +962,7 @@ int runtime_gpu_memory_map(uintptr_t *address,uint64_t size,int prot,int flags,u
 void *bbmetal_guest_allocate(size_t size) { return runtime_low_map(size,PROT_READ|PROT_WRITE); }
 /* Host-owned memory the guest can see (image, stacks, trampolines) lives in
  * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
-#ifdef __APPLE__
 #define LOW_MIN UINT64_C(0x7000000000)
-#else
-#define LOW_MIN UINT64_C(0x0800000000)
-#endif
 static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map_at(uintptr_t address,size_t size,int prot) {
     if (!size || address<LOW_MIN || address>=USER_MIN || address%PAGE ||
@@ -1196,16 +970,9 @@ void *runtime_low_map_at(uintptr_t address,size_t size,int prot) {
     size=align_up(size,PAGE);
     if (size>USER_MIN-address) return NULL;
     write_lock();
-#ifdef _WIN32
-    void *p=VirtualAlloc((void *)address,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
-#elif defined(__APPLE__)
     void *p=mmap((void *)address,size,prot,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (p!=MAP_FAILED && p!=(void *)address) { munmap(p,size); p=MAP_FAILED; }
     if (p==MAP_FAILED) p=NULL;
-#else
-    void *p=mmap((void *)address,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
-    if (p==MAP_FAILED) p=NULL;
-#endif
     if (p && address+size+PAGE>low_next) low_next=address+size+PAGE;
     write_unlock();
     return p;
@@ -1214,28 +981,14 @@ void *runtime_low_map(size_t size, int prot) {
     if (!size || size>USER_MIN-LOW_MIN-PAGE) return NULL;
     size=align_up(size,PAGE);
     write_lock();
-#ifdef _WIN32
-    void *p=NULL;
-    while (!p && low_next+size<=USER_MIN) {
-        p=VirtualAlloc((void *)low_next,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
-        low_next+=size+UINT64_C(65536); /* unmapped gap catches overruns; allocation granularity */
-    }
-    write_unlock();
-    return p;
-#else
     void *p=MAP_FAILED;
     while (low_next+size<=USER_MIN) {
-#ifdef __APPLE__
         uintptr_t attempted=low_next;
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
         if (p!=MAP_FAILED && p!=(void *)low_next) {
             munmap(p,size); p=MAP_FAILED;
         }
-#else
-        p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
-#endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
-#ifdef __APPLE__
         if (p==MAP_FAILED) {
             /* Darwin may put a multi-GiB host mapping in this band. Jump past
              * it instead of retrying one 16-KiB page at a time. */
@@ -1250,12 +1003,10 @@ void *runtime_low_map(size_t size, int prot) {
             if (result==KERN_SUCCESS && region<attempted+size && region+length>low_next)
                 low_next=align_up(region+length,PAGE);
         }
-#endif
         if (p!=MAP_FAILED) break;
     }
     write_unlock();
     return p==MAP_FAILED ? NULL : p;
-#endif
 }
 /* ---- GPU library interface (gpu/shim/bbgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by
@@ -1288,11 +1039,7 @@ static void *toggle_watcher(void *path) {
             printf("Runtime: disabled optimizations mask=%llu\n",value);
             last=value;
         }
-#ifdef _WIN32
-        compat_sleep_ns(250000000);
-#else
         struct timespec t={0,250000000}; nanosleep(&t,NULL);
-#endif
     }
     return NULL;
 }

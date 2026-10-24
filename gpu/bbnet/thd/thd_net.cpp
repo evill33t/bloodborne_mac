@@ -6,17 +6,12 @@
 // (566184a), its poll path.
 #include "thd_internal.h"
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#endif
 
 #include <atomic>
 #include <cerrno>
@@ -41,64 +36,6 @@ namespace {
 
 // ---- sockets, the same on Windows and POSIX ------------------------------------------------------
 
-#ifdef _WIN32
-using sockfd_t = SOCKET;
-constexpr sockfd_t kBadSock = INVALID_SOCKET;
-using socklen_type = int;
-using ssize_type = int;
-void sock_close(sockfd_t fd) { ::closesocket(fd); }
-int sock_errno() {
-    switch (::WSAGetLastError()) {
-    case WSAEWOULDBLOCK: return EAGAIN;
-    case WSAECONNREFUSED: return ECONNREFUSED;
-    case WSAEADDRINUSE: return EADDRINUSE;
-    case WSAEACCES: return EACCES;
-    case WSAEMSGSIZE: return EMSGSIZE;
-    case WSAENOTSOCK: return EBADF;
-    case WSAEINTR: return EINTR;
-    default: return EIO;
-    }
-}
-void sock_set_nonblock(sockfd_t fd, bool on) {
-    u_long v = on ? 1 : 0;
-    ::ioctlsocket(fd, FIONBIO, &v);
-}
-int sock_poll(sockfd_t fd, short events, int ms) {
-    WSAPOLLFD p{fd, events, 0};
-    return ::WSAPoll(&p, 1, ms);
-}
-ssize_type sock_recvfrom(sockfd_t fd, void* buf, std::size_t len, bool dontwait, sockaddr_in* sa,
-                         socklen_type* sl) {
-    if (!dontwait && sock_poll(fd, POLLIN, -1) <= 0) return -1;
-    return ::recvfrom(fd, static_cast<char*>(buf), static_cast<int>(len), 0,
-                      reinterpret_cast<sockaddr*>(sa), sl);
-}
-ssize_type sock_sendto(sockfd_t fd, const void* buf, std::size_t len, bool dontwait,
-                       const sockaddr_in* sa) {
-    for (;;) {
-        const int n = ::sendto(fd, static_cast<const char*>(buf), static_cast<int>(len), 0,
-                               reinterpret_cast<const sockaddr*>(sa), sizeof(*sa));
-        if (n >= 0 || dontwait || ::WSAGetLastError() != WSAEWOULDBLOCK) return n;
-        sock_poll(fd, POLLOUT, 100);
-    }
-}
-void wsa_start() {
-    static const bool started = [] {
-        WSADATA d{};
-        return ::WSAStartup(MAKEWORD(2, 2), &d) == 0;
-    }();
-    (void)started;
-}
-sockfd_t sock_udp() {
-    wsa_start();
-    const sockfd_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd != INVALID_SOCKET) sock_set_nonblock(fd, true); // blocking calls wait with WSAPoll
-    return fd;
-}
-void sock_setopt_int(sockfd_t fd, int level, int name, int v) {
-    ::setsockopt(fd, level, name, reinterpret_cast<const char*>(&v), sizeof(v));
-}
-#else
 using sockfd_t = int;
 constexpr sockfd_t kBadSock = -1;
 using socklen_type = socklen_t;
@@ -127,7 +64,6 @@ sockfd_t sock_udp() { return ::socket(AF_INET, SOCK_DGRAM, 0); }
 void sock_setopt_int(sockfd_t fd, int level, int name, int v) {
     ::setsockopt(fd, level, name, &v, sizeof(v));
 }
-#endif
 bool sock_ok(sockfd_t fd) { return fd != kBadSock; }
 
 // Host errno as the console's (FreeBSD) numbers.
@@ -515,9 +451,6 @@ std::shared_ptr<UdpPort> p2p_port_open(std::uint16_t want) {
         const auto at = static_cast<std::uint16_t>(want + i);
         port->fd = sock_udp();
         if (!sock_ok(port->fd)) return nullptr;
-#ifdef _WIN32
-        sock_setopt_int(port->fd, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1);
-#endif
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
         sa.sin_port = bswap16(at);
@@ -790,9 +723,7 @@ s32 PS4_SYSV_ABI net_setsockopt(int s, int level, int name, const void* val, int
     if (val && len >= 4) std::memcpy(&v, val, 4);
     if (name == 0x1200) { // SCE_NET_SO_NBIO
         sock.nonblock = v != 0;
-#ifndef _WIN32
         if (sock_ok(sock.fd)) sock_set_nonblock(sock.fd, v != 0);
-#endif
     } else if (sock_ok(sock.fd) && level == 0xffff && (name == 0x1001 || name == 0x1002)) {
         sock_setopt_int(sock.fd, SOL_SOCKET, name == 0x1001 ? SO_SNDBUF : SO_RCVBUF, v);
     }

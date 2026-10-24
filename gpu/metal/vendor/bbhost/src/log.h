@@ -3,15 +3,10 @@
 #include <cstdio>
 #include <cstring>
 #include <utility>
-#if !defined(_WIN32)
 #include <unistd.h>
-#endif
 
 // One write per line so lines from different threads do not interleave.
 inline void host_log_line(const char* line) {
-#if defined(_WIN32)
-    std::fputs(line, stderr);
-#else
     // write(2), not stdio: async-signal-safe (the fault handler logs) and no
     // FILE lock to deadlock on when a fault lands inside fputs.
     const char* p = line;
@@ -24,7 +19,6 @@ inline void host_log_line(const char* line) {
         p += n;
         left -= static_cast<std::size_t>(n);
     }
-#endif
 }
 
 template <typename... Args>
