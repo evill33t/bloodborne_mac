@@ -564,6 +564,23 @@ int main(void) {
     if (gamepad) SDL_CloseGamepad(gamepad);
     gamepad=NULL;
     assert(SDL_DetachVirtualJoystick(id));
+    /* Co-op actions share the pad sampler and never bypass settings capture. */
+    runtime_pad_director_press(0);
+    assert(pad_read_state(1,&data)==0);
+    const uint32_t crosses=runtime_pad_cross_presses();
+    runtime_pad_director_press(BTN_CROSS);
+    assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS));
+    assert(runtime_pad_last_buttons() & BTN_CROSS);
+    assert(runtime_pad_cross_presses()==crosses+1);
+    assert(pad_read_state(1,&data)==0 && runtime_pad_cross_presses()==crosses+1);
+    runtime_pad_director_sticks(0,255,-1,-1);
+    assert(pad_read_state(1,&data)==0 && data.left_x==0 && data.left_y==255);
+    assert(runtime_pad_last_left()==0xff00);
+    capture=1;
+    assert(pad_read_state(1,&data)==0 && !data.buttons);
+    runtime_pad_director_press(0);runtime_pad_director_sticks(-1,-1,-1,-1);
+    capture=0;
+    assert(pad_read_state(1,&data)==0 && !data.buttons && data.left_x==128 && data.left_y==128);
     SDL_Quit();
     unlink(path);
     puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture");

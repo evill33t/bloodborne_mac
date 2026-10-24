@@ -102,3 +102,13 @@ it remains disabled by default. See
 Inactive Windows/Linux host branches were removed from the adapted sources.
 Darwin behavior, CPU architecture switches, guest ABI interfaces and original
 license notices are retained.
+
+## Queue ownership corrections (24 October 2026)
+
+Graphics flip markers now belong to the graphics ring; concurrent compute jobs
+cannot overwrite or retire them. Graphics multi-span/indirect-buffer scope and
+presentation, label-store and interrupt ordering are retained. User-event
+trigger payloads are published atomically through `udata` and triggering does
+not create a missing event. Native/Rosetta CPU regressions and combined native
+GPU fixtures pass; visible gameplay and performance validation remain pending.
+See [queue validation](../../../../docs/MACOS_QUEUE_OWNERSHIP_2026-10-24.md).

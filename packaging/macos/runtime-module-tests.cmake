@@ -8,3 +8,7 @@ target_include_directories(bb-runtime-msync-tests PRIVATE "${BB_ROOT}" "${BB_ROO
 target_compile_options(bb-runtime-msync-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 add_test(NAME darwin-runtime-msync COMMAND bb-runtime-msync-tests)
 set_tests_properties(darwin-runtime-msync PROPERTIES TIMEOUT 15)
+add_executable(bb-runtime-allocation-audit-tests "${BB_ROOT}/tests/test_allocation_audit.c")
+target_compile_options(bb-runtime-allocation-audit-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+add_test(NAME darwin-runtime-allocation-audit COMMAND bb-runtime-allocation-audit-tests)
+set_tests_properties(darwin-runtime-allocation-audit PROPERTIES TIMEOUT 15)

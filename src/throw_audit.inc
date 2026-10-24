@@ -9,6 +9,10 @@ static uint64_t throw_audit_segment_count;
 static _Atomic unsigned throw_audit_events;
 static _Atomic unsigned allocation_audit_events;
 static uint64_t allocation_audit_libc;
+static const char allocation_audit_eboot_hash[]="cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86";
+
+static int allocation_audit_code(const Segment *,uint64_t,uint64_t,size_t);
+static int allocation_audit_call(uint64_t,uint64_t);
 
 static int throw_audit_image_read(uint64_t address,void *out,size_t bytes) {
     const uint64_t base=(uintptr_t)image;
@@ -21,6 +25,165 @@ static int throw_audit_image_read(uint64_t address,void *out,size_t bytes) {
             return bb_macos_read_memory((uintptr_t)address,out,bytes);
     }
     return 0;
+}
+
+static int allocation_audit_image_range(uint64_t offset,size_t bytes,uint64_t flags) {
+    for(uint64_t n=0;n<throw_audit_segment_count;++n) {
+        const Segment *s=&throw_audit_segments[n];
+        if((s->flags&flags)==flags && offset>=s->address && bytes<=s->size &&
+           offset-s->address<=s->size-bytes)return 1;
+    }
+    return 0;
+}
+
+/* Only the original default standard-allocator BSS object is described here.
+ * Read fixed scalars, never bin heads, arena contents, or an alternate object.
+ * Two equal observations are still unsynchronized, not an atomic snapshot. */
+static void allocation_audit_heap_snapshot(unsigned sequence,const uint64_t callbacks[3],
+                                          unsigned callback_readable) {
+    static const unsigned char core_guard[]={0x53,0x31,0xc0,0x48,0x39,0x77,0x18,0x0f,0x82,0x47,0x01,0,0};
+    static const unsigned char capacity_guard[]={0x48,0xc7,0x83,0x78,0x04,0,0,0,0,0x40,0x07};
+    static const uint64_t fields[]={0x28,0x30,0x38,0x40,0x48,0x460,0x468,0x470,0x478};
+    const uint64_t base=(uintptr_t)image,global_rva=0x56a20c0,object_rva=0x56a20c8;
+    const char *reason="image-identity";
+    const char *hash=getenv("BB_MAC_EBOOT_SHA256");
+    uint64_t object=0,after=0,samples[2][9]={{0}},current_callbacks[2]={0};
+    unsigned char actual[sizeof(core_guard)];
+    /* The trusted launcher supplies the prepared original ELF identity. This
+     * does not recompute the hash of the relocated in-memory image. */
+    if(!hash || strcmp(hash,allocation_audit_eboot_hash))goto unavailable;
+    reason="image-layout";
+    if(base>UINT64_MAX-object_rva-0x480 || !module_count ||
+       object_rva+0x480>modules[0].base ||
+       !allocation_audit_image_range(global_rva,8,6) ||
+       !allocation_audit_image_range(object_rva,0x480,6))goto unavailable;
+    reason="callback-selection";
+    if((callback_readable&3)!=3 || callbacks[0]!=base+0x20809f0 ||
+       callbacks[1]!=base+0x2080cd0)goto unavailable;
+    reason="instruction-layout";
+    if(!allocation_audit_image_range(0x2085730,sizeof(core_guard),5) ||
+       !allocation_audit_image_range(0x2081c3a,sizeof(capacity_guard),5) ||
+       !throw_audit_image_read(base+0x2085730,actual,sizeof(core_guard)) ||
+       memcmp(actual,core_guard,sizeof(core_guard)) ||
+       !throw_audit_image_read(base+0x2081c3a,actual,sizeof(capacity_guard)) ||
+       memcmp(actual,capacity_guard,sizeof(capacity_guard)))goto unavailable;
+    reason="object-selection";
+    if(!throw_audit_image_read(base+global_rva,&object,8) || object!=base+object_rva)goto unavailable;
+    reason="scalar-read";
+    for(unsigned sample=0;sample<2;++sample)
+        for(unsigned n=0;n<9;++n)
+            if(!throw_audit_image_read(object+fields[n],&samples[sample][n],8))goto unavailable;
+    reason="selection-recheck";
+    if(!throw_audit_image_read(base+global_rva,&after,8) ||
+       !throw_audit_image_read(base+allocation_audit_libc+0xba190,&current_callbacks[0],8) ||
+       !throw_audit_image_read(base+allocation_audit_libc+0xba1a0,&current_callbacks[1],8) ||
+       after!=object || current_callbacks[0]!=callbacks[0] || current_callbacks[1]!=callbacks[1])goto unavailable;
+    flockfile(stderr);
+    fprintf(stderr,"Runtime allocation heap audit: sequence=%u state=sampled unsynchronized=1"
+        " sample_comparison=%s object=%#" PRIx64 " heap=%#" PRIx64,
+        sequence,memcmp(samples[0],samples[1],sizeof(samples[0])) ? "different-racy" : "equal",
+        object,object+0x28);
+    for(unsigned sample=0;sample<2;++sample)
+        fprintf(stderr," sample%u_bitmap=%#" PRIx64 " sample%u_arena_start=%#" PRIx64
+            " sample%u_arena_end=%#" PRIx64 " sample%u_free_bytes=%" PRIu64
+            " sample%u_allocation_counter=%" PRIu64 " sample%u_initial_span=%" PRIu64
+            " sample%u_mapped_base=%#" PRIx64 " sample%u_physical_offset=%#" PRIx64
+            " sample%u_capacity_bytes=%" PRIu64,
+            sample,samples[sample][0],sample,samples[sample][1],sample,samples[sample][2],
+            sample,samples[sample][3],sample,samples[sample][4],sample,samples[sample][5],
+            sample,samples[sample][6],sample,samples[sample][7],sample,samples[sample][8]);
+    fputc('\n',stderr);
+    funlockfile(stderr);
+    return;
+unavailable:
+    fprintf(stderr,"Runtime allocation heap audit: sequence=%u state=unavailable reason=%s unsynchronized=1\n",sequence,reason);
+}
+
+typedef struct {
+    const char *state;
+    uint64_t function_rva,slot_offset,caller,caller_rva;
+    int readable;
+} AllocationAuditOrigin;
+
+static AllocationAuditOrigin allocation_audit_helper_origin(const uint64_t regs[16],uint64_t immediate) {
+    static const unsigned char small_prefix[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x85,0xff,
+        0xbb,1,0,0,0,0x48,0x0f,0x45,0xdf};
+    static const unsigned char saved_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x50};
+    static const unsigned char large_prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x54,0x53,0x48,0x81,0xec,0xc0,0,0,0};
+    static const struct {
+        uint64_t return_rva,start,bytes,slot_offset;
+        const unsigned char *prefix;size_t prefix_bytes;
+    } layouts[]={
+        {0x5febe,0x5fe80,69,32,small_prefix,sizeof(small_prefix)},
+        {0x5a7d9,0x5a6f0,267,64,saved_prefix,sizeof(saved_prefix)},
+        {0x5a940,0x5a800,379,240,large_prefix,sizeof(large_prefix)},
+        {0x62cac,0x62c20,377,64,saved_prefix,sizeof(saved_prefix)},
+        {0x62d40,0x62c20,377,64,saved_prefix,sizeof(saved_prefix)},
+        {0x70cc6,0x70c20,421,64,saved_prefix,sizeof(saved_prefix)},
+        {0x70d6a,0x70c20,421,64,saved_prefix,sizeof(saved_prefix)},
+    };
+    AllocationAuditOrigin result={.state="unclassified",.caller_rva=UINT64_MAX};
+    const uint64_t base=(uintptr_t)image;
+    if(base>UINT64_MAX-allocation_audit_libc || immediate<base+allocation_audit_libc)return result;
+    const uint64_t relative=immediate-base-allocation_audit_libc;
+    for(unsigned n=0;n<sizeof(layouts)/sizeof(layouts[0]);++n)if(relative==layouts[n].return_rva) {
+        unsigned char actual[sizeof(small_prefix)];
+        result.state="layout-unavailable";
+        result.function_rva=allocation_audit_libc+layouts[n].start;
+        result.slot_offset=layouts[n].slot_offset;
+        if(!allocation_audit_code(throw_audit_segments,throw_audit_segment_count,result.function_rva,layouts[n].bytes) ||
+           !throw_audit_image_read(base+result.function_rva,actual,layouts[n].prefix_bytes) ||
+           memcmp(actual,layouts[n].prefix,layouts[n].prefix_bytes) ||
+           !allocation_audit_call(allocation_audit_libc+relative-5,allocation_audit_libc+0x5ebd0))return result;
+        /* These complete original procedures preserve this entry frame until
+         * the exact helper CALL. Read its one fixed saved return, not [RBP]. */
+        result.state="frame-unavailable";
+        if(regs[4]>UINT64_MAX-result.slot_offset || regs[5]!=regs[4]+result.slot_offset-8)return result;
+        result.readable=bb_macos_read_memory((uintptr_t)(regs[4]+result.slot_offset),&result.caller,8);
+        result.state=result.readable ? "checked-fixed-rsp-slot" : "slot-unreadable";
+        if(result.readable && result.caller>=base && bbcpu_is_guest(result.caller))result.caller_rva=result.caller-base;
+        return result;
+    }
+    return result;
+}
+
+static AllocationAuditOrigin allocation_audit_vector_owner(const uint64_t regs[16],uint64_t immediate,
+                                                          unsigned tag,const uint64_t callbacks[3],unsigned mask) {
+    AllocationAuditOrigin result={.state="unclassified",.caller_rva=UINT64_MAX};
+    const uint64_t base=(uintptr_t)image;
+    const char *hash=getenv("BB_MAC_EBOOT_SHA256");
+    if(tag!=1 || base>UINT64_MAX-0x2a3bfc9 || immediate!=base+0x2a3bbaf)return result;
+    result.state="layout-unavailable";result.function_rva=0x2a3bab0;result.slot_offset=168;
+    static const unsigned char prefix[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x58};
+    unsigned char actual[sizeof(prefix)];
+    if(!hash || strcmp(hash,allocation_audit_eboot_hash) || !(mask&4) ||
+       callbacks[2]!=base+allocation_audit_libc+0x5fe80 ||
+       !allocation_audit_image_range(0x2a3bab0,1305,5) ||
+       !throw_audit_image_read(base+0x2a3bab0,actual,sizeof(actual)) || memcmp(actual,prefix,sizeof(prefix)) ||
+       !allocation_audit_call(0x2a3bbaa,0x2bbe9a8))return result;
+    result.state="frame-unavailable";
+    /* Game frame: push RBP + five saved registers + 88 local bytes =136.
+     * Its CALL and the validated default-new 24-byte frame add32, so its
+     * saved return is exactly168 bytes above this failure-label RSP. */
+    if(regs[4]>UINT64_MAX-168 || regs[5]!=regs[4]+16)return result;
+    result.readable=bb_macos_read_memory((uintptr_t)(regs[4]+168),&result.caller,8);
+    result.state=result.readable ? "checked-fixed-rsp-slot" : "slot-unreadable";
+    if(result.readable && result.caller>=base && bbcpu_is_guest(result.caller))result.caller_rva=result.caller-base;
+    return result;
+}
+
+static int allocation_audit_stack_words(unsigned sequence,uint64_t rsp) {
+    uint64_t words[64];
+    const int readable=rsp<=UINT64_MAX-(sizeof(words)-1) &&
+        bb_macos_read_memory((uintptr_t)rsp,words,sizeof(words));
+    flockfile(stderr);
+    fprintf(stderr,"Runtime allocation stack audit: sequence=%u uninterpreted=1 rsp=%#" PRIx64
+        " bytes=%zu readable=%d",sequence,rsp,sizeof(words),readable);
+    if(readable)for(unsigned n=0;n<64;++n)fprintf(stderr," word%u=%#" PRIx64,n,words[n]);
+    fputc('\n',stderr);funlockfile(stderr);return readable;
 }
 
 static void throw_audit_probe(const uint64_t regs[16],uint64_t address,uint32_t tag) {
@@ -87,16 +250,21 @@ static void allocation_failure_probe(const uint64_t regs[16],uint64_t address,ui
     const int readable=regs[4]<=UINT64_MAX-displacement &&
         bb_macos_read_memory((uintptr_t)(regs[4]+displacement),&caller,sizeof(caller));
     if(readable && caller>=(uintptr_t)image && bbcpu_is_guest(caller))caller_rva=caller-(uintptr_t)image;
+    AllocationAuditOrigin origin={.state="not-helper-site",.caller_rva=UINT64_MAX};
+    if(!tag && readable)origin=allocation_audit_helper_origin(regs,caller);
     uint64_t callbacks[3]={0},callback_rvas[3]={UINT64_MAX,UINT64_MAX,UINT64_MAX};
     static const uint64_t slots[]={0xba190,0xba1a0,0xbe978};
     unsigned callback_readable=0;
     for(unsigned n=0;n<3;++n) {
-        if(throw_audit_image_read((uintptr_t)image+allocation_audit_libc+slots[n],&callbacks[n],8)) {
+        if(slots[n]<=modules[0].size && 8<=modules[0].size-slots[n] &&
+           throw_audit_image_read((uintptr_t)image+allocation_audit_libc+slots[n],&callbacks[n],8)) {
             callback_readable|=1u<<n;
             if(callbacks[n]>=(uintptr_t)image && bbcpu_is_guest(callbacks[n]))
                 callback_rvas[n]=callbacks[n]-(uintptr_t)image;
         }
     }
+    AllocationAuditOrigin owner={.state="not-default-new-site",.caller_rva=UINT64_MAX};
+    if(tag && readable)owner=allocation_audit_vector_owner(regs,caller,tag,callbacks,callback_readable);
     char request[32]="unavailable",thread[64]={0};
     /* Only this proved default-new block retains the normalized request in
      * RBX. The helper's RDI=8 would describe the exception payload, not it. */
@@ -106,15 +274,24 @@ static void allocation_failure_probe(const uint64_t regs[16],uint64_t address,ui
     fprintf(stderr,"Runtime allocation audit: sequence=%u site=%s thread=%s pthread=%#" PRIxPTR
         " function_rva=%#" PRIx64 " normalized_request_bytes=%s caller_readable=%d"
         " caller_slot_offset=%" PRIu64 " caller=%#" PRIx64 " caller_rva=%#" PRIx64
+        " rax=%#" PRIx64 " rsp=%#" PRIx64 " rbp=%#" PRIx64
         " rdi=%#" PRIx64 " rsi=%#" PRIx64 " rdx=%#" PRIx64 " rcx=%#" PRIx64
         " r8=%#" PRIx64 " r9=%#" PRIx64 " rbx=%#" PRIx64 " r12=%#" PRIx64
         " r13=%#" PRIx64 " r14=%#" PRIx64 " r15=%#" PRIx64
         " callbacks_readable=%#x malloc=%#" PRIx64 " malloc_rva=%#" PRIx64
-        " calloc=%#" PRIx64 " calloc_rva=%#" PRIx64 " new=%#" PRIx64 " new_rva=%#" PRIx64 "\n",
+        " calloc=%#" PRIx64 " calloc_rva=%#" PRIx64 " new=%#" PRIx64 " new_rva=%#" PRIx64
+        " origin_state=%s origin_function_rva=%#" PRIx64 " origin_slot_base=rsp"
+        " origin_slot_offset=%" PRIu64 " origin_readable=%d origin=%#" PRIx64 " origin_rva=%#" PRIx64
+        " owner_state=%s owner_function_rva=%#" PRIx64 " owner_slot_base=rsp"
+        " owner_slot_offset=%" PRIu64 " owner_readable=%d owner=%#" PRIx64 " owner_rva=%#" PRIx64 "\n",
         sequence,tag ? "default-new-failure" : "bad-alloc-helper",thread,(uintptr_t)pthread_self(),
         address-(uintptr_t)image,request,readable,displacement,caller,caller_rva,
-        regs[7],regs[6],regs[2],regs[1],regs[8],regs[9],regs[3],regs[12],regs[13],regs[14],regs[15],
-        callback_readable,callbacks[0],callback_rvas[0],callbacks[1],callback_rvas[1],callbacks[2],callback_rvas[2]);
+        regs[0],regs[4],regs[5],regs[7],regs[6],regs[2],regs[1],regs[8],regs[9],regs[3],regs[12],regs[13],regs[14],regs[15],
+        callback_readable,callbacks[0],callback_rvas[0],callbacks[1],callback_rvas[1],callbacks[2],callback_rvas[2],
+        origin.state,origin.function_rva,origin.slot_offset,origin.readable,origin.caller,origin.caller_rva,
+        owner.state,owner.function_rva,owner.slot_offset,owner.readable,owner.caller,owner.caller_rva);
+    allocation_audit_heap_snapshot(sequence,callbacks,callback_readable);
+    if(!tag)allocation_audit_stack_words(sequence,regs[4]);
     *runtime_errno()=saved_guest_errno;errno=saved_errno;
 }
 

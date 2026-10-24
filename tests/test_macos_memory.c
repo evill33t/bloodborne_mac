@@ -35,6 +35,13 @@ static void fixed_flexible_budget(GuestMmap guest_mmap) {
     check(!runtime_gpu_label_load(&old,&observed) && runtime_gpu_label_capture((uintptr_t)replace,4,&fresh) && fresh.identity!=old.identity,
         "replacement retires old VMA identity");
     check(runtime_gpu_label_load(&prefix,&observed),"replacement preserves prefix VMA identity");
+    replace[0]=0x96;
+    BatchEntry fixed={.start=replace,.length=chunk,.prot=3,.operation=3};int processed=-1;
+    check(!batch_map2(&fixed,1,&processed,MAP_FIXED_FLAG) && processed==1 && fixed.start==replace && flexible_bytes==FLEXIBLE_SIZE,
+        "batch operation3 also replaces32MiB at full quota");
+    for(uint64_t n=0;n<chunk;++n)check(!replace[n],"batch replacement is entirely zero initialized");
+    check(!runtime_gpu_label_load(&fresh,&observed) && runtime_gpu_label_capture((uintptr_t)replace,4,&fresh) &&
+        replace[-1]==0x4c && replace[chunk]==0x6d,"batch replacement retires identity and preserves neighbors");
     replace[0]=0xa7;
     check(guest_mmap(replace,chunk,3,0x1092,-1,0)==(void *)UINTPTR_MAX && *runtime_errno()==12,
         "full-budget no-overwrite still rejects replacement");
@@ -85,17 +92,20 @@ static int audit_failures(void) {
         "early mmap validation audit preserves both errnos");
     BatchEntry entry={.length=FLEXIBLE_SIZE+PAGE,.prot=3,.operation=3};int processed=-1;
     check(batch_map2(&entry,1,&processed,0)==NO_MEMORY && processed==0,"batch flexible quota failure observed");
+    check(map_flexible(&address,FLEXIBLE_SIZE+PAGE,3,0)==NO_MEMORY,"outer flexible failure emits only bounded audit row");
     check(direct_allocate(0,POOL_SIZE,POOL_SIZE+PAGE,0,0,&physical)==NO_SPACE,"direct range failure observed");
     for(unsigned n=0;n<100;++n)check(direct_allocate(-1,0,PAGE,0,0,NULL)==INVALID,"bounded repeated audit failure");
     fflush(stderr);check(dup2(saved_stderr,STDERR_FILENO)>=0,"restore stderr");close(saved_stderr);
     check(!fseek(capture,0,SEEK_END),"size audit capture");const long length=ftell(capture);check(length>0 && length<65536,"bounded audit capture size");
     rewind(capture);char *text=malloc((size_t)length+1);check(text && fread(text,1,(size_t)length,capture)==(size_t)length,"read audit capture");
-    text[length]=0;fclose(capture);unsigned rows=0;
+    text[length]=0;fclose(capture);unsigned rows=0,lines=0;
     for(char *at=text;(at=strstr(at,"Runtime memory audit:"));++at)++rows;
-    check(rows==64 && atomic_load_explicit(&memory_failure_rows,memory_order_relaxed)==64,"at most64 failure audit rows");
+    for(char *at=text;*at;++at)if(*at=='\n')++lines;
+    check(rows==64 && lines==64 && atomic_load_explicit(&memory_failure_rows,memory_order_relaxed)==64,"at most64 failure audit rows without duplicate legacy text");
     check(strstr(text,"operation=direct_allocate") && strstr(text,"reason=host-pool") && strstr(text,"host_errno_checked=1 host_errno=2"),
         "actual host errno recorded only for a checked failing operation");
     check(strstr(text,"operation=map_anonymous") && strstr(text,"operation=map_flexible") && strstr(text,"reason=flexible-quota"),"early validation and batch failures retained");
+    check(strstr(text,"source_api=batch_map2.operation3")!=NULL,"batch entry source API retained");
     check(strstr(text,"guest_caller=unavailable") && strstr(text,"host_errno_checked=0 host_errno=0"),"unavailable caller and unchecked host errno explicit");
     free(text);puts("PASS: opt-in failure-only VM audit, batch/early mmap/direct failures, checked host errno, preserved errnos and64-row cap");return 0;
 }

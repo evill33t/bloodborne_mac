@@ -445,7 +445,9 @@ bool CommandProcessor::PauseForCheckpoint(CheckpointState& out,std::chrono::stea
         }
         if(renderer && !renderer->WaitIdleUntil(deadline,error)){ResumeAfterCheckpoint();return false;}
         {std::lock_guard lock(fence_lock);if(!pending_fences.empty())return fail("GPU fences are still active after draining.");}
-        if(!ce.stack.empty() || flip_label.addr || flip_label.interrupt)return fail("GPU command continuation is still active.");
+        if(!ce.stack.empty() || std::any_of(all.begin(),all.end(),[](const Ring* ring) {
+            return ring->flip_label.addr || ring->flip_label.interrupt;
+        }))return fail("GPU command continuation is still active.");
         CheckpointState state;state.index_base=index_base;state.index_size=index_size;state.num_instances=num_instances;
         state.ce_counter=ce.ce_counter;state.de_counter=ce.de_counter;
         state.registers.assign(regs.Data(),regs.Data()+RegFile::kSize);state.ce_ram=ce.ram;
@@ -527,11 +529,11 @@ void CommandProcessor::Run(Ring& ring, std::stop_token stop) {
         if (job.after && !execution->Failed() && !stopping) {
             job.after();
         }
-        if (!execution->Failed() && (flip_label.addr || flip_label.interrupt)) {
-            const FlipLabel label = flip_label;
+        if (ring.index==0 && !execution->Failed() && (ring.flip_label.addr || ring.flip_label.interrupt)) {
+            const FlipLabel label = ring.flip_label;
             FenceWrite(label.addr ? kData32 : kDataNone,label.addr,label.value,0,
                 label.interrupt ? kIrqGfxEop : 0);
-            flip_label = {};
+            ring.flip_label = {};
         }
         if (renderer) {
             renderer->OnSubmit(); // hand everything, signals included, to the host GPU
@@ -866,10 +868,14 @@ void CommandProcessor::Execute(std::span<const u32> cmds, bool compute, int dept
         case Op::Nop:
             // The Gnm driver hides flip requests in NOPs: "when this frame is
             // shown, write `value` to `label` and/or raise the EOP interrupt".
-            if (body_n >= 4 && (body[0] == kNopPrepareFlipLabel || body[0] == kNopPrepareFlipInterruptLabel)) {
-                flip_label = {u64(body[1] & ~3u) | (u64(body[2]) << 32), body[3], body[0] == kNopPrepareFlipInterruptLabel};
-            } else if (body_n >= 1 && body[0] == kNopPrepareFlipInterrupt) {
-                flip_label = {0, 0, true};
+            // Compute queues run concurrently and ordinary NOP payloads must
+            // neither replace nor retire a graphics job's flip marker.
+            if (!compute && t_ring && t_ring->index==0) {
+                if (body_n >= 4 && (body[0] == kNopPrepareFlipLabel || body[0] == kNopPrepareFlipInterruptLabel)) {
+                    t_ring->flip_label = {u64(body[1] & ~3u) | (u64(body[2]) << 32), body[3], body[0] == kNopPrepareFlipInterruptLabel};
+                } else if (body_n >= 1 && body[0] == kNopPrepareFlipInterrupt) {
+                    t_ring->flip_label = {0, 0, true};
+                }
             }
             break;
         case Op::ClearState:

@@ -112,7 +112,8 @@ int32_t AddUserEvent(uint32_t id,uint64_t event) {
 }
 int32_t TriggerUserEvent(uint32_t id,uint64_t event,void* data) {
     const auto queue=GetQueue(id);
-    return queue && queue->Trigger(event,Hle::Kernel::kEvfiltUser,int64_t(uintptr_t(data))) ? 0 : int32_t(0x80020002);
+    if (!queue) return int32_t(0x80020009);
+    return queue->TriggerUser(event,data) ? 0 : int32_t(0x80020002);
 }
 int32_t DeleteUserEvent(uint32_t id,uint64_t event) {
     const auto queue=GetQueue(id);

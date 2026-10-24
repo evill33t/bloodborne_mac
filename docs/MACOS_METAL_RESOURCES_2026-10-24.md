@@ -278,8 +278,19 @@ on `GXRenderThread`, followed by an uncaught-exception debug termination.
 The optional throw observer ran before cleanup. This failed interval lasts
 581.223 seconds to the last submission, with four travel requests; a complete
 780-second pass is not claimed. The immediate throw caller is a libc helper,
-so the failed allocation's size and heap are not yet identified. See the SSD
-report for the binary identity, counters and unchanged-source verification.
+so that observation alone did not identify the failed allocation. The second
+SSD replay narrows it to a 384-byte original vector-growth request in a fixed
+116 MiB game arena. Full original allocation/free cores subsequently match
+across JIT, interpreter and Rosetta in serial differential fixtures. The live
+owner/heap snapshot remains pending because the third attempt stopped before
+gameplay with the Mac locked. See the SSD report for binary identities,
+limits, counters and unchanged-source verification.
+
+The subsequent source audit corrects cross-ring graphics flip-label retirement
+and the macOS user-event payload field. Combined native/Rosetta CPU and native
+GPU regressions pass; live gameplay and FPS validation of those corrections
+are pending. These corrections are not yet attributed to the allocator failure.
+See [queue ownership](MACOS_QUEUE_OWNERSHIP_2026-10-24.md).
 
 A separate quiet CPU benchmark compared the exact payload loop with system
 `memcmp` and wider bounded NEON loops. For a 256 MiB source pass plus separate

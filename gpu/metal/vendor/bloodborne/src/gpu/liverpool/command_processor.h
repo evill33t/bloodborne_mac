@@ -132,6 +132,14 @@ private:
         std::vector<u32> ram = std::vector<u32>(0xC000 / 4, 0);
     };
 
+    // Flip markers belong to the graphics job that consumes them. All of its
+    // spans/recursive IBs share this state until its after/flip has returned.
+    struct FlipLabel {
+        u64 addr = 0;
+        u32 value = 0;
+        bool interrupt = false;
+    };
+
     // One hardware ring: the graphics ring or a compute queue. Rings run in
     // parallel, as on the GPU, so a wait on one can be satisfied by another.
     struct Ring {
@@ -144,6 +152,7 @@ private:
         RegFile regs;           // compute rings: their own SH state
         u64 indirect_base = 0;  // SET_BASE
         u32 indirect_selector = 0; // optimization admission only; unknown after restore
+        FlipLabel flip_label; // graphics worker only; compute NOPs cannot own a flip
         std::jthread thread;
     };
 
@@ -182,12 +191,6 @@ private:
     bool warned_indirect = false;
     bool trace = false; // DC_CP_TRACE
     bool validate_registers = false; // BB_METAL_CP_VALIDATE=1, no rendering side effects
-    // Flip label requested by the frame being executed; written once it is shown.
-    struct FlipLabel {
-        u64 addr = 0;
-        u32 value = 0;
-        bool interrupt = false;
-    } flip_label;
     Gpu::Renderer* renderer = nullptr;
     std::shared_ptr<Gpu::ExecutionState> execution=std::make_shared<Gpu::ExecutionState>();
     std::atomic<bool> stopping{false};

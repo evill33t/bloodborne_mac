@@ -30,7 +30,9 @@ if(BUILD_TESTING)
     target_compile_features(bb-macos-memory-tests PRIVATE c_std_11)
     target_compile_options(bb-macos-memory-tests PRIVATE -Wall -Wextra -Werror)
     add_test(NAME macos-guest-memory COMMAND bb-macos-memory-tests)
+    add_test(NAME macos-guest-memory-audit COMMAND bb-macos-memory-tests --audit)
     set_tests_properties(macos-guest-memory PROPERTIES TIMEOUT 30)
+    set_tests_properties(macos-guest-memory-audit PROPERTIES TIMEOUT 30)
     add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/bb-macos-memory-tests-x86_64"
         COMMAND "${BB_XCRUN}" clang -arch x86_64 -std=c11 -O2 -Wall -Wextra -Werror
             "${CMAKE_SOURCE_DIR}/tests/test_macos_memory.c" "${CMAKE_SOURCE_DIR}/src/runtime_errno.c"

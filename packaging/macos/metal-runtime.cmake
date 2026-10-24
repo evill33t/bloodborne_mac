@@ -32,6 +32,13 @@ target_compile_options(bb-ps4-metal PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc
 target_link_libraries(bb-ps4-metal PUBLIC SDL3::SDL3-static bbmac-network bbmac-features bbmac-nightwatch
     "-framework Metal" "-framework MetalFX" "-framework AppKit" "-framework Foundation" "-framework QuartzCore")
 
+add_executable(bb-macos-pad-tests "${BB_ROOT}/tests/test_pad.c" "${BB_ROOT}/src/runtime_input_config.c")
+target_include_directories(bb-macos-pad-tests PRIVATE "${BB_ROOT}")
+target_compile_options(bb-macos-pad-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(bb-macos-pad-tests PRIVATE SDL3::SDL3-static)
+add_test(NAME darwin-pad COMMAND bb-macos-pad-tests)
+set_tests_properties(darwin-pad PROPERTIES TIMEOUT 20)
+
 # Source recipes are recompiled by the selected host runtime; no game is run.
 add_executable(bb-macos-precompile-shaders "${BB_ROOT}/gpu/metal/precompile_main.mm")
 target_include_directories(bb-macos-precompile-shaders PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
@@ -39,6 +46,16 @@ target_compile_options(bb-macos-precompile-shaders PRIVATE -Wall -Wextra -Werror
 target_link_libraries(bb-macos-precompile-shaders PRIVATE bb-ps4-metal bbruntime)
 
 if(BUILD_TESTING OR NOT DEFINED BUILD_TESTING)
+    add_executable(bb-metal-flip-retirement-tests "${BB_ROOT}/gpu/metal/tests/game_flip_retirement_tests.cpp")
+    target_include_directories(bb-metal-flip-retirement-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
+    target_compile_options(bb-metal-flip-retirement-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_link_libraries(bb-metal-flip-retirement-tests PRIVATE bbruntime bb-ps4-metal)
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        target_link_options(bb-metal-flip-retirement-tests PRIVATE
+            -Wl,-ld_classic,-no_pie,-no_fixup_chains,-no_huge,-pagezero_size,0x4000,-segaddr,TCB_SPACE,0x4000,-image_base,0x700000000000)
+    endif()
+    add_test(NAME metal-flip-retirement-cpu COMMAND bb-metal-flip-retirement-tests)
+    set_tests_properties(metal-flip-retirement-cpu PROPERTIES TIMEOUT 20 LABELS "cpu" ENVIRONMENT "ROSETTA_ADVERTISE_AVX=1")
     add_executable(bb-metal-original-shadow-projection-tests "${BB_ROOT}/gpu/metal/tests/game_original_shadow_projection_tests.mm")
     target_include_directories(bb-metal-original-shadow-projection-tests PRIVATE "${BB_PS4_METAL}" "${BB_ROOT}")
     target_compile_options(bb-metal-original-shadow-projection-tests PRIVATE -UNDEBUG -Wall -Wextra -Werror -fobjc-arc)

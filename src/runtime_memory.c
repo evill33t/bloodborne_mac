@@ -139,21 +139,26 @@ static uint64_t live_bytes, flexible_bytes;
 
 typedef struct { int checked,value; } HostMemoryError;
 typedef struct {
-    const char *operation;
+    const char *operation,*source_api;
     uintptr_t address,output;
     uint64_t bytes,alignment,overlap;
     int64_t low,high,offset;
     int address_known,prot,flags,type,fd;
 } MemoryFailureRequest;
 static _Atomic unsigned memory_failure_rows;
+static int memory_audit_enabled(void) {
+    const int saved_errno=errno;
+    const char *enabled=getenv("BB_RUNTIME_EXIT_AUDIT");
+    const int result=enabled && !strcmp(enabled,"1");
+    errno=saved_errno;return result;
+}
 /* Failure-only, bounded diagnostics. Do not infer a host error from errno
  * after validation, and never dereference a guest stack to obtain a caller. */
 static int32_t memory_failure(MemoryFailureRequest request,const char *reason,
                               int32_t result,HostMemoryError host) {
     const int saved_errno=errno;
     const int32_t saved_guest_errno=*runtime_errno();
-    const char *enabled=getenv("BB_RUNTIME_EXIT_AUDIT");
-    if(enabled && !strcmp(enabled,"1")) {
+    if(memory_audit_enabled()) {
         unsigned row=atomic_load_explicit(&memory_failure_rows,memory_order_relaxed);
         while(row<64 && !atomic_compare_exchange_weak_explicit(&memory_failure_rows,&row,row+1,
               memory_order_relaxed,memory_order_relaxed)){}
@@ -164,13 +169,14 @@ static int32_t memory_failure(MemoryFailureRequest request,const char *reason,
             read_unlock();
             char thread[64]={0};pthread_getname_np(pthread_self(),thread,sizeof(thread));
             if(!thread[0])strcpy(thread,"unnamed");
-            fprintf(stderr,"Runtime memory audit: sequence=%u operation=%s reason=%s thread=%s"
+            fprintf(stderr,"Runtime memory audit: sequence=%u operation=%s source_api=%s reason=%s thread=%s"
                 " guest_caller=unavailable address_known=%d address=%#" PRIxPTR " output=%#" PRIxPTR
                 " bytes=%" PRIu64 " alignment=%" PRIu64 " low=%" PRId64 " high=%" PRId64
                 " prot=%#x flags=%#x type=%d fd=%d offset=%" PRId64 " result=%#x"
                 " host_errno_checked=%d host_errno=%d direct_live=%" PRIu64 " direct_budget=%" PRIu64
                 " flexible_live=%" PRIu64 " flexible_budget=%" PRIu64 " overlap_flexible=%" PRIu64
-                " regions=%zu\n",row,request.operation,reason,thread,request.address_known,request.address,
+                " regions=%zu\n",row,request.operation,request.source_api ? request.source_api : request.operation,
+                reason,thread,request.address_known,request.address,
                 request.output,request.bytes,request.alignment,request.low,request.high,request.prot,
                 request.flags,request.type,request.fd,request.offset,(unsigned)result,host.checked,
                 host.checked ? host.value : 0,direct_live,POOL_SIZE,flex_live,FLEXIBLE_SIZE,request.overlap,regions);
@@ -525,8 +531,8 @@ static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     end_memory_mutation();
     return 0;
 }
-static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags) {
-    MemoryFailureRequest request={.operation="map_flexible",.output=(uintptr_t)inout,
+static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int flags,const char *source_api) {
+    MemoryFailureRequest request={.operation="map_flexible",.source_api=source_api,.output=(uintptr_t)inout,
         .bytes=size,.prot=prot,.flags=flags,.fd=-1};
     if (!inout || !size || size%PAGE || (prot & ~0x37))
         return memory_failure(request,"invalid-request",INVALID,(HostMemoryError){0});
@@ -563,12 +569,12 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
     if (!begin_memory_mutation()) return ACCESS;
     write_lock();
-    int32_t result=map_flexible_locked(inout,size,prot,flags);
+    int32_t result=map_flexible_locked(inout,size,prot,flags,"map_flexible");
     write_unlock();
     flush_hooks();
     end_memory_mutation();
     if (!result) printf("Runtime: mapped flexible memory %p, size=%" PRIu64 ", prot=0x%x\n", *inout, size, prot);
-    else fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
+    else if(!memory_audit_enabled()) fprintf(stderr,"Runtime: flexible map of %" PRIu64 " bytes failed (0x%x), in use=%" PRIu64 "\n",
                  size, (unsigned)result, flexible_bytes);
     return result;
 }
@@ -779,7 +785,7 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
         case 0: result=map_direct_locked(&e->start,e->length,(uint8_t)e->prot,flags,(int64_t)e->offset,0); break;
         case 1: result=unmap_locked((uintptr_t)e->start,e->length); break;
         case 2: result=protect_locked((uintptr_t)e->start,e->length,(uint8_t)e->prot,-1); break;
-        case 3: result=map_flexible_locked(&e->start,e->length,(uint8_t)e->prot,flags); break;
+        case 3: result=map_flexible_locked(&e->start,e->length,(uint8_t)e->prot,flags,"batch_map2.operation3"); break;
         case 4: result=protect_locked((uintptr_t)e->start,e->length,(uint8_t)e->prot,e->type); break;
         default: result=INVALID;
         }

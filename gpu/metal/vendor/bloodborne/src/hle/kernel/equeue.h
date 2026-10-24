@@ -37,6 +37,9 @@ public:
     // Marks a registered event as fired; wakes waiters. Returns false if the
     // event is not registered on this queue.
     bool Trigger(u64 ident, s16 filter, s64 data);
+    // User-event payloads belong to udata, not the filter's data field. Update
+    // the payload and readiness together so waiters see one complete event.
+    bool TriggerUser(u64 ident, void* udata);
     // Waits for fired events; timeout_us null = forever. Returns count.
     int Wait(GuestKevent* out, int max, const u32* timeout_us);
 

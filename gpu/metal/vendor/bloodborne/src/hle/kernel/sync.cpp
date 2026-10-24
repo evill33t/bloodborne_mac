@@ -1,5 +1,6 @@
 // libkernel semaphores and event queues.
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -52,6 +53,23 @@ bool EventQueue::Trigger(u64 ident, s16 filter, s64 data) {
         }
         found->fired = true;
         found->ev.data = data;
+    }
+    cv.notify_all();
+    return true;
+}
+
+bool EventQueue::TriggerUser(u64 ident, void* udata) {
+    {
+        std::scoped_lock lk(lock);
+        auto it = std::find_if(events.begin(), events.end(), [ident](const Entry& e) {
+            return e.ev.ident == ident && e.ev.filter == kEvfiltUser;
+        });
+        if (it == events.end()) {
+            return false;
+        }
+        it->ev.udata = udata;
+        it->ev.data = 0;
+        it->fired = true;
     }
     cv.notify_all();
     return true;
@@ -118,9 +136,10 @@ s32 sceKernelAddUserEventEdge(EventQueue* eq, int id) {
 }
 
 s32 sceKernelTriggerUserEvent(EventQueue* eq, int id, void* udata) {
-    eq->Add(static_cast<u64>(id), kEvfiltUser, udata);
-    eq->Trigger(static_cast<u64>(id), kEvfiltUser, 0);
-    return ORBIS_OK;
+    if (!eq) {
+        return OrbisError(EBADF);
+    }
+    return eq->TriggerUser(static_cast<u64>(id), udata) ? ORBIS_OK : OrbisError(ENOENT);
 }
 
 s32 sceKernelDeleteUserEvent(EventQueue* eq, int id) {

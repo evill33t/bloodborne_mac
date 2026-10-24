@@ -59,3 +59,25 @@ network tests and pure progression/travel rules are distinct from live game
 validation. No claim is made here of two-Mac gameplay, shared campaign completion,
 Internet/NAT traversal, Windows cross-play or native arm64 co-op. See the root
 README and task validation logs under `out/nightwatch-*` for the executed checks.
+
+Verified locally on 24 October 2026: Rosetta and arm64 game builds; nine focused
+CTest fixtures (settings, hidden Cocoa settings UI, pad director/capture, party
+configuration, encrypted loopback link, network HLE, host service, progression
+and travel); 26 Python settings/preparation/input tests. A disposable mapping of
+the supported private ELF installed 101 checked hooks at both 30 and 60 FPS while
+preserving bbhost's timing hook. The ELF fixture never executes game code.
+
+Reproduce the public fixtures after building the corresponding test targets:
+
+```sh
+ROSETTA_ADVERTISE_AVX=1 ctest --test-dir out/macos-runtime \
+  -R '^(darwin-nightwatch-.*|darwin-settings(-overlay)?|darwin-pad)$' --output-on-failure
+python3 -m unittest discover -s tests -p 'test_macos_nightwatch.py'
+python3 -m unittest discover -s tests -p 'test_macos_settings.py'
+python3 -m unittest discover -s tests -p 'test_input_defaults.py'
+```
+
+Socket fixtures require loopback access; the hidden-window UI/pad fixtures require
+macOS UI services. The optional `bb-nightwatch-hooks-tests ELF PATCHES` fixture
+requires a private supported 1.09 ELF and a generated co-op BBPATCH2 file; neither
+is distributed. Without arguments it tests configuration and mode restoration.

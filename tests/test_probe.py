@@ -195,6 +195,65 @@ def throw_audit_package(*,bad_typeinfo=False,bad_name=False,bad_prefix=False,
     return package,caller
 
 
+def allocation_audit_package(*,fail=False,request=37,bad_helper=False,bad_new=False,events=1):
+    """Owned allocator graph; signature prefixes match, complete bodies are synthetic."""
+    base=0x4000;helper=base+0x5ebd0;normal_new=base+0x5fe80;throw=base+0x60510
+    object_at=0x68080;type_at=0x68100;name_at=0x68200
+    def relative(code,origin,opcode,target):
+        code.extend(opcode);code.extend(struct.pack('<i',target-(origin+len(code)+4)))
+    main=bytearray(bytes.fromhex('4883ec18'))
+    relative(main,0,b'\xff\x15',520)
+    main.extend(bytes.fromhex('48890424c7005b000000'))
+    main.extend(b'\xb9'+struct.pack('<I',events));loop=len(main)
+    main.extend(b'\x48\xbf'+struct.pack('<Q',request))
+    relative(main,0,b'\xff\x15',512);caller=len(main)
+    main.extend(b'\x3d'+struct.pack('<I',42 if fail else 0x1234)+bytes.fromhex('74020f0bffc9'))
+    relative(main,0,b'\x0f\x85',loop)
+    main.extend(bytes.fromhex('488b1424833a5b74020f0b'))
+    if fail:
+        relative(main,0,b'\x83\x3d',object_at-128)
+        struct.pack_into('<i',main,len(main)-4,object_at-128-(len(main)+1))
+        main.extend(bytes.fromhex('0174020f0b'))
+    main.extend(bytes.fromhex('31ff4883c418'))
+    relative(main,0,b'\xff\x25',528)
+    image=bytearray(0xc4000);image[:len(main)]=main;image[base:base+3]=bytes.fromhex('31c0c3')
+    image[0x5000:0x5006]=bytes.fromhex('31c0c3909090') if fail else bytes.fromhex('b834120000c3')
+    image[0x5020:0x5023]=bytes.fromhex('31c0c3')
+    alloc=bytearray();relative(alloc,0x5060,b'\x48\x8d\x05',object_at);alloc.extend(b'\xc3')
+    image[0x5060:0x5060+len(alloc)]=alloc;image[0x5080]=0xc3
+    # Ordinary success returns immediately; NULL malloc and NULL handler alone
+    # reach offset57, deliberately a conditional branch's fallthrough block.
+    new=bytearray(bytes.fromhex('554889e553504885ffbb')+struct.pack('<I',2 if bad_new else 1)+bytes.fromhex('480f45df'))
+    relative(new,normal_new,b'\xe8',0x5000)
+    new.extend(bytes.fromhex('4885c07522'))
+    relative(new,normal_new,b'\xe8',0x5020)
+    new.extend(b'\x90'*19+bytes.fromhex('4885c07505'))
+    assert len(new)==57
+    relative(new,normal_new,b'\xe8',helper)
+    new.extend(bytes.fromhex('4883c4085b5dc3'));assert len(new)==69
+    image[normal_new:normal_new+len(new)]=new
+    # Own returning helper prepares fake RTTI and calls the throw-like function.
+    h=bytearray(bytes.fromhex('554889e5bf')+struct.pack('<I',9 if bad_helper else 8))
+    relative(h,helper,b'\xe8',0x5060);h.extend(bytes.fromhex('4889c7'))
+    relative(h,helper,b'\x48\x8d\x35',type_at)
+    relative(h,helper,b'\x48\x8d\x15',0x5080)
+    h.extend(b'\x90'*(45-len(h)));relative(h,helper,b'\xe8',throw)
+    h.extend(bytes.fromhex('5dc3'));image[helper:helper+len(h)]=h
+    t=bytes.fromhex('554889e548c747800100000048893748895708b82a0000005dc3')
+    image[throw:throw+len(t)]=t;image[name_at:name_at+13]=b'FixtureError\0'
+    names=('vkuuLfhnSZI#q#q','fJnpuVVBbKk#q#q','9BcDykPmo1I#p#J','after-allocation-like-function')
+    relocs=[(512,1,1,0),(520,1,2,0),(528,1,3,0),(536,1,0,0),
+            (type_at+8,0,name_at,0),(base+0xba190,0,0x5000,0),
+            (base+0xba1a0,0,0x5020,0),(base+0xbe978,0,normal_new,0)]
+    package=(struct.pack('<8s6Q',b'BBPROBE3',len(image),0,3,len(relocs),4,1)+
+             struct.pack('<8Q',base,0xc0000,base,0x68000,32,4,2,256)+
+             struct.pack('<6Q',0,throw,1,1,normal_new,1)+
+             struct.pack('<9Q',0,base,5,base,0x64000,5,0x68000,0x5c000,6)+
+             b''.join(n.encode().ljust(128,b'\0') for n in names)+
+             b''.join(struct.pack('<QQqq',*r) for r in relocs)+image)
+    return package,caller,normal_new+62
+
+
 @unittest.skipUnless(EXE.exists(), 'build native probe first')
 class LoaderTests(unittest.TestCase):
     def test_invalid_content_profile_is_rejected(self):
@@ -311,6 +370,45 @@ class LoaderTests(unittest.TestCase):
         self.assertIn('after-throw-like-function',r.stdout)
         self.assertIn('first argument: 0x0',r.stdout)
         self.assertNotIn('Runtime throw audit:',r.stderr)
+
+    def check_allocation_fixture(self,enabled='1',**kwargs):
+        data,caller,helper_caller=allocation_audit_package(**kwargs)
+        r=self.run_image(data,env={'BB_RUNTIME_EXIT_AUDIT':enabled})
+        self.assertEqual(r.returncode,20,r.stdout+r.stderr)
+        self.assertIn('first unsupported PS4 import: after-allocation-like-function',r.stdout)
+        self.assertIn('first argument: 0x0',r.stdout)
+        return r,caller,helper_caller
+
+    def test_allocation_audit_only_observes_failure_blocks_and_checked_origins(self):
+        good,_,_=self.check_allocation_fixture()
+        self.assertNotIn('Runtime allocation audit: sequence=',good.stderr)
+        for request in (0,37):
+            with self.subTest(request=request):
+                failed,caller,helper_caller=self.check_allocation_fixture(fail=True,request=request)
+                if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+                    rows=[s for s in failed.stderr.splitlines() if 'Runtime allocation audit: sequence=' in s]
+                    self.assertEqual(len(rows),2,failed.stderr)
+                    self.assertIn('site=default-new-failure',rows[0])
+                    self.assertIn(f'normalized_request_bytes={max(1,request)} ',rows[0])
+                    self.assertIn('caller_slot_offset=24',rows[0]);self.assertIn(f'caller_rva={caller:#x}',rows[0])
+                    self.assertIn('site=bad-alloc-helper',rows[1]);self.assertIn('normalized_request_bytes=unavailable',rows[1])
+                    self.assertIn(f'caller_rva={helper_caller:#x}',rows[1]);self.assertIn('caller_slot_offset=0',rows[1])
+                    self.assertIn('callbacks_readable=0x7',rows[1]);self.assertIn('malloc_rva=0x5000',rows[1])
+                else:self.assertNotIn('Runtime allocation audit:',failed.stderr)
+
+    def test_allocation_audit_signatures_event_cap_and_disabled_flag(self):
+        failed,_,_=self.check_allocation_fixture(fail=True,events=40)
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':
+            self.assertEqual(failed.stderr.count('Runtime allocation audit: sequence='),64)
+            self.assertEqual(failed.stderr.count('Runtime allocation audit: event limit reached (64)'),1)
+        refused,_,_=self.check_allocation_fixture(fail=True,bad_helper=True)
+        self.assertNotIn('Runtime allocation audit: sequence=',refused.stderr)
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':self.assertIn('refused bad_alloc helper',refused.stderr)
+        refused,_,_=self.check_allocation_fixture(fail=True,bad_new=True)
+        self.assertNotIn('site=default-new-failure',refused.stderr)
+        if os.environ.get('BB_PROBE_TRANSLATOR')=='1':self.assertIn('refused default-new',refused.stderr)
+        off,_,_=self.check_allocation_fixture(enabled='0',fail=True)
+        self.assertNotIn('Runtime allocation audit:',off.stderr)
 
     def test_native_initializer_and_export_return(self):
         r=self.run_image(native_package())

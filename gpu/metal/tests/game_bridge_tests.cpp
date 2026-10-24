@@ -28,6 +28,7 @@ int main() {
     auto destroy=Import<int (*)(uint32_t)>("sceKernelDeleteEqueue");
     auto add=Import<int (*)(uint32_t,uint64_t)>("sceKernelAddUserEvent");
     auto trigger=Import<int (*)(uint32_t,uint64_t,void*)>("sceKernelTriggerUserEvent");
+    auto remove=Import<int (*)(uint32_t,uint64_t)>("sceKernelDeleteUserEvent");
     auto wait=Import<int (*)(uint32_t,Hle::Kernel::GuestKevent*,int,int*,const uint32_t*)>("sceKernelWaitEqueue");
     struct { uint32_t handle=0, canary=0xcafebabe; } queue;
     assert(create(&queue.handle,"metal ABI test")==0 && queue.handle);
@@ -36,10 +37,38 @@ int main() {
     Hle::Kernel::GuestKevent event{};
     uint32_t timeout=0; int count=-1;
     assert(wait(queue.handle,&event,1,&count,&timeout)==int32_t(0x8002003c) && count==0);
+    // Trigger cannot create an unregistered event or wake its waiters.
+    assert(trigger(queue.handle,7,reinterpret_cast<void*>(0x5678))==int32_t(0x80020002));
+    assert(wait(queue.handle,&event,1,&count,&timeout)==int32_t(0x8002003c) && count==0);
     assert(trigger(queue.handle,0x100000001ull,reinterpret_cast<void*>(0x1234))==0);
     assert(wait(queue.handle,&event,1,&count,&timeout)==0 && count==1);
-    assert(event.ident==0x100000001ull && event.data==0x1234 && event.filter==-11);
+    assert(event.ident==0x100000001ull && event.data==0 && event.filter==-11 &&
+        event.udata==reinterpret_cast<void*>(0x1234));
+    // Coalescing uses the latest complete user payload; nullptr is a payload,
+    // and neither triggering nor a waiter may split readiness from the value.
+    assert(trigger(queue.handle,0x100000001ull,reinterpret_cast<void*>(0x5678))==0);
+    assert(trigger(queue.handle,0x100000001ull,nullptr)==0);
+    assert(wait(queue.handle,&event,1,&count,&timeout)==0 && count==1 && !event.udata && !event.data);
+    auto waiting=std::async(std::launch::async,[&] {
+        Hle::Kernel::GuestKevent delivered{}; int received=0; uint32_t bounded_timeout=1000000;
+        const auto result=wait(queue.handle,&delivered,1,&received,&bounded_timeout);
+        assert(result==0 && received==1 && delivered.ident==0x100000001ull &&
+            delivered.udata==reinterpret_cast<void*>(0x9abc) && !delivered.data);
+    });
+    assert(trigger(queue.handle,0x100000001ull,reinterpret_cast<void*>(0x9abc))==0);
+    waiting.get();
+    // A user payload update must leave other filters' registered data intact.
+    Hle::Kernel::EventQueue isolated("filter payload test");
+    isolated.Add(1,Hle::Kernel::kEvfiltGraphicsCore,reinterpret_cast<void*>(0x1122));
+    assert(!isolated.TriggerUser(1,reinterpret_cast<void*>(0x3344)));
+    assert(isolated.Trigger(1,Hle::Kernel::kEvfiltGraphicsCore,55));
+    assert(isolated.Wait(&event,1,&timeout)==1 && event.data==55 &&
+        event.udata==reinterpret_cast<void*>(0x1122) && event.filter==Hle::Kernel::kEvfiltGraphicsCore);
+    assert(remove(queue.handle,0x100000001ull)==0);
+    assert(trigger(queue.handle,0x100000001ull,nullptr)==int32_t(0x80020002));
+    assert(wait(queue.handle,&event,1,&count,&timeout)==int32_t(0x8002003c) && count==0);
     assert(destroy(queue.handle)==0);
+    assert(trigger(queue.handle,0x100000001ull,nullptr)==int32_t(0x80020009));
     assert(wait(queue.handle,&event,1,&count,&timeout)==int32_t(0x80020009));
 
     // Reject kernels which change the value or do not expose both descriptors.
