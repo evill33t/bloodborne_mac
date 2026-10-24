@@ -1,6 +1,6 @@
 #pragma once
 
-// Host shell: SDL3 window, event pump, input state, and a Vulkan presenter.
+// Host shell: SDL3 window, event pump, input state, and the Mac presenter.
 // Everything here is optional; when the shell is not started (headless) the
 // HLE keeps working without a display.
 
@@ -50,7 +50,7 @@ struct PadState {
     std::uint32_t menu_buttons = 0;
 };
 
-// Creates the window (and Vulkan presenter when possible). Returns false when
+// Creates the window (and Metal presenter when possible). Returns false when
 // no display or SDL is unavailable; the caller then runs headless.
 bool host_window_start(int width, int height, const char* title);
 // Pump events once. Returns false when the user asked to quit.

@@ -57,5 +57,4 @@ uses the translator; loading external generated libraries is not enabled.
 
 Inactive Windows/Linux host branches were removed from the adapted sources.
 Darwin behavior, CPU architecture switches, guest ABI interfaces and original
-license notices are retained. The shared runtime errno mapping is compiled as a
-separate provider so standalone Darwin memory fixtures use the same mapping.
+license notices are retained.

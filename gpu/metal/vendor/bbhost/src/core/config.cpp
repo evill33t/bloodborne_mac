@@ -730,12 +730,12 @@ std::string config_setup_help(const HostConfig& c) {
         line("");
         line("Open it and set both paths, for example:");
         line("    [paths]");
-        line("    app0  = \"C:\\Games\\Bloodborne\\CUSA00900\"   # the folder that contains dvdroot_ps4");
-        line("    eboot = \"C:\\Games\\Bloodborne\\eboot.bin\"    # the decrypted eboot ELF");
+        line("    app0  = \"/path/to/CUSA00900\"   # the folder that contains dvdroot_ps4");
+        line("    eboot = \"/path/to/eboot.elf\"    # the decrypted eboot ELF");
         line("");
-        line("Either slash works on Windows, and a relative path is taken from the");
+        line("A relative path is taken from the");
         line("folder the configuration file is in. The same two can be given on the");
-        line("command line instead:  bbhost --app0 DIR path\\to\\eboot.bin");
+        line("command line instead:  bbhost --app0 DIR /path/to/eboot.elf");
         return out;
     }
     // Both are set: say which one is wrong, and where the value came from.
@@ -863,18 +863,15 @@ bool config_write_template(const std::string& path) {
         return false;
     }
     out << "# bbhost configuration. Set the two paths under [paths], then run bbhost.\n"
-           "# On Windows write them either way: \"C:\\Games\\Bloodborne\" or \"C:/Games/Bloodborne\".\n"
            "# A relative path is taken from the folder this file is in.\n"
-           "# This file is the per-user one (%APPDATA%\\bbhost on Windows, ~/.config/bbhost on\n"
-           "# Linux): every copy of bbhost reads it, so a new download or an update keeps it.\n"
            "[paths]\n"
            "# The folder that contains dvdroot_ps4 (the decrypted game dump). An update\n"
            "# kept beside it in a folder of its own (CUSA00900-UPDATE or CUSA00900-patch,\n"
            "# as shadPS4 keeps one) is read in place of the game folder's files.\n"
-           "#   app0 = \"C:\\Games\\Bloodborne\\CUSA00900\"\n"
+           "#   app0 = \"/path/to/CUSA00900\"\n"
            "app0 = \"PATH-TO-THE-GAME-DUMP\"\n"
            "# The decrypted eboot ELF. May also be given on the command line.\n"
-           "#   eboot = \"C:\\Games\\Bloodborne\\eboot.bin\"\n"
+           "#   eboot = \"/path/to/eboot.elf\"\n"
            "eboot = \"PATH-TO-THE-EBOOT\"\n"
            "# Writable folder for saves, caches and /data. Default: the per-user data\n"
            "# folder (%LOCALAPPDATA%\\bbhost\\data, ~/.local/share/bbhost/data), which\n"

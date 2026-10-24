@@ -83,9 +83,10 @@ static void install_throw_audit(const Segment *segments,uint64_t count,
     if(!target) {fputs("Runtime throw audit: no bound __cxa_throw target\n",stderr);return;}
     int in_module=0,executable=0;
     enum { FUNCTION_BYTES=54 };
-    for(uint64_t n=0;n<module_count;++n)
-        if(target>=modules[n].base && FUNCTION_BYTES<=modules[n].size &&
-           target-modules[n].base<=modules[n].size-FUNCTION_BYTES)in_module=1;
+    /* The loader's first linked module is libc. Do not observe a lookalike
+     * scoped binding into a later system module, even with matching bytes. */
+    if(module_count && target>=modules[0].base && FUNCTION_BYTES<=modules[0].size &&
+       target-modules[0].base<=modules[0].size-FUNCTION_BYTES)in_module=1;
     for(uint64_t n=0;n<count;++n)
         if((segments[n].flags&1) && target>=segments[n].address && FUNCTION_BYTES<=segments[n].size &&
            target-segments[n].address<=segments[n].size-FUNCTION_BYTES)executable=1;

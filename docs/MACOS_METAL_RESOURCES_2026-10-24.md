@@ -255,10 +255,23 @@ thread name and module/msync coverage before callbacks, then bounded finalizer
 identities. It changes no exit status, order or destructor selection. Both
 architecture probes pass22 loader tests including exact actual-NID exit caller,
 LIFO/single callback execution and audit-off behavior. See the
-[diagnostic note](MACOS_EXIT_AUDIT_2026-10-24.md). A separate audit replay is
-running with binary
-`01a8e6a34842c0df26ddc7c0e1530cb3720c3c9bf901f31ea341f8b085eda0af`.
+[diagnostic note](MACOS_EXIT_AUDIT_2026-10-24.md). The separate audit replay with
+binary `01a8e6a34842c0df26ddc7c0e1530cb3720c3c9bf901f31ea341f8b085eda0af`
+stopped at 572.23 measured presentation seconds on the next unsupported
+import, `_is_signal_return`, before reaching any exit/finalizer audit. Its
+argument was the translator's outer return sentinel. The runtime now implements
+classification against its empty guest signal-trampoline set, preserving errno
+and leaving address validation and unwind behaviour unchanged. Native and
+Rosetta loader tests and private original-consumer cases pass; see the
+[signal-return report](MACOS_SIGNAL_RETURN_2026-10-24.md). This fixes the missing
+API, not the initiating exception. Optional observation of original
+`__cxa_throw` is being added to identify that exception during the next replay.
 No native60FPS lock is established by the completed matched comparisons above.
+
+The user subsequently moved the sources to the internal SSD. Read-only
+preflight and separate preparation pass, and the complete relative-name,
+size/mtime inventory matches the previous sources. The new gameplay cohort
+keeps the previous evidence intact; see [SSD validation](MACOS_SSD_TESTS_2026-10-24.md).
 
 The original-file inventory/hash verification passes after these changes:
 28,779 game files and35 DLC files retain sizes/mtimes, the original eboot and

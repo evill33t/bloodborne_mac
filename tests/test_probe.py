@@ -1,5 +1,5 @@
 """Boundary tests for the native loader; uses tiny synthetic x86-64 images."""
-from paths import ROOT
+from paths import ROOT, RUNTIME_DIR
 from pathlib import Path
 import struct
 import subprocess
@@ -8,7 +8,7 @@ import unittest
 import os
 from link_modules import pack_module_info
 
-EXE = Path(os.environ.get('BB_PROBE', str(ROOT / 'out/bb-probe')))
+EXE = Path(os.environ.get('BB_PROBE', str(RUNTIME_DIR / 'bb-macos-runtime-probe')))
 
 
 def package(code, relocs=(), names=(), capabilities=None):
@@ -139,7 +139,7 @@ def signal_return_package(pc):
 
 
 def throw_audit_package(*,bad_typeinfo=False,bad_name=False,bad_prefix=False,
-                        module_size=8192,scope='q#q',events=1,name=b'FixtureError'):
+                        module_size=8192,second_module=False,scope='q#q',events=1,name=b'FixtureError'):
     """Owned returning function with a guarded throw-like ABI, not original libc code."""
     code=bytearray(bytes.fromhex('4883ec18'))
     def rip(opcode,target):
@@ -175,13 +175,20 @@ def throw_audit_package(*,bad_typeinfo=False,bad_name=False,bad_prefix=False,
     function=bytes.fromhex('554889e548c74780')+struct.pack('<I',2 if bad_prefix else 1)+bytes.fromhex('48893748895708b82a0000005dc3')
     image[4112:4112+len(function)]=function
     image[4608]=0xc3
+    image[4700:4703]=bytes.fromhex('31c0c3')
     image[9500:9500+len(name)+1]=name+b'\0'
     relocs=[(512,1,0,0),(520,1,1,0),(528,1,2,0)]
     if bad_name:struct.pack_into('<Q',image,9008,0xffffffffffffffff)
     else:relocs.append((9008,0,9500,0))
     names=(f'vkuuLfhnSZI#{scope}','9BcDykPmo1I#p#J','after-throw-like-function')
-    package=(struct.pack('<8s6Q',b'BBPROBE3',len(image),0,3,len(relocs),3,1)+
-             struct.pack('<8Q',4096,module_size,4096,8192,32,4,1,256)+
+    if second_module:
+        magic=b'BBPROBE5'
+        metadata=(struct.pack('<6Q',256,0,0,0,0,2)+
+                  struct.pack('<7Q',4096,16,4096,0,0,0,0)+
+                  struct.pack('<7Q',4112,8176,4700,0,0,0,0)+struct.pack('<Q',1))
+    else:
+        magic=b'BBPROBE3';metadata=struct.pack('<8Q',4096,module_size,4096,8192,32,4,1,256)
+    package=(struct.pack('<8s6Q',magic,len(image),0,3,len(relocs),3,1)+metadata+
              struct.pack('<3Q',0,4112,1)+struct.pack('<9Q',0,4096,5,4096,4096,5,8192,4096,6)+
              b''.join(n.encode().ljust(128,b'\0') for n in names)+
              b''.join(struct.pack('<QQqq',*r) for r in relocs)+image)
@@ -286,6 +293,7 @@ class LoaderTests(unittest.TestCase):
     def test_throw_audit_refuses_wrong_prologue_extent_or_scope(self):
         for kwargs,reason in ((dict(bad_prefix=True),'extent/prologue mismatch'),
                               (dict(module_size=69),'extent/prologue mismatch'),
+                              (dict(second_module=True),'extent/prologue mismatch'),
                               (dict(scope='other#other'),'no bound __cxa_throw target')):
             with self.subTest(kwargs=kwargs):
                 r,_=self.check_throw_fixture(**kwargs)

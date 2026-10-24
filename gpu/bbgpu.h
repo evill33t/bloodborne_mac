@@ -39,9 +39,8 @@ int bbgpu_overlay_captures_input(void);
 /* 1 while the game should be silent: bbport.ini mute_unfocused is on and the window does not
  * have focus. Safe from any thread (the audio ports read it for every buffer). */
 int bbgpu_audio_muted(void);
-/* Button prompts (gpu/shim/bbport_prompts.cpp): what each of the game's key-guide icons shows
- * on keyboard and mouse, one string per icon in bbport_prompt_icons.h's order ("e",
- * "lshift+leftbutton", "w a s d", "mouse", "" for nothing). Draws them; safe from any thread. */
+/* Shared key-guide binding descriptions. The Mac provider currently accepts
+ * these without replacing the game's prompt textures. Safe from any thread. */
 void bbgpu_prompts_configure(const char *const *inputs, int count);
 
 /* Mouse input accumulated by the window thread since the last call; the call resets the

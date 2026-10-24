@@ -1,9 +1,9 @@
-from paths import ROOT
+from paths import ROOT, RUNTIME_DIR
 from pathlib import Path
 import subprocess
 import unittest
 
-EXE = ROOT / 'out/runtime-test'
+EXE = RUNTIME_DIR / 'bb-macos-runtime-tests'
 
 
 @unittest.skipUnless(EXE.exists(), 'run bash build.sh --test first')

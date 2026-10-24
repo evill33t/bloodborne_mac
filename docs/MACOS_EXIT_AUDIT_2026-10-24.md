@@ -38,6 +38,38 @@ an exact owner callback, and the renderer's owner is private. Passing NULL is
 not a wildcard and would misleadingly produce zero. A deliberate read-only
 reporting bridge is needed before this diagnostic can report that information.
 
+## Optional original throw observation
+
+On the native ARM translator, the same flag also installs an existing bbcpu
+observation probe at the loader's exact bound `vkuuLfhnSZI#q#q` import
+(`__cxa_throw`). Installation requires the bound function kind, a complete
+54-byte extent inside the first linked module (libc) and an executable segment, and the observed
+12-byte entry prologue. Ambiguous targets or a mismatch refuse observation
+without affecting the guest. This short prologue guard is not a full binary
+identity check. The current original libc export is RVA `0x60510`, size 54.
+The observer follows the bound target rather than assuming its aggregate
+image RVA or a fixed module placement.
+
+The first 64 observed entries record the exception-object, typeinfo and
+destructor argument addresses, the thread, function RVA and immediate return
+slot with a readable/unavailable indication. The return slot is read through
+the checked macOS memory reader; there is no stack walk. RTTI inspection reads
+the typeinfo header and at most 96 name bytes only inside declared readable
+guest image segments, using checked reads throughout. Names are escaped to
+prevent embedded quotes/control bytes creating misleading log lines; absent,
+outside-image or unreadable metadata is explicitly unavailable, while a name
+longer than the bound is marked truncated. The name remains compiler RTTI
+text, not a demangled class or an interpreted exception payload. Dynamically
+allocated typeinfo outside the image is intentionally not inspected.
+
+The callback preserves host and guest errno, never dereferences the exception
+object, and leaves all guest instructions, arguments and return slots intact.
+It neither replaces `__cxa_throw` nor changes exception propagation. Rosetta
+executes x86 code directly, so this bbcpu observation hook does not apply there.
+The diagnostic's extra timing cost is not suitable for clean FPS comparisons.
+An observed throw does not itself establish an unhandled exception or explain
+why the game requested exit status 1.
+
 ## Validation
 
 The native full game and runtime probe build successfully. All 22 native
@@ -60,3 +92,20 @@ Evidence is under `out/metal-resource-2026-10-24/`:
 
 Native game SHA-256:
 `01a8e6a34842c0df26ddc7c0e1530cb3720c3c9bf901f31ea341f8b085eda0af`.
+
+After adding the throw observer, native game/probe and Rosetta probe builds
+pass, with all 27 loader tests passing on each architecture. Owned synthetic
+functions prove their expected return, object writes, passed arguments and
+errno remain unchanged. The native tests additionally check exact caller RVA,
+escaped/unavailable/truncated names, rejection of mismatched prologue/libc
+extent/scope and of a lookalike binding into a second module, the 64-event
+limit and the disabled flag. Rosetta tests confirm
+the same function behavior with no translator audit rows. No original
+procedure body is embedded in these tracked fixtures.
+
+Evidence: `throw-audit-{native,x86}-{build,loader}.log` under the same output
+directory. No gameplay or GPU test was launched to validate this new observer.
+The initiating gameplay exception remains unknown until an observed replay.
+
+Native game SHA-256 with throw observation support:
+`7a74c58e44e8a57a74760f343563554e19c4931247c988a576cca16389ddce2b`.
